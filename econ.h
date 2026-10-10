@@ -111,5 +111,6 @@ struct PriceRecord {
     float       tariff = 0.0f;
     float       price[GOOD_COUNT] = {};    // mid price; 0 = not traded there
     float       stock[GOOD_COUNT] = {};
+    float       target[GOOD_COUNT] = {};   // the stock it likes to hold: below that it pays over the going rate, above it under
     uint8_t     role[GOOD_COUNT] = {};     // a Role; +128 = contraband there
 };

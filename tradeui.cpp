@@ -86,9 +86,9 @@ public:
 
         std::vector<Row> rows = Rows(g);
         int n = (int)rows.size(), sel = std::min(row, n - 1);
-        int cx[] = { px + 30, px + 360, px + 450, px + 540, px + 640, px + 750, px + 850 };
-        const char *cols[] = { "MARKET", "BUY AT", "SELL AT", "IN STOCK", "DISTANCE", "AS OF", "" };
-        for (int i = 0; i < 6; i++) DrawText(cols[i], cx[i], py + 80, 16, HUD_LABEL);
+        int cx[] = { px + 30, px + 330, px + 410, px + 490, px + 590, px + 680, px + 780, px + 870 };
+        const char *cols[] = { "MARKET", "BUY AT", "SELL AT", "IN STOCK", "WANTS", "DISTANCE", "AS OF", "" };
+        for (int i = 0; i < 7; i++) DrawText(cols[i], cx[i], py + 80, 16, HUD_LABEL);
         if (n == 0) {
             DrawText("No market on record deals in this.", px + 30, py + 116, 18, LIGHTGRAY);
             DrawText("Dock, ask for a market report over the comms, or buy trade data at a station.", px + 30, py + 142, 16, HUD_DIM);
@@ -106,15 +106,17 @@ public:
             DrawText(r.buy > 0.0 ? TextFormat("%.0f", r.buy) : "-", cx[1], y, 18, pc);
             DrawText(TextFormat("%.0f", r.sell), cx[2], y, 18, pc);
             DrawText(TextFormat("%s t", Thousands(r.rec->stock[good]).c_str()), cx[3], y, 18, LIGHTGRAY);
-            DrawText(r.ly < 0.05 ? "here" : TextFormat("%.1f ly", r.ly), cx[4], y, 18, LIGHTGRAY);
+            double wants = r.rec->target[good] - r.rec->stock[good];
+            DrawText(wants >= 0.5 ? TextFormat("%s t", Thousands(wants).c_str()) : "-", cx[4], y, 18, wants >= 0.5 ? DEAR : GRAY);
+            DrawText(r.ly < 0.05 ? "here" : TextFormat("%.1f ly", r.ly), cx[5], y, 18, LIGHTGRAY);
             double age = g.clock - r.rec->at;
-            DrawText(Age(age).c_str(), cx[5], y, 18, age > 2.0 * MARKET_DAY ? ORANGE : LIGHTGRAY);     // (stale: a couple of market days)
+            DrawText(Age(age).c_str(), cx[6], y, 18, age > 2.0 * MARKET_DAY ? ORANGE : LIGHTGRAY);     // (stale: a couple of market days)
             const char *role = (Role)(r.rec->role[good] & 127) == Role::Export ? "makes it" : (Role)(r.rec->role[good] & 127) == Role::Import ? "needs it" : "";
-            DrawText(role, cx[6], y + 2, 14, HUD_DIM);
+            DrawText(role, cx[7], y + 2, 14, HUD_DIM);
         }
         if (top > 0)           DrawText("^ more", px + (int)panel.width - 90, py + 80, 14, HUD_DIM);
         if (top + VISIBLE < n) DrawText("v more", px + (int)panel.width - 90, py + 106 + VISIBLE * 24 - 2, 14, HUD_DIM);
-        DrawText(TextFormat("%d markets on record   -   prices include your standing and their tariffs", (int)g.know.prices.size()),
+        DrawText(TextFormat("%d markets on record   -   prices include your standing and their tariffs; WANTS: tonnes short of what it likes to hold", (int)g.know.prices.size()),
                  px + 20, py + (int)panel.height - 50, 16, HUD_LABEL);
         DrawText("A/D: another good   TAB: buy / sell order   W/S or wheel: pick   ENTER: set course for its system   T / ESC: close",
                  px + 20, py + (int)panel.height - 26, 16, HUD_DIM);

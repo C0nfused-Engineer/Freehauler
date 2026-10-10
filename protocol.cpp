@@ -172,7 +172,7 @@ std::vector<uint8_t> MsgPrices(uint64_t body, const PriceRecord &r)
     w.I32(r.owner); w.I32(r.ruler); w.F32(r.tariff);
     for (int g = 0; g < GOOD_COUNT; g++) {
         w.U8(r.role[g]);
-        if (r.role[g] & 127) { w.F32(r.price[g]); w.F32(r.stock[g]); }      // (only what it deals in)
+        if (r.role[g] & 127) { w.F32(r.price[g]); w.F32(r.stock[g]); w.F32(r.target[g]); }      // (only what it deals in)
     }
     return w.buf;
 }
@@ -183,7 +183,7 @@ bool ReadPrices(Reader &r, uint64_t &body, PriceRecord &out)
     out.owner = r.I32(); out.ruler = r.I32(); out.tariff = r.F32();
     for (int g = 0; g < GOOD_COUNT; g++) {
         out.role[g] = r.U8();
-        if (out.role[g] & 127) { out.price[g] = r.F32(); out.stock[g] = r.F32(); }
+        if (out.role[g] & 127) { out.price[g] = r.F32(); out.stock[g] = r.F32(); out.target[g] = r.F32(); }
     }
     return r.ok;
 }

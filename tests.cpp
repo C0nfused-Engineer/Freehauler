@@ -303,10 +303,17 @@ static void TestTrade()
     if (want < 0 || ex < 0) return;
     g.player.cargo[want] = 30;
     double cr = g.player.credits;
+    double quote1 = mk.SellValue(want, 1.0);
     SellGoods(g, want, 1.0);
     double got = g.player.credits - cr;
     CHECK(got <= mk.SellPrice(want) + 1e-6 && got > 0.97 * mk.SellPrice(want), "sold 1 t %s for %.1f cr (quoted %.1f)", GoodData(want).name, got, mk.SellPrice(want));
-    SellGoods(g, want, 1e30);
+    {
+        Market now = LiveMarket(g, g, g.loaded.bodies[c]);
+        double quote = now.SellValue(want, 29.0), before = g.player.credits;
+        SellGoods(g, want, 1e30);
+        CHECK(fabs(quote1 - got) < 0.01 * got && fabs(g.player.credits - before - quote) < 0.005 * quote && mk.Wants(want) == fmax(0.0, mk.target[want] - mk.stock[want]) && mk.target[want] > 0.0,
+              "the market's estimate for the other 29 t (%.0f cr) is what they fetch (%.0f cr); it likes to hold %.0f t", quote, g.player.credits - before, mk.target[want]);
+    }
     CHECK(g.player.cargo[want] == 0.0 && LiveMarket(g, g, g.loaded.bodies[c]).price[want] < mk.price[want] &&
           fabs(LiveMarket(g, g, g.loaded.bodies[c]).stock[want] - mk.stock[want] - 30.0) < 0.01,
           "sell all empties the hold, into its stock, and the price drops: %.1f to %.1f", mk.price[want], LiveMarket(g, g, g.loaded.bodies[c]).price[want]);
@@ -1166,21 +1173,22 @@ static void TestEconomy()
           base.defs[small].name.c_str(), base.defs[small].scale, base.defs[big].name.c_str(), base.defs[big].scale);
 
     // Every good is made somewhere and wanted somewhere, and prices start out spread but sane
-    int unmade = 0, unwanted = 0, capped = 0, priced = 0;
+    int unmade = 0, unwanted = 0, capped = 0, priced = 0, hungry = 0;
+    for (int i = 0; i < N; i++) if (g.econ.state[i].stock[REF_FOOD] < 0.25f * base.defs[i].target[REF_FOOD]) hungry++;
     for (int gd = 0; gd < GOOD_COUNT; gd++) {
         double out = 0, use = 0;
         for (int i = 0; i < N; i++) {
             out += base.defs[i].out[gd]; use += base.defs[i].use[gd];
             double p = MarketPrice(g, i, gd);
-            if (p > 0.0) { priced++; if (p > 3.9 * GoodData(gd).basePrice || p < 0.31 * GoodData(gd).basePrice) capped++; }
+            if (p > 0.0) { priced++; if (p > 5.9 * GoodData(gd).basePrice || p < 0.31 * GoodData(gd).basePrice) capped++; }
         }
         for (int other = 0; other < GOOD_COUNT; other++)
             for (const Ingredient &in : GoodData(other).recipe) if (in.tonnes > 0.0f && in.good == gd) use += 1.0;
         if (out <= 0.0) unmade++;
         if (use <= 0.0) unwanted++;
     }
-    CHECK(unmade == 0 && unwanted == 0 && capped < priced / 5, "all %d goods are made and wanted somewhere; %.1f%% of %d prices are at a limit",
-          GOOD_COUNT, 100.0 * capped / priced, priced);
+    CHECK(unmade == 0 && unwanted == 0 && capped < priced / 30 && hungry < N / 50, "all %d goods are made and wanted somewhere; %.1f%% of %d prices are at a limit; %d markets are short of food",
+          GOOD_COUNT, 100.0 * capped / priced, priced, hungry);
 
     // Price follows stock
     int home = g.econ.MarketOf(g.loaded.bodies[TradeWorld(g)].id);
@@ -1199,7 +1207,7 @@ static void TestEconomy()
         g.econ.state[home].stock[gd] = 0.0f;
         double none = MarketPrice(g, home, gd);
         CHECK(fabs(at - GoodData(gd).basePrice) < 0.01 && fabs(scarce / at - pow(2.0, 0.6)) < 0.01 && fabs(glut / at - pow(0.5, 0.6)) < 0.01 &&
-              fabs(none / at - 4.0) < 0.01,
+              fabs(none / at - 6.0) < 0.01,
               "food at its target stock costs %.0f; at half that %.0f, at double %.0f, with none left %.0f", at, scarce, glut, none);
 
         // A hold of cargo matters at a small place and not at a big one
@@ -1252,6 +1260,7 @@ static void TestEconomy()
             Economy was = g.econ;
             int hub = base.defs[m].hub;
             g.econ.state[m].stock[gd] = 3.0f * base.defs[m].target[gd];
+            g.econ.state[hub].stock[gd] = base.defs[hub].target[gd];
             double gap0 = MarketPrice(g, hub, gd) / MarketPrice(g, m, gd);
             float s0 = g.econ.state[m].stock[gd];
             for (int i = 0; i < 8; i++) StepEconomy(g, 0.25);
@@ -1381,7 +1390,7 @@ static void TestEconomy()
                 double p = MarketPrice(g, i, k);
                 if (p <= 0.0) continue;
                 counted++;
-                if (p > 3.9 * GoodData(k).basePrice || p < 0.31 * GoodData(k).basePrice) wild++;
+                if (p > 5.9 * GoodData(k).basePrice || p < 0.31 * GoodData(k).basePrice) wild++;
                 if (!(g.econ.state[i].stock[k] >= 0.0f)) wild += 1000000;                // (never negative, never NaN)
             }
         CHECK(wild < counted / 4, "...and the markets hold together: %.1f%% of prices at a limit", 100.0 * wild / counted);
@@ -1426,7 +1435,8 @@ static void TestEconomy()
               "stocks, tariffs, owners, raids, embargoes and shocks round-trip (worst stock off by %.4f%%)", diff * 100.0);
         CHECK(h.news.size() == g.news.size() && (g.news.empty() || h.news.back().text == g.news.back().text) && h.know.prices.size() == g.know.prices.size() &&
               h.know.prices.count(base.defs[home].bodyId) && h.know.prices[base.defs[home].bodyId].name == base.defs[home].name &&
-              h.know.prices[base.defs[home].bodyId].price[REF_FOOD] == g.know.prices[base.defs[home].bodyId].price[REF_FOOD],
+              h.know.prices[base.defs[home].bodyId].price[REF_FOOD] == g.know.prices[base.defs[home].bodyId].price[REF_FOOD] &&
+              h.know.prices[base.defs[home].bodyId].target[REF_FOOD] == base.defs[home].target[REF_FOOD],
               "...and so do the news (%d items) and the captain's price records (%d markets)", (int)h.news.size(), (int)h.know.prices.size());
         remove("test_econ.txt");
     }
@@ -1642,7 +1652,8 @@ static void TestNetwork()
           alice.g.loaded.bodies[c].name.c_str(), GoodData(sg).name);
     Market onRecord;
     bool known = KnownMarket(alice.g, alice.g.loaded.bodies[c], onRecord);
-    CHECK(!alice.g.econ.Built() && known && fabs(onRecord.price[sg] - smk.price[sg]) < 0.02 * smk.price[sg] && onRecord.tariff == smk.tariff,
+    CHECK(!alice.g.econ.Built() && known && fabs(onRecord.price[sg] - smk.price[sg]) < 0.02 * smk.price[sg] && onRecord.tariff == smk.tariff &&
+          onRecord.target[sg] == (float)smk.target[sg] && smk.target[sg] > 0.0,
           "her client runs no economy: the server sent the market's prices (%s at %.0f cr/t)", GoodData(sg).name, onRecord.price[sg]);
     double cr = alice.g.player.credits;
     alice.net.SendCommand({ Command::SellGoods, sg, 1e30 });
@@ -2033,14 +2044,24 @@ std::unique_ptr<ScriptedInput> MakeScript(const std::string &name)
         s->body = [](ScriptedInput &s, InputFrame &in) {
             GameState &g = *s.game;
             int f = s.frame, c = TradeWorld(g);
-            if (f == 10 && c >= 0) { Park(g, c, 0.9); s.snap = true; g.player.credits = 25000; g.player.cargo[ORE_IRON] = 12; g.player.cargo[GOOD_WEAPONS] = 3; }
+            if (f == 10) {                                                    // (a small place that needs robotics: a hold swamps it)
+                EnsureEconomy(g);
+                double least = 1e30;
+                for (int i = 0; i < (int)g.loaded.bodies.size(); i++) {
+                    Market mk = LiveMarket(g, g, g.loaded.bodies[i]);
+                    if (mk.role[GOOD_ROBOTICS] == Role::Import && mk.target[GOOD_ROBOTICS] < least) { least = mk.target[GOOD_ROBOTICS]; c = i; }
+                }
+            }
+            if (f == 10 && c >= 0) { Park(g, c, 0.9); s.snap = true; g.player.credits = 25000; g.player.cargo[GOOD_ROBOTICS] = 40; g.player.cargo[GOOD_WEAPONS] = 3; }
             if (f == 20)  in.Press(KEY_F);
             if (f == 210) in.Press(KEY_THREE);
-            if (f == 216) in.Press(KEY_DOWN), in.Press(KEY_DOWN);
-            if (f == 220) in.Press(KEY_D);
-            if (f == 230) s.screenshot = "econ_market.png";
-            if (f == 234) in.Press(KEY_B);                                    // trade data
-            if (f == 238) in.Press(KEY_ESCAPE);
+            static int down = 0;                                              // down the list to the robotics
+            if (f == 212) { Market mk; down = 0; if (g.flight.nearBody >= 0 && KnownMarket(g, g.loaded.bodies[g.flight.nearBody], mk)) { std::vector<int> rows = mk.Listed();
+                            for (int i = 0; i < (int)rows.size(); i++) if (rows[i] == GOOD_ROBOTICS) down = i; } }
+            if (f >= 216 && f < 216 + down) in.Press(KEY_DOWN);
+            if (f == 240) s.screenshot = "econ_market.png";
+            if (f == 242) in.Press(KEY_B);                                    // trade data
+            if (f == 244) in.Press(KEY_ESCAPE);
             if (f == 246) RunEconomy(g, 9.0);                                 // some days go by
             if (f == 250) in.Press(KEY_T);
             if (f == 260) s.screenshot = "econ_tradelog.png";

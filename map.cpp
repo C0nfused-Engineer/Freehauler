@@ -234,7 +234,7 @@ public:
             std::string dist = FindTarget(g, r.target, rel) ? FormatPlanetDist(Len(rel)) : "";
             int dw = MeasureText(dist.c_str(), 14);
             DrawText(dist.c_str(), right - dw, y + 3, 14, LIGHTGRAY);
-            int wx = std::max(ix + MeasureText(r.name.c_str(), 18) + 14, x + 250);
+            int wx = std::max(ix + MeasureText(r.name.c_str(), 18) + 14, x + 230);
             std::string what = r.what;
             while (what.size() > 4 && wx + MeasureText(what.c_str(), 14) > right - dw - 10) what = what.substr(0, what.size() - 4) + "...";
             DrawText(what.c_str(), wx, y + 3, 14, r.inhabited ? HUD : r.known ? HUD_LABEL : UNKNOWN);
@@ -256,7 +256,7 @@ private:
         float sw = (float)GetScreenWidth(), sh = (float)GetScreenHeight();
         Layout L;
         L.panel = { 30, 30, sw - 60, sh - 60 };
-        float listW = fminf(520.0f, L.panel.width * 0.45f);
+        float listW = fminf(680.0f, L.panel.width * 0.5f);
         float size  = fminf(L.panel.width - listW - 70.0f, L.panel.height - 130.0f);
         L.map  = { L.panel.x + 24, L.panel.y + 76, size, size };
         L.list = { L.panel.x + L.panel.width - listW - 16, L.panel.y + 80, listW, L.panel.height - 130.0f };

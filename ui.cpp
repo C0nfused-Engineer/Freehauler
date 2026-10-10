@@ -125,7 +125,7 @@ public:
         const Player &p = g.player;
         const FactionSet &fs = g.systems.factions;
         int sw = GetScreenWidth(), sh = GetScreenHeight();
-        int pw = 800, ph = 168 + 24 * VISIBLE + 76;
+        int pw = 800, ph = 168 + 24 * VISIBLE + 100;
         int px = sw / 2 - pw / 2, py = sh / 2 - ph / 2;
         DrawRectangle(px, py, pw, ph, Fade(BLACK, 0.9f));
         DrawRectangleLines(px, py, pw, ph, HUD);
@@ -148,11 +148,11 @@ public:
         DrawText(TextFormat("Makes: %s", ex.empty() ? "-" : ex.c_str()), px + 18, py + 82, 14, Color{ 140, 220, 140, 255 });
         DrawText(TextFormat("Needs: %s", im.empty() ? "-" : im.c_str()), px + 18, py + 100, 14, Color{ 240, 170, 110, 255 });
         DrawLine(px + 18, py + 120, px + pw - 18, py + 120, HUD_DIM);
-        int cx[] = { px + 30, px + 250, px + 350, px + 440, px + 530, px + 630 };
+        int cx[] = { px + 30, px + 240, px + 340, px + 430, px + 515, px + 595, px + 675 };
         int hy = py + 128;
         DrawText("ITEM", cx[0], hy, 16, HUD_LABEL);  DrawText("IN STOCK", cx[1], hy, 16, HUD_LABEL);
-        DrawText("HOLD", cx[2], hy, 16, HUD_LABEL);  DrawText("BUY", cx[3], hy, 16, HUD_LABEL);
-        DrawText("SELL", cx[4], hy, 16, HUD_LABEL);
+        DrawText("WANTS", cx[2], hy, 16, HUD_LABEL); DrawText("HOLD", cx[3], hy, 16, HUD_LABEL);
+        DrawText("BUY", cx[4], hy, 16, HUD_LABEL);   DrawText("SELL", cx[5], hy, 16, HUD_LABEL);
         const Color CHEAP = { 140, 220, 140, 255 }, DEAR = { 240, 170, 110, 255 }, OFF = { 120, 120, 120, 255 };
         for (int i = 0; i < VISIBLE && first + i < n; i++) {
             int r = first + i, gd = rows[r];
@@ -166,29 +166,40 @@ public:
                 Color pc = !traded ? OFF : mk.price[gd] < 0.8 * info.basePrice ? CHEAP : mk.price[gd] > 1.3 * info.basePrice ? DEAR : LIGHTGRAY;
                 DrawText(info.name, cx[0], ry, 18, c);
                 DrawText(traded ? TextFormat("%s t", Thousands(mk.stock[gd]).c_str()) : "-", cx[1], ry, 18, traded ? LIGHTGRAY : OFF);
-                DrawText(have ? TextFormat("%.1f t", p.cargo[gd]) : "-", cx[2], ry, 18, c);
-                DrawText(mk.Sells(gd) ? TextFormat("%.0f", mk.BuyPrice(gd)) : "-", cx[3], ry, 18, pc);
-                DrawText(mk.Buys(gd) ? TextFormat("%.0f", mk.SellPrice(gd)) : "-", cx[4], ry, 18, pc);
+                // How much more it would take before it stops paying over the going rate
+                DrawText(mk.Wants(gd) >= 0.5 ? TextFormat("%s t", Thousands(mk.Wants(gd)).c_str()) : "-", cx[2], ry, 18, mk.Wants(gd) >= 0.5 ? DEAR : OFF);
+                DrawText(have ? TextFormat("%.1f t", p.cargo[gd]) : "-", cx[3], ry, 18, c);
+                DrawText(mk.Sells(gd) ? TextFormat("%.0f", mk.BuyPrice(gd)) : "-", cx[4], ry, 18, pc);
+                DrawText(mk.Buys(gd) ? TextFormat("%.0f", mk.SellPrice(gd)) : "-", cx[5], ry, 18, pc);
                 const char *tag = "not traded"; Color tc = { 200, 90, 90, 255 };
                 if (mk.banned[gd])                      { tag = "CONTRABAND"; tc = RED; }
                 else if (mk.role[gd] == Role::Export)   { tag = "made here"; tc = CHEAP; }
                 else if (mk.role[gd] == Role::Import)   { tag = "needed"; tc = DEAR; }
                 else if (mk.role[gd] == Role::Trade)    { tag = "traded"; tc = HUD_DIM; }
-                DrawText(tag, cx[5], ry, 16, tc);
+                DrawText(tag, cx[6], ry, 16, tc);
             } else {
                 DrawText("Fuel, into the tank", cx[0], ry, 18, WHITE);
-                DrawText(TextFormat("%.1f/%.0f", p.fuel, FUEL_CAPACITY), cx[2], ry, 18, WHITE);
-                DrawText(mk.fuelPrice > 0.0 ? TextFormat("%.0f", mk.fuelPrice) : "none", cx[3], ry, 18, mk.fuelPrice > 0.0 ? WHITE : OFF);
-                if (mk.fuelPrice > 0.0) DrawText(TextFormat("fill: about %s", Thousands((FUEL_CAPACITY - p.fuel) * mk.fuelPrice).c_str()), cx[5] - 60, ry, 16, HUD_DIM);
+                DrawText(TextFormat("%.1f/%.0f", p.fuel, FUEL_CAPACITY), cx[3], ry, 18, WHITE);
+                DrawText(mk.fuelPrice > 0.0 ? TextFormat("%.0f", mk.fuelPrice) : "none", cx[4], ry, 18, mk.fuelPrice > 0.0 ? WHITE : OFF);
+                if (mk.fuelPrice > 0.0) DrawText(TextFormat("fill: about %s", Thousands((FUEL_CAPACITY - p.fuel) * mk.fuelPrice).c_str()), cx[6] - 30, ry, 16, HUD_DIM);
             }
         }
         if (first > 0)             DrawText("^ more", px + pw - 90, py + 128, 14, HUD_DIM);
         if (first + VISIBLE < n)   DrawText("v more", px + pw - 90, py + 154 + 24 * VISIBLE - 2, 14, HUD_DIM);
         int fy = py + ph - 62;
-        DrawLine(px + 18, fy - 8, px + pw - 18, fy - 8, HUD_DIM);
+        DrawLine(px + 18, fy - 38, px + pw - 18, fy - 38, HUD_DIM);
         DrawText(TextFormat("CREDITS  %s cr", Thousands(p.credits).c_str()), px + 30, fy, 20, HUD);
         DrawText(TextFormat("HOLD  %.1f / %.0f t", p.CargoTotal(), CARGO_CAPACITY), px + 350, fy, 20, HUD);
         DrawText(TextFormat("B: trade data, %.0f cr", TRADE_DATA_COST), px + 590, fy + 2, 16, HUD_LABEL);
+        {   // What the hold of the picked good is really worth here: the price falls as you sell
+            int pick = rows[std::min(row, n - 1)];
+            if (pick >= 0 && p.cargo[pick] > 0.05 && mk.Buys(pick)) {
+                double all = mk.SellValue(pick, p.cargo[pick]), flat = p.cargo[pick] * mk.SellPrice(pick);
+                DrawText(TextFormat("Your %.1f t of %s would fetch about %s cr (%.0f cr/t)%s", p.cargo[pick], GoodData(pick).name, Thousands(all).c_str(),
+                                    all / p.cargo[pick], all < 0.9 * flat ? "  -  more than it wants" : ""),
+                         px + 30, fy - 32, 16, all < 0.9 * flat ? ORANGE : HUD_LABEL);
+            }
+        }
         DrawText(rows[std::min(row, n - 1)] >= 0
                      ? "W/S select   D buy 1 t   A sell 1 t   SHIFT: max   SPACE sell all   F / ESC close"
                      : "W/S select   D buy 1 t   SHIFT+D / SPACE fill tank   F / ESC close",

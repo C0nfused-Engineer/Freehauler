@@ -39,6 +39,7 @@ static void Industry(MarketDef &d, const Body &b, const Body *ground, const Fact
         make(GOOD_CONSUMER, 0.14); make(GOOD_LUXURY, 0.02); make(GOOD_SHIP_COMPONENTS, 0.03); make(GOOD_MACHINERY, 0.05);
         make(GOOD_WEAPONS, 0.015); make(GOOD_REACTOR_CORES, 0.015); make(REF_CHEMICALS, 0.05); make(REF_FERTILIZER, 0.04);
         make(REF_WATER, 0.06);
+        make(RAW_GRAIN, 0.18); make(RAW_LIVESTOCK, 0.045); make(REF_FOOD, 0.20);     // (it feeds itself, mostly)
         need(GOOD_LUXURY, 0.006);
         break;
     case Settlement::SettledWorld:
@@ -157,6 +158,12 @@ static std::shared_ptr<const EconBase> BuildBase(const Galaxy &gal)
         hubs.push_back(hub);
         for (int i = first; i < (int)base->defs.size(); i++) { base->defs[i].hub = hub; base->defs[hub].traffic += base->defs[i].scale; }
     }
+    // What the law bans, lawful places neither make nor use (before the sums below: it isn't supply)
+    for (MarketDef &d : base->defs) {
+        const Faction *owner = fs.Get(d.owner), *ruler = fs.Get(d.ruler);
+        if (ruler && owner && owner->kind != FactionKind::Clan)
+            for (int g : ruler->contraband) { d.out[g] = d.use[g] = 0.0f; d.banned[g] = true; }
+    }
     // Human space as a whole makes a little more of everything than it uses (the shares above only say who
     // makes what): scale each good's output to 125% of the demand for it. Finished goods first, since
     // how much of them is made sets how much of their inputs is wanted.
@@ -200,11 +207,18 @@ static std::shared_ptr<const EconBase> BuildBase(const Galaxy &gal)
 // ---------------------------------------------------------------------------
 // Prices and the daily round
 // ---------------------------------------------------------------------------
+// A deal moves the price as it goes: it's done in slices, each at the price the last one left
+const int SLICES = 10;
+
+// Price against stock: at its target a good costs its base price; a glut can't push it under PRICE_FLOOR
+// of that, and a market with none left pays PRICE_CAP times it
+const double PRICE_FLOOR = 0.3, PRICE_CAP = 6.0;
+
 static double PriceOf(const MarketDef &d, const MarketState &s, int g, double pricing = 1.0)
 {
     if (d.target[g] <= 0.0f) return 0.0;
     double have = fmax((double)s.stock[g], 0.02 * d.target[g]) / d.target[g];
-    return GoodData(g).basePrice * ClampD(pow(have, -0.6), 0.3, 4.0) * pricing;
+    return GoodData(g).basePrice * ClampD(pow(have, -0.6), PRICE_FLOOR, PRICE_CAP) * pricing;
 }
 
 static double Pricing(const Economy &e, int faction, double clock)
@@ -303,7 +317,8 @@ static void RunDays(Economy &e, const EconBase &base, const FactionSet &fs, doub
         bool borders = a.ruler != b.ruler && a.ruler >= 0 && b.ruler >= 0;
         if (borders && (e.embargoUntil[a.ruler * F + b.ruler] > clock || e.embargoUntil[b.ruler * F + a.ruler] > clock)) continue;
         double raids = fmax(RaidAt(e, fs, a.ly), RaidAt(e, fs, b.ly));
-        double capacity = fmin(a.traffic, b.traffic) * 1.5 / (1.0 + l.ly / 10.0) * (1.0 - 0.85 * raids) * days;
+        // (a big port sends its own ships to a small one: the lane carries more than the small one could alone)
+        double capacity = sqrt((double)a.traffic * b.traffic) * 1.5 / (1.0 + l.ly / 10.0) * (1.0 - 0.85 * raids) * days;
         double intoB = a.ruler != b.ruler && b.ruler >= 0 ? e.tariff[b.ruler] : 0.0, intoA = a.ruler != b.ruler && a.ruler >= 0 ? e.tariff[a.ruler] : 0.0;
         Trade(a, e.state[l.a], b, e.state[l.b], capacity, intoB, intoA, row(l.a), row(l.b));
     }
@@ -342,7 +357,8 @@ static void SettleStocks(EconBase &base, const FactionSet &fs)
 {
     Economy e;
     InitState(e, base, fs);
-    for (int step = 0; step < 160; step++) RunDays(e, base, fs, 0.25, 0.0);
+    for (int step = 0; step < 120; step++) RunDays(e, base, fs, 0.25, 0.0);
+    for (int step = 0; step < 120; step++) RunDays(e, base, fs, 0.05, 0.0);       // (...then at something like the pace it will really run at)
     base.stock0.resize(base.defs.size() * GOOD_COUNT);
     for (size_t i = 0; i < base.defs.size(); i++)
         for (int g = 0; g < GOOD_COUNT; g++) base.stock0[i * GOOD_COUNT + g] = e.state[i].stock[g];
@@ -562,6 +578,17 @@ double MarketPrice(const World &w, int market, int good)
 // ---------------------------------------------------------------------------
 // Markets as captains see them
 // ---------------------------------------------------------------------------
+// The same sum a sale does (SellGoods), from what's on record
+double Market::SellValue(int g, double qty) const
+{
+    if (!Buys(g) || qty <= 0.0) return 0.0;
+    if (target[g] <= 0.0 || price[g] <= 0.0) return qty * SellPrice(g);
+    auto curve = [&](double have) { return ClampD(pow(fmax(have, 0.02 * target[g]) / target[g], -0.6), PRICE_FLOOR, PRICE_CAP); };
+    double scale = price[g] / curve(stock[g]) * 0.96 * (1.0 + edge) * (1.0 - tariff), total = 0.0;
+    for (int s = 0; s < SLICES; s++) total += qty / SLICES * scale * curve(stock[g] + s * qty / SLICES);
+    return total;
+}
+
 std::vector<int> Market::Listed() const
 {
     std::vector<int> out;
@@ -602,6 +629,7 @@ static Market LiveAt(const World &w, const Captain &c, int i)
         m.banned[g] = d.banned[g];
         m.price[g] = MarketPrice(w, i, g);
         m.stock[g] = s.stock[g];
+        m.target[g] = d.target[g];
     }
     m.owner = s.owner; m.ruler = d.ruler;
     m.tariff = d.ruler >= 0 ? w.econ.tariff[d.ruler] : 0.0;
@@ -623,6 +651,7 @@ bool KnownMarket(const Captain &c, const Body &b, Market &m, double *at)
         m.banned[g] = (r.role[g] & 128) != 0;
         m.price[g] = r.price[g];
         m.stock[g] = r.stock[g];
+        m.target[g] = r.target[g];
     }
     m.owner = r.owner; m.ruler = r.ruler; m.tariff = r.tariff;
     m.edge = Edge(c, r.owner);
@@ -641,6 +670,7 @@ static void RecordAt(World &w, Captain &c, int i)
     for (int g = 0; g < GOOD_COUNT; g++) {
         r.price[g] = (float)m.price[g];
         r.stock[g] = (float)m.stock[g];
+        r.target[g] = (float)m.target[g];
         r.role[g]  = (uint8_t)((int)m.role[g] | (m.banned[g] ? 128 : 0));
     }
 }
@@ -686,8 +716,6 @@ static int Docked(World &w, Captain &c, const Body *&b)
     return i;
 }
 
-// A deal moves the price as it goes: it's done in slices, each at the price the last one left
-const int SLICES = 10;
 
 bool SellGoods(World &w, Captain &c, int good, double qty)
 {
@@ -887,13 +915,28 @@ void WritePrices(const Captain &c, std::string &out)
     for (const auto &kv : c.know.prices) {
         const PriceRecord &r = kv.second;
         std::string line = TextFormat("prices %llu %.17g %lld %d %d %.6g", (unsigned long long)kv.first, r.at, (long long)r.sys, r.owner, r.ruler, r.tariff);
-        for (int g = 0; g < GOOD_COUNT; g++) line += TextFormat(" %d %.6g %.6g", (int)r.role[g], r.price[g], r.stock[g]);
+        for (int g = 0; g < GOOD_COUNT; g++) line += TextFormat(" %d %.9g %.9g", (int)r.role[g], r.price[g], r.stock[g]);
         out += line + " | " + r.name + "\n";
+        line = TextFormat("wants %llu", (unsigned long long)kv.first);
+        for (int g = 0; g < GOOD_COUNT; g++) line += TextFormat(" %.9g", r.target[g]);
+        out += line + "\n";
     }
 }
 
 bool ReadPriceLine(Captain &c, const char *key, const char *rest)
 {
+    if (!strcmp(key, "wants")) {                                   // (follows its 'prices' line)
+        unsigned long long id; int used = 0;
+        if (sscanf(rest, "%llu%n", &id, &used) != 1 || !c.know.prices.count(id)) return true;
+        PriceRecord &r = c.know.prices[id];
+        const char *at = rest + used;
+        for (int g = 0; g < GOOD_COUNT; g++) {
+            int n = 0;
+            if (sscanf(at, "%f%n", &r.target[g], &n) != 1) break;
+            at += n;
+        }
+        return true;
+    }
     if (strcmp(key, "prices")) return false;
     PriceRecord r;
     unsigned long long id; long long sys; int used = 0;

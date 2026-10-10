@@ -30,7 +30,7 @@
 #include <vector>
 
 const uint32_t PROTOCOL_MAGIC   = 0x31504D53;   // "SMP1"
-const uint16_t PROTOCOL_VERSION = 8;            // bump when anything below changes (8: ship names, the economy)
+const uint16_t PROTOCOL_VERSION = 9;            // bump when anything below changes (9: what markets want)
 const uint16_t DEFAULT_PORT     = 23500;
 const int      MAX_PACKET       = 1400;         // stays under a typical 1500-byte MTU
 const int      MAX_MESSAGE      = 1100;         // biggest reliable message

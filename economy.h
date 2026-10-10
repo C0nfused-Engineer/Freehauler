@@ -6,7 +6,7 @@
 //   trades    with its system's hub, and hubs with the hubs of nearby systems: goods flow
 //             from where they're cheap to where they're dear, in proportion to the gap
 // Price follows stock: at its target stock a good costs its base price, half as much stock
-// is about half again dearer, and so on (within limits).
+// is about half again dearer, and so on, up to six times the base price where there's none left.
 //
 // A captain's hold is a small thing to a core world and a large one to an outpost:
 // buying raises the price and selling lowers it as the deal goes through.
@@ -27,6 +27,7 @@ struct Market {
     Role   role[GOOD_COUNT] = {};
     double price[GOOD_COUNT] = {};       // mid price, credits per tonne
     double stock[GOOD_COUNT] = {};       // tonnes on hand
+    double target[GOOD_COUNT] = {};      // tonnes it likes to have on hand (0: not known)
     bool   banned[GOOD_COUNT] = {};      // contraband here
     double fuelPrice = 0.0;              // what a tonne of fuel costs you here (0: none to be had)
     double tariff = 0.0;                 // share taken from what you're paid
@@ -37,6 +38,8 @@ struct Market {
     bool   Buys(int g) const  { return role[g] != Role::None && !banned[g]; }                      // you can sell it here
     double BuyPrice(int g) const  { return price[g] * 1.04 * (1.0 - edge); }                       // what you pay
     double SellPrice(int g) const { return price[g] * 0.96 * (1.0 + edge) * (1.0 - tariff); }      // what you get
+    double Wants(int g) const { return Buys(g) && target[g] > stock[g] ? target[g] - stock[g] : 0.0; }   // tonnes short of what it likes to hold
+    double SellValue(int g, double qty) const;   // what selling 'qty' tonnes here would fetch, the price falling as it goes
     std::vector<int> Listed() const;     // the goods traded here: exports, imports, then the rest
 };
 
