@@ -9,18 +9,23 @@
 #include <algorithm>
 
 const float ROLL_RATE = 90.0f;              // degrees per second
+const float YAW_RATE  = 45.0f;              // (rudder; the mouse does the real aiming)
 
-Controls ReadFlightControls(const InputFrame &in, float frameDt, const Settings &settings)
+Controls ReadFlightControls(const InputFrame &in, float frameDt, const Settings &settings, bool &throttleCut)
 {
     Controls c;
-    c.forward = (float)in.Down(KEY_W) - (float)in.Down(KEY_S);
-    c.strafe  = (float)in.Down(KEY_D) - (float)in.Down(KEY_A);
+    // W and S together cut the throttle (all stop). Until both are let go they do nothing
+    // more, so the one released last doesn't nudge the throttle off zero again.
+    bool w = in.Down(KEY_W), s = in.Down(KEY_S);
+    c.allStop = w && s && !throttleCut;
+    if (w && s) throttleCut = true;
+    else if (!w && !s) throttleCut = false;
+    c.throttle = throttleCut ? 0.0f : (float)w - (float)s;
     c.roll    = ((float)in.Down(KEY_Q) - (float)in.Down(KEY_E)) * ROLL_RATE * frameDt;
-    c.yaw     = -in.mouseDelta.x * settings.mouseSens;
+    c.yaw     = -in.mouseDelta.x * settings.mouseSens + ((float)in.Down(KEY_A) - (float)in.Down(KEY_D)) * YAW_RATE * frameDt;
     c.pitch   = -in.mouseDelta.y * settings.mouseSens * (settings.invertY ? -1.0f : 1.0f);
     c.hyper   = in.Down(KEY_LEFT_SHIFT) || in.Down(KEY_RIGHT_SHIFT);
     c.fire    = in.MouseDown(MOUSE_BUTTON_LEFT);
-    c.allStop         = in.Pressed(KEY_X);
     c.toggleDampeners = in.Pressed(KEY_CAPS_LOCK);
     return c;
 }
@@ -85,6 +90,7 @@ public:
         if (in.Pressed(KEY_F) || in.Pressed(KEY_ESCAPE)) closed = true;
         if (in.Pressed(KEY_UP)   || in.Pressed(KEY_W)) row = (row + n - 1) % n;
         if (in.Pressed(KEY_DOWN) || in.Pressed(KEY_S)) row = (row + 1) % n;
+        row = std::max(0, std::min(n - 1, row + in.WheelStep()));      // (the wheel stops at the ends)
         if (in.Pressed(KEY_PAGE_UP))   row = std::max(0, row - VISIBLE);
         if (in.Pressed(KEY_PAGE_DOWN)) row = std::min(n - 1, row + VISIBLE);
         row = std::min(row, n - 1);
@@ -196,6 +202,7 @@ public:
             if (n > 0) {
                 if (in.Pressed(KEY_UP))   row = (row + n - 1) % n;
                 if (in.Pressed(KEY_DOWN)) row = (row + 1) % n;
+                row = std::max(0, std::min(n - 1, row + in.WheelStep()));
                 row = std::min(row, n - 1);
                 if (in.Pressed(KEY_ENTER) || in.Pressed(KEY_KP_ENTER)) ui.Do(g, { Command::Hail, list[row].body });
             }
@@ -335,6 +342,7 @@ void Ui::Load(GameState &g, const std::string &path)
     if (LoadGame(g, path.c_str())) {
         CloseAll();
         gameReloaded = true;
+        SetCourse({});
         g.Emit(EventType::GameLoaded, "Loaded \"" + file + "\"");
     } else {
         Say("Could not load " + file);
@@ -369,6 +377,10 @@ void Ui::HandleInput(InputFrame &in, GameState &g)
         else     Open(MakePauseMenu(online));
     }
     if (in.Pressed(KEY_O)) { settings.showOrbits = !settings.showOrbits; SaveSettings(settings); }
+    if (in.Pressed(KEY_M)) {                               // (an open map takes M itself)
+        if (g.loaded.index >= 0 && g.flight.drive.inField) Open(MakeSystemMap());
+        else                                               Open(MakeSectorMap());
+    }
     if (in.Pressed(KEY_C)) {
         if (Has(WindowKind::Comms)) Close(WindowKind::Comms);
         else                        Open(std::make_unique<CommsWindow>());

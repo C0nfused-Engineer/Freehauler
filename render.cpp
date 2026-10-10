@@ -49,62 +49,189 @@ static Mesh GenShipMesh()
     return mesh;
 }
 
-// A station: a spinning wheel on spokes around a hub, with a docking spindle.
-// Unit radius, spin axis along +Y.
-static Mesh GenStationMesh()
-{
-    std::vector<Vector3> tri;                                 // 3 vertices per triangle
-    std::vector<Vector3> nrm;
-    auto quad = [&](Vector3 a, Vector3 b, Vector3 c, Vector3 d, Vector3 out) {
+// ---------------------------------------------------------------------------
+// Station models. Each is built from flat faces (so every edge shows), fits
+// inside a unit sphere, and has its axis along +Y.
+// ---------------------------------------------------------------------------
+struct MeshBuilder {
+    std::vector<Vector3> tri, nrm;                            // 3 vertices per triangle
+
+    void Tri(Vector3 a, Vector3 b, Vector3 c, Vector3 out)
+    {
+        Vector3 n = Vector3Normalize(Vector3CrossProduct(Vector3Subtract(b, a), Vector3Subtract(c, a)));
+        if (Vector3DotProduct(n, out) < 0.0f) { std::swap(b, c); n = Vector3Negate(n); }
+        for (Vector3 v : { a, b, c }) { tri.push_back(v); nrm.push_back(n); }
+    }
+    void Quad(Vector3 a, Vector3 b, Vector3 c, Vector3 d, Vector3 out)
+    {
         Vector3 n = Vector3Normalize(Vector3CrossProduct(Vector3Subtract(b, a), Vector3Subtract(c, a)));
         if (Vector3DotProduct(n, out) < 0.0f) { std::swap(b, d); n = Vector3Negate(n); }
         for (Vector3 v : { a, b, c, a, c, d }) { tri.push_back(v); nrm.push_back(n); }
-    };
+    }
     // Box from its center and three half-axes
-    auto box = [&](Vector3 c, Vector3 e1, Vector3 e2, Vector3 e3) {
+    void Box(Vector3 c, Vector3 e1, Vector3 e2, Vector3 e3)
+    {
         Vector3 axes[3] = { e1, e2, e3 };
         for (int k = 0; k < 3; k++)
             for (int sgn = -1; sgn <= 1; sgn += 2) {
                 Vector3 n = Vector3Scale(axes[k], (float)sgn), u = axes[(k + 1) % 3], v = axes[(k + 2) % 3];
                 Vector3 f = Vector3Add(c, n);
-                quad(Vector3Subtract(Vector3Subtract(f, u), v), Vector3Subtract(Vector3Add(f, u), v),
+                Quad(Vector3Subtract(Vector3Subtract(f, u), v), Vector3Subtract(Vector3Add(f, u), v),
                      Vector3Add(Vector3Add(f, u), v), Vector3Add(Vector3Subtract(f, u), v), n);
             }
-    };
-    // The wheel: a box-section ring
-    const int SEG = 12;
-    const float RO = 1.0f, RI = 0.8f, H = 0.12f;
-    for (int i = 0; i < SEG; i++) {
-        float a0 = 2.0f * PI * i / SEG, a1 = 2.0f * PI * (i + 1) / SEG, am = 0.5f * (a0 + a1);
-        Vector3 d0 = { cosf(a0), 0, sinf(a0) }, d1 = { cosf(a1), 0, sinf(a1) }, dm = { cosf(am), 0, sinf(am) };
-        auto at = [](Vector3 d, float r, float y) { return Vector3{ d.x * r, y, d.z * r }; };
-        quad(at(d0, RO, -H), at(d1, RO, -H), at(d1, RO, H), at(d0, RO, H), dm);                  // outer
-        quad(at(d0, RI, -H), at(d1, RI, -H), at(d1, RI, H), at(d0, RI, H), Vector3Negate(dm));   // inner
-        quad(at(d0, RI, H), at(d1, RI, H), at(d1, RO, H), at(d0, RO, H), { 0, 1, 0 });           // top
-        quad(at(d0, RI, -H), at(d1, RI, -H), at(d1, RO, -H), at(d0, RO, -H), { 0, -1, 0 });      // bottom
     }
-    // Hub, spokes, spindle
-    box({ 0, 0, 0 }, { 0.22f, 0, 0 }, { 0, 0.28f, 0 }, { 0, 0, 0.22f });
-    for (int k = 0; k < 3; k++) {
-        float a = 2.0f * PI * k / 3.0f + PI / SEG;            // between the wheel's corners
-        Vector3 d = { cosf(a), 0, sinf(a) }, side = { -sinf(a), 0, cosf(a) };
-        box(Vector3Scale(d, 0.51f), Vector3Scale(d, 0.29f), { 0, 0.04f, 0 }, Vector3Scale(side, 0.04f));
+    void Box(Vector3 c, float hx, float hy, float hz) { Box(c, { hx, 0, 0 }, { 0, hy, 0 }, { 0, 0, hz }); }
+    // A shape turned about a vertical axis through 'c': 'profile' is (radius, height) pairs
+    // running from the top down the outside (start and end on the axis to close it)
+    void Lathe(Vector3 c, const std::vector<Vector2> &profile, int seg)
+    {
+        for (int i = 0; i < seg; i++) {
+            float a0 = 2.0f * PI * i / seg, a1 = 2.0f * PI * (i + 1) / seg, am = 0.5f * (a0 + a1);
+            Vector3 d0 = { cosf(a0), 0, sinf(a0) }, d1 = { cosf(a1), 0, sinf(a1) }, dm = { cosf(am), 0, sinf(am) };
+            auto at = [&](Vector3 d, Vector2 p) { return Vector3{ c.x + d.x * p.x, c.y + p.y, c.z + d.z * p.x }; };
+            for (size_t k = 0; k + 1 < profile.size(); k++) {
+                Vector2 p0 = profile[k], p1 = profile[k + 1];
+                if (p0.x <= 0.0f && p1.x <= 0.0f) continue;
+                Vector2 t = Vector2Subtract(p1, p0);
+                Vector3 out = { dm.x * -t.y, t.x, dm.z * -t.y };
+                if (p0.x <= 0.0f)      Tri(at(d0, p0), at(d0, p1), at(d1, p1), out);
+                else if (p1.x <= 0.0f) Tri(at(d0, p0), at(d1, p0), at(d0, p1), out);
+                else                   Quad(at(d0, p0), at(d1, p0), at(d1, p1), at(d0, p1), out);
+            }
+        }
     }
-    box({ 0, 0.45f, 0 }, { 0.07f, 0, 0 }, { 0, 0.17f, 0 }, { 0, 0, 0.07f });
-    box({ 0, 0.66f, 0 }, { 0.14f, 0, 0 }, { 0, 0.04f, 0 }, { 0, 0, 0.14f });   // docking ring
-    box({ 0, -0.36f, 0 }, { 0.12f, 0, 0 }, { 0, 0.08f, 0 }, { 0, 0, 0.12f });  // reactor
+    Mesh Build() const
+    {
+        Mesh mesh = {};
+        mesh.vertexCount   = (int)tri.size();
+        mesh.triangleCount = mesh.vertexCount / 3;
+        mesh.vertices = (float *)MemAlloc(mesh.vertexCount * 3 * sizeof(float));
+        mesh.normals  = (float *)MemAlloc(mesh.vertexCount * 3 * sizeof(float));
+        for (int i = 0; i < mesh.vertexCount; i++) {
+            mesh.vertices[3 * i] = tri[i].x; mesh.vertices[3 * i + 1] = tri[i].y; mesh.vertices[3 * i + 2] = tri[i].z;
+            mesh.normals[3 * i]  = nrm[i].x; mesh.normals[3 * i + 1]  = nrm[i].y; mesh.normals[3 * i + 2]  = nrm[i].z;
+        }
+        UploadMesh(&mesh, false);
+        return mesh;
+    }
+};
 
-    Mesh mesh = {};
-    mesh.vertexCount   = (int)tri.size();
-    mesh.triangleCount = mesh.vertexCount / 3;
-    mesh.vertices = (float *)MemAlloc(mesh.vertexCount * 3 * sizeof(float));
-    mesh.normals  = (float *)MemAlloc(mesh.vertexCount * 3 * sizeof(float));
-    for (int i = 0; i < mesh.vertexCount; i++) {
-        mesh.vertices[3 * i] = tri[i].x; mesh.vertices[3 * i + 1] = tri[i].y; mesh.vertices[3 * i + 2] = tri[i].z;
-        mesh.normals[3 * i]  = nrm[i].x; mesh.normals[3 * i + 1]  = nrm[i].y; mesh.normals[3 * i + 2]  = nrm[i].z;
+// The everyday station: a spinning wheel on spokes around a hub, with a docking spindle
+static Mesh GenStationMesh()
+{
+    MeshBuilder m;
+    // The wheel: a box-section ring
+    m.Lathe({ 0, 0, 0 }, { { 0.8f, 0.12f }, { 1.0f, 0.12f }, { 1.0f, -0.12f }, { 0.8f, -0.12f }, { 0.8f, 0.12f } }, 12);
+    // Hub, spokes, spindle
+    m.Box({ 0, 0, 0 }, 0.22f, 0.28f, 0.22f);
+    for (int k = 0; k < 3; k++) {
+        float a = 2.0f * PI * k / 3.0f + PI / 12;             // between the wheel's corners
+        Vector3 d = { cosf(a), 0, sinf(a) }, side = { -sinf(a), 0, cosf(a) };
+        m.Box(Vector3Scale(d, 0.51f), Vector3Scale(d, 0.29f), { 0, 0.04f, 0 }, Vector3Scale(side, 0.04f));
     }
-    UploadMesh(&mesh, false);
-    return mesh;
+    m.Box({ 0, 0.45f, 0 }, 0.07f, 0.17f, 0.07f);
+    m.Box({ 0, 0.66f, 0 }, 0.14f, 0.04f, 0.14f);            // docking ring
+    m.Box({ 0, -0.36f, 0 }, 0.12f, 0.08f, 0.12f);           // reactor
+    return m.Build();
+}
+
+// A starbase: a broad domed cap over a long stem, with docking bays around the rim.
+// Ships fit inside it. The capital of a core world's orbit.
+static Mesh GenStarbaseMesh()
+{
+    MeshBuilder m;
+    m.Lathe({ 0, 0, 0 }, { { 0.0f, 0.50f }, { 0.38f, 0.47f }, { 0.74f, 0.37f }, { 0.96f, 0.22f }, { 1.0f, 0.12f },   // the dome
+                           { 0.96f, 0.02f }, { 0.55f, -0.08f }, { 0.30f, -0.20f },                                      // its underside
+                           { 0.25f, -0.50f }, { 0.36f, -0.60f }, { 0.36f, -0.78f },                                    // stem and lower decks
+                           { 0.15f, -0.88f }, { 0.09f, -0.99f }, { 0.0f, -0.99f } }, 16);
+    for (int k = 0; k < 4; k++) {                               // space doors, standing a little proud of the rim
+        float a = 2.0f * PI * (k + 0.5f) / 4.0f;
+        Vector3 d = { cosf(a), 0, sinf(a) }, side = { -sinf(a), 0, cosf(a) };
+        m.Box(Vector3Add(Vector3Scale(d, 0.985f), { 0, 0.12f, 0 }), Vector3Scale(d, 0.012f), { 0, 0.05f, 0 }, Vector3Scale(side, 0.13f));
+    }
+    m.Lathe({ 0, 0, 0 }, { { 0.0f, 0.60f }, { 0.12f, 0.58f }, { 0.12f, 0.49f } }, 8);    // operations tower
+    m.Box({ 0, 0.68f, 0 }, 0.012f, 0.09f, 0.012f);                                       // mast
+    return m.Build();
+}
+
+// A shipyard: an open drydock, a cage of girders around an empty slip
+static Mesh GenDrydockMesh()
+{
+    MeshBuilder m;
+    const float L = 0.88f, W = 0.36f, H = 0.26f, B = 0.014f;   // half length, width, height; girder half-thickness
+    for (float z : { -W, W }) {
+        m.Box({ 0, H, z }, L, B, B);                            // upper and lower longerons
+        m.Box({ 0, -H, z }, L, B, B);
+    }
+    const int RIBS = 7;
+    for (int i = 0; i < RIBS; i++) {
+        float x = -L + 2.0f * L * i / (RIBS - 1);
+        m.Box({ x, H, 0 }, B, B, W);                            // roof beam
+        for (float z : { -W, W }) m.Box({ x, 0, z }, B, H, B);  // side arms
+        if (i + 1 < RIBS && i % 2 == 0) {                       // work-light panels in every other bay
+            float xm = x + L / (RIBS - 1);
+            for (float z : { -W, W }) m.Box({ xm, 0.06f, z }, 0.10f, 0.11f, 0.008f);
+        }
+    }
+    m.Box({ 0, H + 0.05f, 0 }, 0.16f, 0.04f, 0.10f);          // yard control, on the roof
+    m.Box({ 0.30f, H + 0.035f, 0 }, 0.05f, 0.025f, 0.05f);
+    return m.Build();
+}
+
+// A solar collector: a long boom of panels around a small hub, turned to face its star
+// (+Y), with the transmitter that beams the power away on the dark side
+static Mesh GenCollectorMesh()
+{
+    MeshBuilder m;
+    m.Box({ 0, 0, 0 }, 0.97f, 0.012f, 0.012f);                // boom
+    for (float x : { 0.26f, 0.50f, 0.74f })
+        for (float sx : { -1.0f, 1.0f })
+            for (float z : { -0.2f, 0.2f })
+                m.Box({ sx * x, 0, z }, 0.11f, 0.005f, 0.17f); // panels, in pairs across the boom
+    for (float sx : { -1.0f, 1.0f }) m.Box({ sx * 0.93f, 0, 0 }, 0.035f, 0.035f, 0.035f);   // tip thrusters
+    m.Lathe({ 0, 0, 0 }, { { 0.0f, 0.10f }, { 0.08f, 0.10f }, { 0.10f, 0.05f }, { 0.10f, -0.10f }, { 0.04f, -0.14f },   // hub
+                           { 0.04f, -0.20f }, { 0.20f, -0.30f }, { 0.0f, -0.24f } }, 10);                               // transmitter dish
+    return m.Build();
+}
+
+// A gas skimmer: storage tanks around a core, and a long boom down (-Y, toward the giant)
+// to the scoop that trails through its upper clouds
+static Mesh GenSkimmerMesh()
+{
+    MeshBuilder m;
+    m.Lathe({ 0, 0, 0 }, { { 0.0f, 0.78f }, { 0.13f, 0.74f }, { 0.13f, 0.34f }, { 0.0f, 0.30f } }, 8);        // core
+    m.Box({ 0, 0.83f, 0 }, 0.10f, 0.04f, 0.10f);                                                          // docking collar
+    for (int k = 0; k < 4; k++) {
+        float a = 2.0f * PI * (k + 0.5f) / 4.0f;
+        Vector3 d = { cosf(a), 0, sinf(a) }, side = { -sinf(a), 0, cosf(a) };
+        m.Lathe({ d.x * 0.36f, 0.54f, d.z * 0.36f }, { { 0.0f, 0.21f }, { 0.15f, 0.15f }, { 0.21f, 0.0f },     // tank
+                                                       { 0.15f, -0.15f }, { 0.0f, -0.21f } }, 8);
+        m.Box(Vector3Add(Vector3Scale(d, 0.18f), { 0, 0.54f, 0 }), Vector3Scale(d, 0.06f), { 0, 0.025f, 0 }, Vector3Scale(side, 0.025f));
+    }
+    m.Lathe({ 0, 0, 0 }, { { 0.0f, 0.30f }, { 0.03f, 0.30f }, { 0.03f, -0.70f }, { 0.0f, -0.70f } }, 6);       // boom
+    m.Box({ 0, -0.12f, 0 }, 0.08f, 0.07f, 0.08f);                                                         // pump house
+    m.Lathe({ 0, 0, 0 }, { { 0.0f, -0.66f }, { 0.06f, -0.70f }, { 0.27f, -0.94f }, { 0.0f, -0.84f } }, 10);   // scoop
+    return m.Build();
+}
+
+// A greenhouse station: glass domes of crops on arms around a spine, two tiers of three
+static Mesh GenGreenhouseMesh()
+{
+    MeshBuilder m;
+    m.Lathe({ 0, 0, 0 }, { { 0.0f, 0.90f }, { 0.07f, 0.86f }, { 0.07f, -0.86f }, { 0.0f, -0.90f } }, 8);    // spine
+    m.Box({ 0, 0.62f, 0 }, 0.13f, 0.05f, 0.13f);            // docking collar
+    m.Box({ 0, -0.80f, 0 }, 0.10f, 0.06f, 0.10f);           // reactor
+    for (int tier = 0; tier < 2; tier++) {
+        float y = tier == 0 ? 0.22f : -0.42f;
+        for (int k = 0; k < 3; k++) {
+            float a = 2.0f * PI * k / 3.0f + (tier ? PI / 3.0f : 0.0f);
+            Vector3 d = { cosf(a), 0, sinf(a) }, side = { -sinf(a), 0, cosf(a) };
+            m.Box(Vector3Add(Vector3Scale(d, 0.22f), { 0, y - 0.03f, 0 }), Vector3Scale(d, 0.16f), { 0, 0.02f, 0 }, Vector3Scale(side, 0.02f));   // arm
+            m.Lathe({ d.x * 0.62f, y, d.z * 0.62f }, { { 0.0f, 0.24f }, { 0.17f, 0.20f }, { 0.28f, 0.11f }, { 0.32f, 0.0f },   // dome
+                                                       { 0.32f, -0.06f }, { 0.0f, -0.06f } }, 10);                              // its deck
+        }
+    }
+    return m.Build();
 }
 
 // ---------------------------------------------------------------------------
@@ -411,7 +538,12 @@ void RenderAssets::Load()
     ship   = LoadVectorModel(LoadModelFromMesh(GenShipMesh()));
     planet = LoadVectorModel(LoadModelFromMesh(GenMeshSphere(1.0f, 12, 24)));
     star   = LoadVectorModel(LoadModelFromMesh(GenMeshSphere(1.0f, 8, 16)));
-    station = LoadVectorModel(LoadModelFromMesh(GenStationMesh()));
+    station    = LoadVectorModel(LoadModelFromMesh(GenStationMesh()));
+    starbase   = LoadVectorModel(LoadModelFromMesh(GenStarbaseMesh()));
+    drydock    = LoadVectorModel(LoadModelFromMesh(GenDrydockMesh()));
+    collector  = LoadVectorModel(LoadModelFromMesh(GenCollectorMesh()));
+    greenhouse = LoadVectorModel(LoadModelFromMesh(GenGreenhouseMesh()));
+    skimmer    = LoadVectorModel(LoadModelFromMesh(GenSkimmerMesh()));
     planet.model.transform = POLE_TO_Y;
     star.model.transform   = POLE_TO_Y;
     for (int i = 0; i < AST_TEMPLATES; i++) rocks.push_back(LoadVectorModel(LoadModelFromMesh(GenAsteroidMesh(1000 + i))));
@@ -422,14 +554,27 @@ void RenderAssets::Unload()
     UnloadVectorModel(ship);
     UnloadVectorModel(planet);
     UnloadVectorModel(star);
-    UnloadVectorModel(station);
+    for (VectorModel *m : { &station, &starbase, &drydock, &collector, &greenhouse, &skimmer }) UnloadVectorModel(*m);
     for (VectorModel &m : rocks) UnloadVectorModel(m);
     rocks.clear();
 }
 
+// Which model a station is drawn with
+const VectorModel &RenderAssets::StationModel(Settlement kind) const
+{
+    switch (kind) {
+    case Settlement::Starbase:       return starbase;
+    case Settlement::Shipyard:       return drydock;
+    case Settlement::SolarCollector: return collector;
+    case Settlement::Greenhouse:     return greenhouse;
+    case Settlement::SkimmerStation: return skimmer;
+    default:                         return station;
+    }
+}
+
 float HyperFraction(float speed)
 {
-    return (float)Clamp((float)(log(fmax(speed, 1e-3) / MAX_SPEED) / log(HYPER_SPEED / MAX_SPEED)), 0.0f, 1.0f);
+    return (float)Clamp((float)(log(fmax(speed, 1e-3) / APPROACH_SPEED) / log(HYPER_SPEED / APPROACH_SPEED)), 0.0f, 1.0f);
 }
 
 static void PlaceCamera(ViewState &v)
@@ -481,7 +626,8 @@ void DrawScene(const GameState &g, const Ship &eye, ViewState &v, const RenderAs
 
     struct SphereDraw { DVec3 rel; double radius; Color lines, fill; const VectorModel *model;
                         const Zone *ring = nullptr; bool body = true;
-                        Vector3 axis = { 0, 1, 0 }; float angle = 0.0f; };
+                        Vector3 axis = { 0, 1, 0 }; float angle = 0.0f;
+                        bool station = false; const Asteroid *rock = nullptr; };
     std::vector<SphereDraw> spheres;
 
     // The stars on the scope: every system within nav range (the loaded one is handled with its planets)
@@ -527,7 +673,12 @@ void DrawScene(const GameState &g, const Ship &eye, ViewState &v, const RenderAs
                 if (big) {
                     float spinDeg = fmodf((float)fmod(g.clock * b.spin, 360.0), 360.0f);
                     Quaternion q = QuaternionMultiply(QuaternionFromAxisAngle(ToF(systems[loaded.index].n), spinDeg * DEG2RAD), tip);
-                    SphereDraw sd = { rel, b.radius, b.lines, b.fill, &assets.station, nullptr, true };
+                    if (b.settlement == Settlement::SolarCollector)        // (these face their star instead)
+                        q = QuaternionFromVector3ToVector3({ 0, 1, 0 }, ToF(Norm(loaded.bodies[b.parent].local - b.local)));
+                    if (b.settlement == Settlement::SkimmerStation)        // (and these hang their scoop toward the giant)
+                        q = QuaternionFromVector3ToVector3({ 0, -1, 0 }, ToF(Norm(loaded.bodies[b.parent].local - b.local)));
+                    SphereDraw sd = { rel, b.radius, b.lines, b.fill, &assets.StationModel(b.settlement), nullptr, true };
+                    sd.station = true;
                     QuaternionToAxisAngle(q, &sd.axis, &sd.angle);
                     sd.angle *= RAD2DEG;
                     spheres.push_back(sd);
@@ -570,24 +721,9 @@ void DrawScene(const GameState &g, const Ship &eye, ViewState &v, const RenderAs
         }
     }
 
-    // Spheres back to front, each on a fresh depth buffer, so nearer bodies always cover farther ones
-    std::sort(spheres.begin(), spheres.end(), [](const SphereDraw &a, const SphereDraw &b) {
-        return Len(a.rel) - a.radius > Len(b.rel) - b.radius;
-    });
-    for (const SphereDraw &s : spheres) {
-        ClearDepth();
-        if (s.body) DrawBodyRel(s.rel, s.radius, s.lines, s.fill, *s.model, s.axis, s.angle);
-        if (s.ring) {
-            double a = fmax(Len(s.rel) - s.radius, 1.0);
-            DrawRingRel(s.rel, *s.ring, MapDist(a) / a);   // same compression as its planet
-        }
-    }
-    ClearDepth();                                         // rocks, the ship and dust go on top
-
-    // Nearby rocks, sharing one depth layer with the ship
+    // Nearby rocks: drawn in with the bodies below, so a station hides the rocks behind it
     if (loaded.index >= 0 && g.field.system == loaded.index) {
         DVec3 starRel = FromShip(systems, eye, loaded.index);
-        float now     = (float)g.clock;
         for (const auto &cell : g.field.cells)
             for (const Asteroid &a : cell.second) {
                 DVec3  rel = starRel + a.local;
@@ -595,9 +731,9 @@ void DrawScene(const GameState &g, const Ship &eye, ViewState &v, const RenderAs
                 float  r   = AsteroidRadius(a);
                 if (d > AST_DRAW_RANGE || r / d < 0.0015) continue;              // too far / too small
                 if (Vector3DotProduct(ToF(rel), v.camFwd) < -r - 10.0f) continue; // behind the camera
-                double s = MapDist(d) / d;
-                DrawVectorModelEx(assets.rocks[a.tmpl], ToF(rel * s), a.axis, a.phase + a.spin * now,
-                                  { (float)(r * s), (float)(r * s), (float)(r * s) }, GoodData(a.ore).color, BLACK);
+                SphereDraw sd = { rel, r, GoodData(a.ore).color, BLACK, &assets.rocks[a.tmpl], nullptr, true };
+                sd.rock = &a;
+                spheres.push_back(sd);
                 // Anything big enough to draw as a wireframe is targetable, unless you're
                 // going so fast the rocks are just streaming past (a lock would chase them)
                 if (Vector3Length(eye.vel) < AST_TARGET_MAX_SPEED) {
@@ -609,6 +745,33 @@ void DrawScene(const GameState &g, const Ship &eye, ViewState &v, const RenderAs
                 }
             }
     }
+
+    // Everything back to front, so nearer things always cover farther ones. Worlds and stars
+    // sort by their nearest surface; stations and rocks, which you fly among, by their
+    // centers. Each body gets a fresh depth buffer (see ClearDepth); a run of rocks shares
+    // one, and the nearest rocks share theirs with the ship.
+    auto nearness = [](const SphereDraw &s) { return s.rock || s.station ? Len(s.rel) : Len(s.rel) - s.radius; };
+    std::sort(spheres.begin(), spheres.end(), [&](const SphereDraw &a, const SphereDraw &b) { return nearness(a) > nearness(b); });
+    bool  rocksOpen = false;                              // the depth buffer holds only rocks
+    float now = (float)g.clock;
+    for (const SphereDraw &s : spheres) {
+        if (s.rock) {
+            if (!rocksOpen) ClearDepth();
+            rocksOpen = true;
+            double d = Len(s.rel), k = MapDist(d) / d;
+            float  r = (float)(s.radius * k);
+            DrawVectorModelEx(*s.model, ToF(s.rel * k), s.rock->axis, s.rock->phase + s.rock->spin * now, { r, r, r }, s.lines, s.fill);
+            continue;
+        }
+        ClearDepth();
+        rocksOpen = false;
+        if (s.body) DrawBodyRel(s.rel, s.radius, s.lines, s.fill, *s.model, s.axis, s.angle);
+        if (s.ring) {
+            double a = fmax(Len(s.rel) - s.radius, 1.0);
+            DrawRingRel(s.rel, *s.ring, MapDist(a) / a);   // same compression as its planet
+        }
+    }
+    if (!rocksOpen) ClearDepth();                         // the ship and dust go on top
 
     // Other captains' ships: drawn when they're close enough to see, a nav dot at any range
     for (const Traffic &t : g.traffic) {
@@ -656,7 +819,7 @@ void DrawScene(const GameState &g, const Ship &eye, ViewState &v, const RenderAs
 
     // Engine flame when thrusting forward or in hyper/warp
     const Controls &in = g.flight.last;
-    if (in.forward > 0.0f || in.hyper) {
+    if (eye.throttle > 0.0f || in.hyper) {
         float len = (in.hyper ? 2.5f + 3.0f * hyperFrac : 1.2f)
                   * (0.85f + 0.15f * sinf((float)GetTime() * 60.0f));
         Vector3 tip = Vector3RotateByQuaternion({ 0.0f, 0.05f, 1.0f + len }, eye.rot);

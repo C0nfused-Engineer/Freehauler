@@ -30,7 +30,7 @@
 #include <vector>
 
 const uint32_t PROTOCOL_MAGIC   = 0x31504D53;   // "SMP1"
-const uint16_t PROTOCOL_VERSION = 3;            // bump when anything below changes (3: the full-size galaxy)
+const uint16_t PROTOCOL_VERSION = 5;            // bump when anything below changes (5: courses)
 const uint16_t DEFAULT_PORT     = 23500;
 const int      MAX_PACKET       = 1400;         // stays under a typical 1500-byte MTU
 const int      MAX_MESSAGE      = 1100;         // biggest reliable message

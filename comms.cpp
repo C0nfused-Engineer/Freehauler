@@ -39,6 +39,12 @@ static std::string Greeting(const Body &b)
                                 "This is %s. Long way between worlds, captain - rest up." } },
         { Settlement::Freeport,        { "%s. No tariffs, no questions. What are you buying?",
                                 "This is %s. Everyone's welcome out here, captain." } },
+        { Settlement::Starbase,        { "%s Approach Control. You are cleared for the space doors, captain - thrusters only inside.",
+                                "This is %s. Welcome, captain. All docks are busy; expect a short hold." } },
+        { Settlement::SolarCollector,  { "%s, power control. Stay out of the beam path, captain, for your own sake.",
+                                "This is %s. Mind the panels - they cost more than your ship." } },
+        { Settlement::Greenhouse,      { "%s here. If you've brought fertilizer, you're our favourite captain today.",
+                                "This is %s. Harvest's in - come and see what fresh food looks like." } },
         { Settlement::UndergroundColony, { "%s Deep Colony comms. Signal's weak down here - go ahead.",
                                 "This is %s Undercity. We hear you, captain." } },
     };

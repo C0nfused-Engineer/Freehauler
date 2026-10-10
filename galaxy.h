@@ -91,6 +91,7 @@ enum class Econ : int8_t {
     Skimmer,        // gas giant skimmer stations: cheap fuel and helium-3
     Freeport,       // waystations: a bit of everything at fair prices
     Shipyard,       // orbital yards: buy alloys, electronics, reactor parts
+    Power,          // solar collectors: fuel cells, and cheap fuel
 };
 
 // Who lives on a world, or what kind of station it is
@@ -100,6 +101,9 @@ enum class Settlement : int8_t {
     MiningOutpost, UndergroundColony,
     // stations
     OrbitalPort, Shipyard, SkimmerStation, OreTerminal, OreRefinery, Waystation, Freeport,
+    Starbase,           // the great port over a core world
+    SolarCollector,     // close in to a star, beaming its power out
+    Greenhouse,         // feeding a colony that can't feed itself
 };
 
 // What a world has to offer, each 0 (none) to 1 (rich). Settlements go where

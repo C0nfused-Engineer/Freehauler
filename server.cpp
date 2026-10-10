@@ -134,7 +134,7 @@ void Server::Tick()
         const Captain &c = p->cap;
         Traffic t;
         t.id = c.id; t.name = c.name; t.ship = c.player.ship;
-        t.thrusting  = c.flight.last.forward > 0.0f;
+        t.thrusting  = c.player.ship.throttle > 0.0f;
         t.hyper      = c.flight.last.hyper;
         t.mining     = c.flight.miningActive;
         t.miningRock = c.flight.miningRock;
@@ -496,8 +496,9 @@ bool Server::SavePlayer(const Captain &c)
     const Player &p = c.player;
     const Ship &s = p.ship;
     std::string text = TextFormat("SPACEFLIGHT_PLAYER 2\nname %s\n", c.name.c_str());
-    text += TextFormat("ship %lld %.17g %.17g %.17g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %d\n", (long long)s.anchor,
-                       s.pos.x, s.pos.y, s.pos.z, s.vel.x, s.vel.y, s.vel.z, s.rot.x, s.rot.y, s.rot.z, s.rot.w, s.dampeners ? 1 : 0);
+    text += TextFormat("ship %lld %.17g %.17g %.17g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %d %.9g\n", (long long)s.anchor,
+                       s.pos.x, s.pos.y, s.pos.z, s.vel.x, s.vel.y, s.vel.z, s.rot.x, s.rot.y, s.rot.z, s.rot.w, s.dampeners ? 1 : 0,
+                       s.throttle);
     text += TextFormat("fuel %.17g\ncredits %.17g\n", p.fuel, p.credits);
     for (int o = 0; o < GOOD_COUNT; o++)
         if (p.cargo[o] > 0.0) text += TextFormat("cargo %d %.17g\n", o, p.cargo[o]);
@@ -518,8 +519,8 @@ bool Server::LoadPlayer(const std::string &name, Player &out)
             Ship &s = p.ship;
             int damp = 1, ore; double t;
             long long anchor = -1;
-            if (sscanf(line, "ship %lld %lf %lf %lf %f %f %f %f %f %f %f %d", &anchor, &s.pos.x, &s.pos.y, &s.pos.z,
-                       &s.vel.x, &s.vel.y, &s.vel.z, &s.rot.x, &s.rot.y, &s.rot.z, &s.rot.w, &damp) == 12) {
+            if (sscanf(line, "ship %lld %lf %lf %lf %f %f %f %f %f %f %f %d %f", &anchor, &s.pos.x, &s.pos.y, &s.pos.z,
+                       &s.vel.x, &s.vel.y, &s.vel.z, &s.rot.x, &s.rot.y, &s.rot.z, &s.rot.w, &damp, &s.throttle) >= 12) {
                 s.anchor = anchor;
                 s.dampeners = damp != 0;
                 haveShip = true;

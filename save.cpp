@@ -6,11 +6,13 @@
 //   location <nearest star system>   (display only)
 //   seed 1977
 //   clock 123.4
-//   ship <anchor system> <pos x y z> <vel x y z> <rot x y z w> <dampeners>
+//   ship <anchor system> <pos x y z> <vel x y z> <rot x y z w> <dampeners> <throttle>
 //   fuel 41.2
 //   credits 1068
 //   cargo <ore index> <tonnes>       (one line per ore carried)
 //   mined <rock id> <ore left>       (one line per rock you've mined)
+//   charted <system>                 (one line per system you have charts of)
+//   scanned <body id>                (one line per world you've scanned yourself)
 //   end
 // Unknown keys are ignored, so newer saves still partly load in older builds.
 #include "save.h"
@@ -49,14 +51,16 @@ bool SaveGame(const GameState &g, const char *path, const std::string &name)
     fprintf(f, "location %s\n", g.systems[s.anchor].name.c_str());
     fprintf(f, "seed %u\n", g.seed);
     fprintf(f, "clock %.17g\n", g.clock);
-    fprintf(f, "ship %lld %.17g %.17g %.17g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %d\n", (long long)s.anchor,
-            s.pos.x, s.pos.y, s.pos.z, s.vel.x, s.vel.y, s.vel.z, s.rot.x, s.rot.y, s.rot.z, s.rot.w, s.dampeners ? 1 : 0);
+    fprintf(f, "ship %lld %.17g %.17g %.17g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %d %.9g\n", (long long)s.anchor,
+            s.pos.x, s.pos.y, s.pos.z, s.vel.x, s.vel.y, s.vel.z, s.rot.x, s.rot.y, s.rot.z, s.rot.w, s.dampeners ? 1 : 0, s.throttle);
     fprintf(f, "fuel %.17g\n", p.fuel);
     fprintf(f, "credits %.17g\n", p.credits);
     for (int o = 0; o < GOOD_COUNT; o++)
         if (p.cargo[o] > 0.0) fprintf(f, "cargo %d %.17g\n", o, p.cargo[o]);
     for (const auto &m : g.deltas.mined)
         fprintf(f, "mined %llu %.9g\n", (unsigned long long)m.first, m.second);
+    for (int64_t sys : g.know.charted) fprintf(f, "charted %lld\n", (long long)sys);
+    for (uint64_t id : g.know.scanned) fprintf(f, "scanned %llu\n", (unsigned long long)id);
     fprintf(f, "end\n");
     bool ok = !ferror(f);
     fclose(f);
@@ -80,6 +84,7 @@ bool LoadGame(GameState &g, const char *path)
     double   clock = 0.0;
     Player   p;
     MinedMap mined;
+    Knowledge know;
     bool     haveShip = false, ended = false;
     while (fgets(line, sizeof line, f)) {
         char key[32] = "";
@@ -93,8 +98,8 @@ bool LoadGame(GameState &g, const char *path)
             Ship &s = p.ship;
             int damp = 1;
             long long anchor = -1;
-            haveShip = sscanf(rest, "%lld %lf %lf %lf %f %f %f %f %f %f %f %d", &anchor, &s.pos.x, &s.pos.y, &s.pos.z,
-                              &s.vel.x, &s.vel.y, &s.vel.z, &s.rot.x, &s.rot.y, &s.rot.z, &s.rot.w, &damp) == 12;
+            haveShip = sscanf(rest, "%lld %lf %lf %lf %f %f %f %f %f %f %f %d %f", &anchor, &s.pos.x, &s.pos.y, &s.pos.z,
+                              &s.vel.x, &s.vel.y, &s.vel.z, &s.rot.x, &s.rot.y, &s.rot.z, &s.rot.w, &damp, &s.throttle) >= 12;
             s.anchor = anchor;
             s.dampeners = damp != 0;
         } else if (!strcmp(key, "cargo")) {
@@ -103,6 +108,12 @@ bool LoadGame(GameState &g, const char *path)
         } else if (!strcmp(key, "mined")) {
             unsigned long long id; float left;
             if (sscanf(rest, "%llu %f", &id, &left) == 2) mined[(uint64_t)id] = left;
+        } else if (!strcmp(key, "charted")) {
+            long long sys;
+            if (sscanf(rest, "%lld", &sys) == 1) know.charted.insert(sys);
+        } else if (!strcmp(key, "scanned")) {
+            unsigned long long id;
+            if (sscanf(rest, "%llu", &id) == 1) know.scanned.insert((uint64_t)id);
         } else if (!strcmp(key, "end")) { ended = true; break; }
     }
     fclose(f);
@@ -114,6 +125,8 @@ bool LoadGame(GameState &g, const char *path)
     fresh.clock         = clock;
     fresh.player        = p;
     fresh.deltas.mined  = std::move(mined);
+    fresh.know.charted.insert(know.charted.begin(), know.charted.end());   // (on top of home, which a new game already has)
+    fresh.know.scanned  = std::move(know.scanned);
     fresh.loaded        = LoadedSystem();          // reload around the saved position
     fresh.field         = AsteroidField();
     UpdateLoadedSystem(fresh);

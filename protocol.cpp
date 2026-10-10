@@ -35,6 +35,7 @@ void WriteShip(Writer &w, const Ship &s)
     w.F32(s.rot.x); w.F32(s.rot.y); w.F32(s.rot.z); w.F32(s.rot.w);
     w.U8((s.dampeners ? 1 : 0) | (s.allStop ? 2 : 0));
     w.F32(s.thrustUse);
+    w.F32(s.throttle);
 }
 
 Ship ReadShip(Reader &r)
@@ -48,6 +49,7 @@ Ship ReadShip(Reader &r)
     s.dampeners = (f & 1) != 0;
     s.allStop   = (f & 2) != 0;
     s.thrustUse = r.F32();
+    s.throttle  = r.F32();
     return s;
 }
 
@@ -80,11 +82,12 @@ Player ReadPlayer(Reader &r)
 void WriteInput(Writer &w, const InputStep &in)
 {
     const Controls &c = in.controls;
-    w.F32(c.forward); w.F32(c.strafe);
+    w.F32(c.throttle);
     w.F32(c.yaw); w.F32(c.pitch); w.F32(c.roll);
-    w.U8((c.hyper ? 1 : 0) | (c.fire ? 2 : 0) | (c.allStop ? 4 : 0) | (c.toggleDampeners ? 8 : 0));
+    w.U8((c.hyper ? 1 : 0) | (c.fire ? 2 : 0) | (c.allStop ? 4 : 0) | (c.toggleDampeners ? 8 : 0) | (in.aim.steer ? 16 : 0));
     WriteTarget(w, in.aim.hovered);
     WriteTarget(w, in.aim.retarget);
+    WriteTarget(w, in.aim.course);
 }
 
 // Inputs come from the network, so they're clamped to what a real client can send
@@ -95,15 +98,16 @@ InputStep ReadInput(Reader &r, uint32_t seq)
     InputStep in;
     in.seq = seq;
     Controls &c = in.controls;
-    c.forward = Sane(r.F32(), 1.0f);
-    c.strafe  = Sane(r.F32(), 1.0f);
+    c.throttle = Sane(r.F32(), 1.0f);
     c.yaw     = Sane(r.F32(), 90.0f);
     c.pitch   = Sane(r.F32(), 90.0f);
     c.roll    = Sane(r.F32(), 90.0f);
     uint8_t f = r.U8();
     c.hyper = (f & 1) != 0; c.fire = (f & 2) != 0; c.allStop = (f & 4) != 0; c.toggleDampeners = (f & 8) != 0;
+    in.aim.steer    = (f & 16) != 0;
     in.aim.hovered  = ReadTarget(r);
     in.aim.retarget = ReadTarget(r);
+    in.aim.course   = ReadTarget(r);
     return in;
 }
 

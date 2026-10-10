@@ -11,9 +11,10 @@
 //   freehauler --server [options]
 //                                be a dedicated server in this console (what Multiplayer >
 //                                Host starts in a window of its own; options: server_console.cpp)
-//   freehauler --test [name]    run the headless tests (fuel, trade, stations, hz, skimming, comms,
-//                                galaxy, systems, targeting, mining, save, protocol, net, host)
+//   freehauler --test [name]    run the headless tests (fuel, flight, trade, stations, hz, skimming, comms,
+//                                galaxy, systems, maps, targeting, mining, save, protocol, net, host)
 //   freehauler --script tour    scripted run in the window that saves screenshots
+//                                (also: stations - a look at each kind of station; menus; mainmenu)
 //   freehauler --bot HOST[:PORT] [--name N] [--seconds S] [--idle]
 //                                a headless test pilot that flies loops on a server
 //
@@ -35,6 +36,7 @@
 //   input           InputFrame from the keyboard or a script
 //   render, hud     3D scene; 2D overlay and readouts (read GameState, never change it)
 //   settings        player options (settings.txt)
+//   map             the system map and the sector map (M)
 //   ui              window stack (info, market, comms), hotkeys, messages
 //   menus           main menu (single player, multiplayer host / join, settings) and
 //                   pause menu: save, load (file browser), settings, main menu, exit
@@ -48,11 +50,13 @@
 //   main            the loop
 //
 // Controls
-//   Mouse        pitch / yaw          Q / E      roll
-//   W / S        thrust fwd / back    A / D      strafe left / right
+//   Mouse        aim (pitch / yaw)    Q / E      roll left / right
+//   W / S        throttle up / down   A / D      yaw left / right
 //   Shift (hold) hyper (in a system) / warp (between systems)
-//   X            all stop             Caps Lock  toggle inertial dampeners
+//   W + S        all stop (throttle to zero)     Caps Lock  toggle inertial dampeners
 //   C            communications       O          toggle orbit rings
+//   M            map: the system you're in (list its worlds, pick one to set course); M again,
+//                or M between the stars, for the sector map of nearby systems
 //   MMB or I     info on the target   F          trade (near an inhabited world or station)
 //   LMB (hold)   mining laser         F5 / F9    quick save / quick load (single player)
 //   Esc          close the top window, or pause (save, load, settings, main menu, exit)
@@ -75,12 +79,18 @@
 //   it on another body to switch the lock. Systems load within 0.5 ly.
 //
 // Drives
-//   Cruise  (no Shift)  up to 1.2 km/s. For fighting, mining and docking.
-//   Hyper   (Shift, inside a system's gravity field)  up to 0.7 AU/s.
+//   Cruise  (no Shift)  flown like an aircraft: the throttle sets a speed, from a crawl
+//           for docking and mining up to 0.99 c, and the ship goes where its nose points
+//           (dampeners kill sideways drift; with them off it keeps drifting).
+//   Hyper   (Shift, inside a system's gravity field)  up to 0.7 AU/s. Holding Shift zeroes
+//           the throttle, so the ship comes to a stop when you let go.
 //   Warp    (Shift, outside every gravity field)      up to 0.35 ly/s.
 //   Leave a system's flattened gravity field by climbing out of its plane
 //   (short) or flying past the outermost planets (long). Gravity wells slow
-//   hyper near bodies ahead, and warp near systems ahead, so you arrive.
+//   you near bodies ahead, and warp near systems ahead. Hyper straight at a
+//   body and the drive stops by itself short of it: half a radius above a
+//   world (in trading range), 1.5 radii above a star (in scooping range),
+//   3 km off a station.
 //   Fuel burn climbs exponentially from cruise to hyper to warp. Out of fuel,
 //   warp is offline and hyper limps at 0.02 AU/s; scoop fuel within 3 radii
 //   of a star or buy it.
@@ -248,6 +258,7 @@ static bool PlaySession(InputSource &input, ScriptedInput *script, const RenderA
     double   acc = 0.0;                       // real time not yet simulated
     Ship     prev = g.player.ship;            // ship before the latest step (for interpolation)
     Controls pending;                         // mouse rotation and key presses not yet given to a step
+    bool throttleCut = false;                 // W and S were pressed together and aren't both up yet
     bool     cursorShown = false;             // menus show the mouse pointer; flight hides and captures it
     int      ignoreMouse = 2;                 // frames to ignore mouse motion after the pointer mode changes
 
@@ -284,7 +295,14 @@ static bool PlaySession(InputSource &input, ScriptedInput *script, const RenderA
             ignoreMouse = 2;                  // re-capturing the mouse reports a big jump
         }
         bool paused = ui.GamePaused() || offline;
-        Controls c = ui.FlightPaused() ? Controls{} : ReadFlightControls(in, frameDt, ui.settings);
+        Controls c = ui.FlightPaused() ? Controls{} : ReadFlightControls(in, frameDt, ui.settings, throttleCut);
+        // A course from the map: the nose swings onto it until it's there or the pilot steers
+        DVec3 courseRel;
+        if (ui.course.valid() && !FindTarget(g, ui.course, courseRel)) ui.SetCourse({});
+        if (ui.steer && (c.yaw != 0.0f || c.pitch != 0.0f ||
+                         Vector3DotProduct(ShipForward(g.player.ship), ToF(Norm(courseRel))) > 0.99999f)) ui.steer = false;
+        aim.course = ui.course;
+        aim.steer  = ui.steer;
         pending.yaw += c.yaw; pending.pitch += c.pitch; pending.roll += c.roll;
         pending.allStop |= c.allStop; pending.toggleDampeners |= c.toggleDampeners;
 
@@ -307,6 +325,7 @@ static bool PlaySession(InputSource &input, ScriptedInput *script, const RenderA
         if (steps > 0) pending = {};
         if (net && !offline) net->Flush(NetTime());
         if (net) net->UpdateTraffic(g, offline ? 0.0f : frameDt);
+        UpdateKnowledge(g, g);
         ui.Update(g, frameDt);
         g.events.clear();
         g.minedChanged.clear();

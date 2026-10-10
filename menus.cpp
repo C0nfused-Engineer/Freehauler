@@ -58,6 +58,8 @@ bool MouseMoved(const InputFrame &in) { return in.mouseDelta.x != 0.0f || in.mou
 bool Activate(const InputFrame &in) { return in.Pressed(KEY_ENTER) || in.Pressed(KEY_KP_ENTER) || in.Pressed(KEY_SPACE); }
 bool Up(const InputFrame &in)   { return in.Pressed(KEY_UP) || in.Pressed(KEY_W); }
 bool Down(const InputFrame &in) { return in.Pressed(KEY_DOWN) || in.Pressed(KEY_S); }
+// The mouse wheel steps the highlight too, stopping at the ends (the arrow keys wrap around)
+void WheelFocus(const InputFrame &in, int &focus, int count) { focus = std::max(0, std::min(count - 1, focus + in.WheelStep())); }
 
 std::string FormatDate(long t)
 {
@@ -489,6 +491,7 @@ public:
         if (in.Pressed(KEY_ESCAPE) || Clicked(in, L.back)) { closed = true; return; }
         if (Up(in))   focus = (focus + ROWS) % (ROWS + 1);
         if (Down(in)) focus = (focus + 1) % (ROWS + 1);
+        WheelFocus(in, focus, ROWS + 1);
         if (MouseMoved(in)) {
             for (int i = 0; i < ROWS; i++) if (Over(in, Row(L, i))) focus = i;
             if (Over(in, L.back)) focus = ROWS;
@@ -603,6 +606,7 @@ public:
         if (in.Pressed(KEY_ESCAPE)) { closed = true; return; }
         if (Up(in))   focus = (focus + count - 1) % count;
         if (Down(in)) focus = (focus + 1) % count;
+        WheelFocus(in, focus, count);
         int chosen = Activate(in) ? focus : -1;
         for (int i = 0; i < count; i++) {
             if (MouseMoved(in) && Over(in, L.button[i])) focus = i;
@@ -728,6 +732,7 @@ public:
         bool shift = in.Down(KEY_LEFT_SHIFT) || in.Down(KEY_RIGHT_SHIFT);
         if (in.Pressed(KEY_UP) || (in.Pressed(KEY_TAB) && shift)) focus = (focus + rows - 1) % rows;
         else if (in.Pressed(KEY_DOWN) || in.Pressed(KEY_TAB))     focus = (focus + 1) % rows;
+        WheelFocus(in, focus, rows);
         for (int i = 0; i < (int)fields.size(); i++) if (Clicked(in, Box(L, i))) focus = i;
         if (host && Clicked(in, L.toggle)) { stopOnLeave = !stopOnLeave; focus = ToggleRow(); }
         if (MouseMoved(in)) { if (Over(in, L.go)) focus = GoRow(); if (Over(in, L.back)) focus = GoRow() + 1; }
@@ -873,6 +878,7 @@ public:
         if (in.Pressed(KEY_ESCAPE) && !root) { closed = true; return; }
         if (Up(in))   focus = (focus + count - 1) % count;
         if (Down(in)) focus = (focus + 1) % count;
+        WheelFocus(in, focus, count);
         int chosen = Activate(in) ? focus : -1;
         for (int i = 0; i < count; i++) {
             if (MouseMoved(in) && Over(in, L.button[i])) focus = i;

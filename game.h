@@ -26,6 +26,7 @@
 #include "ship.h"
 #include "targets.h"
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -43,6 +44,8 @@ const double STATION_RANGE  = 20.0 * KM_U;  // F works within this of a station
 const double SKIM_RATE      = 0.25;         // tonnes of helium-3 per second while skimming a gas giant...
 const double SKIM_DEPTH     = 1.25;         // ...within this many of its radii of its center (gas and ice giants only)
 const double START_CREDITS  = 200.0;
+const double SCAN_RADII     = 20.0;         // passing within this many radii of a world's surface scans it...
+const double SCAN_MIN       = 1.0 * LIGHT_SEC_U;   // ...or within this, whichever is farther
 const double SHIP_RADIUS    = 2.5;          // units; for targeting other ships
 
 // ---------------------------------------------------------------------------
@@ -90,9 +93,21 @@ struct GameEvent {
 // ---------------------------------------------------------------------------
 // What the view reports back each frame: the thing under the reticle, and a
 // body the nudge cursor rested on while locked (switch the lock to it).
+// It also carries the course the pilot set on a map: the selection whenever the
+// reticle isn't on something else, and while 'steer' is on the nose swings onto it.
 struct Aim {
     TargetId hovered;
     TargetId retarget;
+    TargetId course;
+    bool     steer = false;
+};
+
+// What this captain's charts hold. A system's map shows only what can be seen
+// from afar (its stars, planets and belts) until someone living there has sent
+// their charts, or the captain has flown close enough to a world to scan it.
+struct Knowledge {
+    std::unordered_set<int64_t>  charted;    // whole systems (SysId): everything in them is known
+    std::unordered_set<uint64_t> scanned;    // single bodies (Body::id), scanned in passing
 };
 
 struct FlightState {
@@ -165,6 +180,7 @@ struct Captain {
     Player        player;                // saved
     FlightState   flight;
     CommsState    comms;
+    Knowledge     know;                  // saved
     LoadedSystem  loaded;                // generated around this ship
     AsteroidField field;                 // generated around this ship
 };
@@ -201,6 +217,12 @@ inline void StepGame(GameState &g, const Controls &in, const Aim &aim, float dt)
 
 void UpdateLoadedSystem(World &w, Captain &c);   // re-anchor; load / unload systems by distance
 inline void UpdateLoadedSystem(GameState &g) { UpdateLoadedSystem(g, g); }
+
+// Scans the worlds the ship is passing, and takes the charts of a system whose people have
+// answered a hail. Run by whoever keeps this captain's charts (the game, not the server).
+void UpdateKnowledge(World &w, Captain &c);
+// Is this body of the loaded system on the captain's charts in full? (Moons and stations come with their world.)
+bool Known(const Captain &c, int body);
 
 // A rock's ore changed (someone mined it): update this captain's copy, if it has one
 void ApplyRockChange(Captain &c, uint64_t rock, float oreLeft);

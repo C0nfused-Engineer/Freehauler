@@ -21,6 +21,8 @@ struct InputFrame {
     bool Pressed(int key) const   { return key >= 0 && key < INPUT_KEYS && pressed[key]; }
     bool MouseDown(int b) const   { return mouseDown[b]; }
     bool MousePressed(int b) const{ return mousePressed[b]; }
+    // The wheel as a step through a list: -1 up a row, +1 down a row, 0 not turned
+    int  WheelStep() const        { return wheel > 0.0f ? -1 : wheel < 0.0f ? 1 : 0; }
     // A window that handled a key "consumes" it so nothing below reacts to it too
     void Consume(int key)         { if (key >= 0 && key < INPUT_KEYS) pressed[key] = false; }
     void ConsumeAll()             { pressed.reset(); mousePressed.reset(); text.clear(); wheel = 0.0f; }

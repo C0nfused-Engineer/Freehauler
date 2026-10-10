@@ -1,4 +1,4 @@
-// ui.h - windows (info, market, comms), hotkeys, messages.
+// ui.h - windows (info, market, comms, maps), hotkeys, messages.
 //
 // Windows live on a stack. Each frame the top window sees input first and
 // "consumes" the keys it uses; a modal window (the market) eats everything
@@ -20,7 +20,7 @@
 #include <string>
 #include <vector>
 
-enum class WindowKind { Info, Market, Comms, Pause, SaveMenu, LoadMenu, SettingsMenu, ConfirmExit,
+enum class WindowKind { Info, Market, Comms, SystemMap, SectorMap, Pause, SaveMenu, LoadMenu, SettingsMenu, ConfirmExit,
                         MainMenu, SinglePlayerMenu, MultiplayerMenu, JoinMenu, HostMenu };
 
 // What the main menu decided
@@ -56,6 +56,12 @@ struct Ui {
     bool        gameReloaded = false;             // a save was loaded this frame (the view should snap)
     Settings    settings;
 
+    // The course set on a map: it becomes the selection (hold Shift to lock on and go), and
+    // the nose swings onto it until it's there or the pilot takes the stick
+    TargetId    course;
+    bool        steer = false;
+    void        SetCourse(TargetId t) { course = t; steer = t.valid(); }
+
     // Multiplayer: the server runs the world, so menus don't pause it and
     // saving is the server's job. Commands go to sendCommand.
     bool        online = false;
@@ -88,7 +94,22 @@ struct Ui {
 };
 
 // Mouse and flight keys -> Controls for this frame (rotation in degrees for the whole frame)
-Controls ReadFlightControls(const InputFrame &in, float frameDt, const Settings &settings);
+Controls ReadFlightControls(const InputFrame &in, float frameDt, const Settings &settings, bool &throttleCut);
+
+// The maps (map.cpp): M opens the system map inside a system's gravity field, the sector map
+// outside one; M again goes from the system map to the sector map
+std::unique_ptr<Window> MakeSystemMap();
+std::unique_ptr<Window> MakeSectorMap();
+
+// One line of the system map's list: a star, world, belt, moon or station (indented under its world)
+struct MapRow {
+    TargetId    target;
+    int         indent = 0;
+    bool        known = false;       // on the captain's charts in full
+    bool        inhabited = false;
+    std::string name, what;
+};
+std::vector<MapRow> SystemMapRows(const GameState &g);
 
 // The pause menu and its sub-menus (menus.cpp). Online it has no save/load
 // and doesn't stop the simulation (the server keeps running).

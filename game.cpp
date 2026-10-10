@@ -48,6 +48,7 @@ void NewCaptain(World &w, Captain &c, int id, const std::string &name)
     c.name = name;
     Ship &ship = c.player.ship;
     const SysId home = w.systems.home;
+    c.know.charted.insert(home);                             // everyone knows their own home
     ship.anchor = home;
     LoadSystem(w, c, home);
 
@@ -83,6 +84,42 @@ void NewGame(GameState &g, unsigned seed)
     NewWorld(g, seed);
     NewCaptain(g, g);
     g.events.clear();
+}
+
+bool Known(const Captain &c, int body)
+{
+    if (c.loaded.index < 0 || body < 0 || body >= (int)c.loaded.bodies.size()) return false;
+    if (c.know.charted.count(c.loaded.index)) return true;
+    for (int b = body, hops = 0; b >= 0 && hops < 4; b = c.loaded.bodies[b].parent, hops++) {
+        const Body &o = c.loaded.bodies[b];
+        if (o.kind == Kind::Star) return b == body;              // stars are plain to see; what orbits them isn't
+        if (c.know.scanned.count(o.id)) return true;
+    }
+    return false;
+}
+
+void UpdateKnowledge(World &w, Captain &c)
+{
+    if (c.loaded.index < 0 || c.know.charted.count(c.loaded.index)) return;
+    // Anyone who has answered a hail sends their charts along
+    if (c.comms.with.valid() && c.comms.with.system == c.loaded.index)
+        for (const CommsMsg &m : c.comms.log)
+            if (!m.ours && m.at <= w.clock) {
+                c.know.charted.insert(c.loaded.index);
+                w.Emit(EventType::Notice, c.comms.withName + " sent charts of the " + w.systems[c.loaded.index].name + " system",
+                       {}, -1, 0.0, 0.0, c.id);
+                return;
+            }
+    // Otherwise it's what the ship's own sensors pick up in passing
+    for (int bi = 0; bi < (int)c.loaded.bodies.size(); bi++) {
+        const Body &b = c.loaded.bodies[bi];
+        if (b.kind == Kind::Star || c.know.scanned.count(b.id)) continue;
+        double d = Len(FromShip(w.systems, c.player.ship, c.loaded.index, b.local)) - b.radius;
+        if (d > fmax(SCAN_RADII * b.radius, SCAN_MIN)) continue;
+        bool news = !Known(c, bi);
+        c.know.scanned.insert(b.id);
+        if (news) w.Emit(EventType::Notice, "Scanned " + b.name, TargetId::MakeBody(c.loaded.index, bi), -1, 0.0, 0.0, c.id);
+    }
 }
 
 void ApplyRockChange(Captain &c, uint64_t rock, float oreLeft)
@@ -186,6 +223,14 @@ std::string TargetName(const World &w, const Captain &c, TargetId t)
 // Hyper target lock: holding Shift while something is targeted swings the
 // nose onto it and ignores small mouse movements. A deliberate movement breaks
 // the lock; the view can switch it to another body (aim.retarget).
+// Swings the nose toward a target (the lock, or a course just set on a map)
+static void TurnToward(Ship &ship, DVec3 rel, float dt)
+{
+    Quaternion full = QuaternionFromVector3ToVector3(ShipForward(ship), ToF(Norm(rel)));
+    Quaternion step = QuaternionSlerp(QuaternionIdentity(), full, 1.0f - expf(-LOCK_TURN_RATE * dt));
+    ship.rot = QuaternionNormalize(QuaternionMultiply(step, ship.rot));
+}
+
 static void UpdateLock(World &w, Captain &c, Controls &in, const Aim &aim, float dt)
 {
     FlightState &f = c.flight;
@@ -222,11 +267,7 @@ static void UpdateLock(World &w, Captain &c, Controls &in, const Aim &aim, float
         return;
     }
     in.yaw = in.pitch = 0.0f;                                 // ignore small mouse movement
-    Vector3 fwd  = ShipForward(ship);
-    Vector3 want = ToF(Norm(rel));
-    Quaternion full = QuaternionFromVector3ToVector3(fwd, want);
-    Quaternion step = QuaternionSlerp(QuaternionIdentity(), full, 1.0f - expf(-LOCK_TURN_RATE * dt));
-    ship.rot = QuaternionNormalize(QuaternionMultiply(step, ship.rot));
+    TurnToward(ship, rel, dt);
 }
 
 // Solid bodies and rocks: the ship stops at the surface instead of passing through
@@ -244,7 +285,7 @@ static void Collide(World &w, Captain &c)
         if (into < 0.0f) ship.vel = Vector3Subtract(ship.vel, Vector3Scale(ToF(nrm), into));
     }
     // Rocks are solid at cruise speeds; in hyper you pass through the field
-    if (Vector3Length(ship.vel) >= MAX_SPEED * 4.0f) return;
+    if (Vector3Length(ship.vel) >= APPROACH_SPEED * 4.0f) return;
     DVec3 here = ShipLocal(w, c);
     for (auto &cell : c.field.cells)
         for (const Asteroid &a : cell.second) {
@@ -305,10 +346,12 @@ void StepCaptain(World &w, Captain &c, const Controls &input, const Aim &aim, fl
 
     UpdateLoadedSystem(w, c);
 
-    // Selection follows the reticle; a hyper lock overrides it
-    f.selected = CanonicalTarget(c, aim.hovered);
+    // Selection follows the reticle, falling back on the course set on a map; a hyper lock overrides it
+    f.selected = CanonicalTarget(c, aim.hovered.valid() ? aim.hovered : aim.course);
     if (f.lock.valid()) f.lock = CanonicalTarget(c, f.lock);
     UpdateLock(w, c, in, aim, dt);
+    DVec3 courseRel;
+    if (aim.steer && !f.lock.valid() && FindTarget(w, c, aim.course, courseRel)) TurnToward(ship, courseRel, dt);
     if (f.lockSuppressed && !aim.hovered.valid() && !f.selected.valid()) f.lockSuppressed = false;
     if (f.lock.valid()) f.selected = f.lock;
 

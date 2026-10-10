@@ -31,6 +31,7 @@ const char *EconName(Econ e)
     case Econ::Skimmer:      return "Gas refining";
     case Econ::Freeport:     return "Free trade";
     case Econ::Shipyard:     return "Shipbuilding";
+    case Econ::Power:        return "Power generation";
     default:                 return "None";
     }
 }
@@ -53,6 +54,9 @@ const char *SettlementName(Settlement s)
     case Settlement::OreRefinery:       return "Ore refinery";
     case Settlement::Waystation:        return "Waystation";
     case Settlement::Freeport:          return "Freeport";
+    case Settlement::Starbase:          return "Starbase";
+    case Settlement::SolarCollector:    return "Solar collector";
+    case Settlement::Greenhouse:        return "Greenhouse station";
     default:                            return "Uninhabited";
     }
 }
@@ -783,7 +787,14 @@ static void GenerateStations(const StarSystem &sys, LoadedSystem &out)
         Gen sg(id);                                                  // each station its own draws
         Body s;
         s.name = name; s.local = pos; s.kind = Kind::Station; s.parent = parent; s.id = id;
-        s.radius = sg.uni(100.0, 260.0);                             // 0.5 - 1.3 km
+        // The everyday wheel is 0.5 - 1.3 km across its radius; the special kinds are bigger, and
+        // only the ones people live in the rim of need to spin fast
+        double size = kind == Settlement::Starbase ? 4.0 : kind == Settlement::SolarCollector ? 5.0
+                    : kind == Settlement::Greenhouse ? 2.5 : kind == Settlement::Shipyard ? 2.0
+                    : kind == Settlement::SkimmerStation ? 1.5 : 1.0;
+        double turn = kind == Settlement::Shipyard || kind == Settlement::SolarCollector || kind == Settlement::SkimmerStation ? 0.0
+                    : kind == Settlement::Starbase ? 0.15 : kind == Settlement::Greenhouse ? 0.4 : 1.0;
+        s.radius = sg.uni(100.0, 260.0) * size;
         s.orbit = Len(pos - out.bodies[parent].local);
         s.lines = col; s.fill = BLACK;
         s.type = SettlementName(kind); s.settlement = kind; s.econ = econ;
@@ -791,7 +802,7 @@ static void GenerateStations(const StarSystem &sys, LoadedSystem &out)
         s.atmosphere = "Pressurized"; s.water = "Recycled"; s.life = "None";
         s.gravity = sg.uni(0.3, 1.0);                                // from its spin
         s.tempK = 293.0;
-        s.spin = (float)(sg.uni(2.0, 7.0) * (sg.chance(0.5) ? 1 : -1));
+        s.spin = (float)(sg.uni(2.0, 7.0) * (sg.chance(0.5) ? 1 : -1) * turn);
         s.flux = out.bodies[parent].flux;
         out.bodies.push_back(s);
         count++;
@@ -810,7 +821,7 @@ static void GenerateStations(const StarSystem &sys, LoadedSystem &out)
     };
     const Color PORT = { 200, 240, 255, 255 }, YARD = { 255, 200, 120, 255 }, REFINERY = { 255, 170, 90, 255 },
                 SKIM = { 255, 230, 140, 255 }, LAB = { 140, 255, 200, 255 }, FREE = { 230, 200, 255, 255 },
-                ORE = { 210, 180, 150, 255 };
+                ORE = { 210, 180, 150, 255 }, SOLAR = { 120, 170, 255, 255 }, GARDEN = { 150, 240, 130, 255 };
 
     int worlds = (int)out.bodies.size();
     for (int bi = 0; bi < worlds; bi++) {
@@ -820,7 +831,7 @@ static void GenerateStations(const StarSystem &sys, LoadedSystem &out)
         double roll = uni(0, 1), roll2 = uni(0, 1);                  // always two draws per world
         switch (b.econ) {
         case Econ::HighTech:
-            if (roll < 0.95) orbiting(bi, " Highport", 3.0, 6.0, Settlement::OrbitalPort, b.econ, 4.5, 5.8, PORT);
+            if (roll < 0.95) orbiting(bi, " Starbase", 3.0, 6.0, Settlement::Starbase, b.econ, 4.5, 5.8, PORT);
             if (roll2 < 0.5) orbiting(bi, " Yards", 3.0, 6.0, Settlement::Shipyard, Econ::Shipyard, 3.7, 4.7, YARD);
             break;
         case Econ::Agricultural:
@@ -828,6 +839,7 @@ static void GenerateStations(const StarSystem &sys, LoadedSystem &out)
             break;
         case Econ::Colony:
             if (roll < 0.45) orbiting(bi, " Orbital", 3.0, 6.0, Settlement::OrbitalPort, b.econ, 3.0, 4.0, PORT);
+            if (roll2 < 0.4) orbiting(bi, " Gardens", 3.0, 6.0, Settlement::Greenhouse, Econ::Agricultural, 2.6, 3.6, GARDEN);
             break;
         case Econ::GasMining:
             if (roll < 0.8) orbiting(bi, " Skimmer Station", 1.6, 2.5, Settlement::SkimmerStation, Econ::Skimmer, 2.5, 3.5, SKIM);
@@ -837,6 +849,7 @@ static void GenerateStations(const StarSystem &sys, LoadedSystem &out)
             break;
         case Econ::Industrial:
             if (roll < 0.5) orbiting(bi, " Yards", 3.0, 6.0, Settlement::Shipyard, Econ::Shipyard, 3.5, 4.5, YARD);
+            if (roll2 < 0.3) orbiting(bi, " Gardens", 3.0, 6.0, Settlement::Greenhouse, Econ::Agricultural, 2.6, 3.6, GARDEN);
             break;
         case Econ::Research:
             break;
@@ -872,6 +885,14 @@ static void GenerateStations(const StarSystem &sys, LoadedSystem &out)
         double r = out.bodies[planets.back()].orbit * 1.15;
         add(sys.name + " Freeport", (sys.u * cos(ang2) + sys.v * sin(ang2)) * r, 0, Mix64(sys.seed ^ 0xF4EEull),
             Settlement::Freeport, Econ::Freeport, 3.3, 4.5, FREE);
+    }
+
+    // A solar collector close in, where the light is strongest (around stars bright enough to bother with)
+    double roll3 = uni(0, 1), ang3 = uni(0, 2 * PI), in = uni(0.15, 0.35);
+    if (sys.lumInner > 0.02 && roll3 < 0.35 * dev) {
+        double r = fmax(sys.hzIn * in, 4.0 * out.bodies[0].radius);
+        add(sys.name + " Solar Array", (sys.u * cos(ang3) + sys.v * sin(ang3)) * r, 0, Mix64(sys.seed ^ 0x501A2ull),
+            Settlement::SolarCollector, Econ::Power, 2.2, 3.2, SOLAR);
     }
 }
 

@@ -9,6 +9,7 @@
 #include "settings.h"
 #include "format.h"
 #include "targetinfo.h"
+#include "ui.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -57,6 +58,7 @@ static void Park(const World &w, Captain &c, int body, double altRadii)
     c.player.ship.anchor = c.loaded.index;
     c.player.ship.pos = b.local + dir * (b.radius * (1.0 + altRadii));
     c.player.ship.vel = { 0, 0, 0 };
+    c.player.ship.throttle = 0.0f;
     Face(w, c, b.local - c.player.ship.pos);
 }
 static void Park(GameState &g, int body, double altRadii) { Park(g, g, body, altRadii); }
@@ -92,17 +94,18 @@ static void TestFuel()
     const StarSystem &home = g.systems[H];
     int c = BodyIndex(g, home.name + " c"), d = BodyIndex(g, home.name + " d");
 
+    // Cruise: getting up to the speed the throttle asks for burns fuel; holding it is free
     Park(g, c, 0.5); Face(g, home.u);
     double f0 = g.player.fuel;
-    Controls thrust; thrust.forward = 1;
-    Run(g, 10.0, thrust);
-    CHECK(fabs((f0 - g.player.fuel) - 0.10) < 0.002, "cruise thrust 10 s burns 0.10 t (got %.4f)", f0 - g.player.fuel);
-
-    Controls damp; damp.toggleDampeners = true;
-    Run(g, 1.0 / SIM_HZ, damp);
+    g.player.ship.throttle = 0.25f;
+    Run(g, 10.0);
+    double v = Vector3Length(g.player.ship.vel);
+    CHECK(fabs(v - ThrottleSpeed(0.25f)) < 0.01 * v && f0 - g.player.fuel > 0.001 && f0 - g.player.fuel < 0.1,
+          "quarter throttle: up to %.0f m/s on %.4f t of fuel", v * METERS_PER_UNIT, f0 - g.player.fuel);
     f0 = g.player.fuel;
     Run(g, 5.0);
-    CHECK(f0 - g.player.fuel == 0.0, "coasting with dampeners off is free (got %.4f)", f0 - g.player.fuel);
+    CHECK(f0 - g.player.fuel == 0.0, "holding a steady speed is free (got %.4f)", f0 - g.player.fuel);
+    g.player.ship.throttle = 0.0f;
 
     // Hyper from c toward d
     const Body &bc = g.loaded.bodies[c], &bd = g.loaded.bodies[d];
@@ -131,6 +134,139 @@ static void TestFuel()
     Run(g, 5.0, hyper);
     CHECK(g.flight.drive.noFuel && fabs(Vector3Length(g.player.ship.vel) - LIMP_SPEED) < LIMP_SPEED * 0.01,
           "empty tank limps at %.4f AU/s", Vector3Length(g.player.ship.vel) / AU_U);
+}
+
+// Flying: throttle, rudder, dampeners, and the hyper drive stopping short of what it's aimed at
+static void TestFlight()
+{
+    GameState g; NewGame(g);
+    const SysId H = g.systems.home;
+    const StarSystem &home = g.systems[H];
+    Ship &ship = g.player.ship;
+    auto speed = [&]() { return (double)Vector3Length(ship.vel); };
+    auto nose  = [&]() { return speed() > 0.0 ? Vector3DotProduct(Vector3Scale(ship.vel, 1.0f / (float)speed()), ShipForward(ship)) : 0.0f; };
+
+    // Open space, nothing to slow for
+    ship.anchor = H; ship.pos = home.n * (0.7 * LY_U); ship.vel = { 0, 0, 0 }; ship.throttle = 0.0f;
+    Face(g, home.n);
+    Controls up; up.throttle = 1;
+    Run(g, 1.0, up);
+    CHECK(fabsf(ship.throttle - THROTTLE_RATE) < 0.01f && speed() > 1.0 && speed() < 2000.0,
+          "1 s of W: throttle %.0f%%, %.0f m/s", ship.throttle * 100.0f, speed() * METERS_PER_UNIT);
+    Run(g, 11.0, up);
+    CHECK(ship.throttle == 1.0f && speed() > 0.989 * LIGHT_SEC_U && speed() <= 0.9901 * LIGHT_SEC_U,
+          "12 s of W: full throttle, %.4f c", speed() / LIGHT_SEC_U);
+    Run(g, 3.0);
+    CHECK(ship.throttle == 1.0f && speed() > 0.989 * LIGHT_SEC_U, "hands off: the throttle stays where it was set");
+
+    // Turning: the ship goes where it points, and keeps its speed
+    Controls rudder; rudder.yaw = 90.0f / (float)SIM_HZ;                  // A held for a second: 90 degrees
+    Run(g, 1.0, rudder);
+    CHECK(speed() > 0.9 * LIGHT_SEC_U && nose() > 0.9f, "a 90 degree turn at 0.99 c: still %.2f c, %.0f degrees of slip",
+          speed() / LIGHT_SEC_U, acosf(fminf(nose(), 1.0f)) * RAD2DEG);
+    Run(g, 1.5);
+    CHECK(nose() > 0.9999f, "...and a moment later the slip is gone");
+    Controls damp; damp.toggleDampeners = true;
+    Run(g, 1.0 / SIM_HZ, damp);
+    Run(g, 1.0, rudder);
+    CHECK(!ship.dampeners && nose() < 0.8f, "dampeners off: the same turn leaves the ship sliding (%.0f degrees of slip)", acosf(nose()) * RAD2DEG);
+    Run(g, 1.0 / SIM_HZ, damp);
+
+    // All stop, and reverse
+    Controls stop; stop.allStop = true;
+    Run(g, 5.0, stop);
+    CHECK(speed() == 0.0 && ship.throttle == 0.0f && !ship.allStop, "all stop (W+S): throttle to zero, stopped from 0.99 c inside 5 s");
+    {
+        // The keys: W and S together are all stop, and neither does anything more until both are up
+        Settings keys;
+        bool cut = false;
+        InputFrame in;
+        in.Hold(KEY_W);
+        Controls c1 = ReadFlightControls(in, 1.0f / 60.0f, keys, cut);
+        in.Hold(KEY_S);
+        Controls c2 = ReadFlightControls(in, 1.0f / 60.0f, keys, cut), c3 = ReadFlightControls(in, 1.0f / 60.0f, keys, cut);
+        InputFrame onlyS; onlyS.Hold(KEY_S);
+        Controls c4 = ReadFlightControls(onlyS, 1.0f / 60.0f, keys, cut);
+        Controls c5 = ReadFlightControls(InputFrame(), 1.0f / 60.0f, keys, cut);
+        Controls c6 = ReadFlightControls(onlyS, 1.0f / 60.0f, keys, cut);
+        CHECK(c1.throttle == 1.0f && !c1.allStop && c2.allStop && c2.throttle == 0.0f && !c3.allStop && c4.throttle == 0.0f &&
+              !c4.allStop && c5.throttle == 0.0f && c6.throttle == -1.0f,
+              "W+S is all stop; letting go of one of them doesn't move the throttle; S works again once both are up");
+    }
+    Controls down; down.throttle = -1;
+    Run(g, 5.0, down);
+    CHECK(ship.throttle == -THROTTLE_REVERSE && Vector3DotProduct(ship.vel, ShipForward(ship)) < -300.0f && speed() < 600.0,
+          "S from a standstill: reverse, no faster than %.1f km/s", speed() / KM_U);
+    Run(g, 2.0, stop);
+
+    // Hyper straight at a planet: the drive stops by itself, in trading range
+    UpdateLoadedSystem(g);
+    ship.anchor = H; ship.pos = {};
+    UpdateLoadedSystem(g);
+    int d = BodyIndex(g, home.name + " d");
+    const Body bd = g.loaded.bodies[d];
+    DVec3 out = Norm(bd.local * -1.0 + home.n * (0.3 * Len(bd.local)));   // approach from sunward and above the plane
+    DVec3 side = Norm(Cross(out, home.n));
+    ship.pos = bd.local + out * (0.05 * AU_U); ship.vel = { 0, 0, 0 }; ship.throttle = 0.0f;
+    Face(g, bd.local - ship.pos);
+    Controls hyper; hyper.hyper = true;
+    Run(g, 20.0, hyper);
+    double from = Len(FromShip(g.systems, ship, H, bd.local));
+    CHECK(speed() == 0.0 && g.flight.drive.holding && fabs(from - StopDistance(bd)) < 0.01 * bd.radius && g.flight.nearBody == d,
+          "hyper at %s from 0.05 AU: stopped %.0f km above it (%.2f radii), in trading range", bd.name.c_str(),
+          (from - bd.radius) / KM_U, (from - bd.radius) / bd.radius);
+    Run(g, 2.0);
+    CHECK(speed() == 0.0, "let go of Shift with the throttle at zero: stays put");
+
+    // Hyper zeroes the throttle, so letting go of Shift doesn't send you into the thing at cruise
+    ship.pos = bd.local + out * (0.05 * AU_U); ship.vel = { 0, 0, 0 }; ship.throttle = 0.8f;
+    Face(g, bd.local - ship.pos);
+    Run(g, 20.0, hyper);
+    CHECK(g.flight.drive.holding && ship.throttle == 0.0f, "the same run with the throttle at 80%%: it's at zero on arrival");
+    Run(g, 2.0);
+    CHECK(speed() == 0.0 && fabs(Len(FromShip(g.systems, ship, H, bd.local)) - StopDistance(bd)) < 0.01 * bd.radius,
+          "...so the ship stays where the drive stopped it");
+    ship.pos = bd.local + out * (0.05 * AU_U); ship.vel = { 0, 0, 0 }; ship.throttle = 0.8f;
+    Face(g, bd.local + side * (3.0 * StopDistance(bd)) - ship.pos);
+    Run(g, 3.0, hyper);
+    double inHyper = speed();
+    Run(g, 4.0);
+    CHECK(ship.throttle == 0.0f && inHyper > 1000.0 * APPROACH_SPEED && speed() == 0.0,
+          "any hyper run does: 3 s of Shift in the open, let go, and the ship is stopped 4 s later");
+
+    // ...but not if you're only passing by
+    ship.pos = bd.local + out * (0.05 * AU_U); ship.vel = { 0, 0, 0 };
+    Face(g, bd.local + side * (3.0 * StopDistance(bd)) - ship.pos);
+    Run(g, 20.0, hyper);
+    CHECK(!g.flight.drive.holding && speed() > 1000.0 * APPROACH_SPEED && Len(FromShip(g.systems, ship, H, bd.local)) > 0.05 * AU_U,
+          "aimed 3 stop-distances wide of it: flies on past (%.3f AU beyond)", Len(FromShip(g.systems, ship, H, bd.local)) / AU_U);
+
+    // A station: 3 km off, close enough to trade
+    int st = -1;
+    for (int i = 0; i < (int)g.loaded.bodies.size(); i++) if (g.loaded.bodies[i].kind == Kind::Station) { st = i; break; }
+    const Body bs = g.loaded.bodies[st];
+    ship.pos = bs.local + home.n * (20000.0 * KM_U); ship.vel = { 0, 0, 0 };
+    Face(g, bs.local - ship.pos);
+    Run(g, 20.0, hyper);
+    Run(g, 0.1);
+    from = Len(FromShip(g.systems, ship, H, bs.local));
+    CHECK(speed() == 0.0 && fabs(from - StopDistance(bs)) < 20.0 && g.flight.nearBody == st && TradePartner(g),
+          "hyper at %s from 20,000 km: stopped %.1f km off, in trading range", bs.name.c_str(), (from - bs.radius) / KM_U);
+
+    // Cruise flat out at a planet: the gravity well slows you; you arrive at the surface gently
+    ship.pos = bd.local + out * (0.01 * AU_U); ship.vel = { 0, 0, 0 }; ship.throttle = 1.0f;
+    Face(g, bd.local - ship.pos);
+    double fastest = 0.0, over = 0.0;
+    for (int i = 0; i < 40 * (int)SIM_HZ; i++) {
+        StepGame(g, {}, {}, (float)(1.0 / SIM_HZ));
+        double up = Len(FromShip(g.systems, ship, H, bd.local)) - bd.radius;
+        fastest = fmax(fastest, speed());
+        over = fmax(over, speed() / fmax((double)APPROACH_SPEED, WELL_K * up));
+    }
+    double alt = Len(FromShip(g.systems, ship, H, bd.local)) - bd.radius;
+    CHECK(fastest > 0.9 * LIGHT_SEC_U && over < 1.1 && speed() <= APPROACH_SPEED * 1.01 && alt < 50.0 * KM_U && alt > 0.0,
+          "full throttle at %s from 0.01 AU: 0.99 c on the way, slowed by its gravity well, at the surface doing %.1f km/s",
+          bd.name.c_str(), speed() / KM_U);
 }
 
 static void TestTrade()
@@ -511,6 +647,146 @@ static void TestSystems()
     }
 }
 
+// Charts, courses and the maps
+static void TestMaps()
+{
+    GameState g; NewGame(g);
+    const Galaxy &gal = g.systems;
+    const SysId H = gal.home;
+    const StarSystem &home = gal[H];
+
+    // Home is charted from the start: the map lists everything, moons and stations under their worlds
+    std::vector<MapRow> rows = SystemMapRows(g);
+    int unknown = 0, nested = 0, stations = 0, misplaced = 0;
+    for (size_t i = 0; i < rows.size(); i++) {
+        const MapRow &r = rows[i];
+        if (!r.known) unknown++;
+        if (r.indent > 0) nested++;
+        if (r.target.type != TargetId::Body) continue;
+        const Body &b = g.loaded.bodies[r.target.index];
+        if (b.kind == Kind::Station) stations++;
+        if (b.kind == Kind::Moon || (b.kind == Kind::Station && b.parent != 0)) {      // must sit below its parent, indented
+            bool under = false;
+            for (size_t k = i; k-- > 0;)
+                if (rows[k].indent < r.indent) { under = rows[k].target == TargetId::MakeBody(H, b.parent); break; }
+            if (!under) misplaced++;
+        }
+    }
+    int allStations = 0;
+    for (const Body &b : g.loaded.bodies) if (b.kind == Kind::Station) allStations++;
+    CHECK(unknown == 0 && nested > 0 && stations == allStations && misplaced == 0 && rows[0].name == g.loaded.bodies[0].name,
+          "home's map: %d rows, all charted, %d moons and stations nested under their worlds", (int)rows.size(), nested);
+
+    // A course from the map: it's the selection, the nose swings onto it, and Shift locks on
+    int d = BodyIndex(g, home.name + " d");
+    const Body bd = g.loaded.bodies[d];
+    Park(g, BodyIndex(g, home.name + " c"), 2.0);
+    Face(g, home.n);
+    Aim aim; aim.course = TargetId::MakeBody(H, d); aim.steer = true;
+    Run(g, 2.0, {}, aim);
+    Vector3 to = ToF(Norm(bd.local - ShipLocal(g)));
+    CHECK(g.flight.selected == aim.course && Vector3DotProduct(ShipForward(g.player.ship), to) > 0.99999f,
+          "course set for %s: selected, and 2 s later the nose is on it", bd.name.c_str());
+    aim.steer = false;
+    Controls hyper; hyper.hyper = true;
+    Run(g, 0.2, hyper, aim);
+    CHECK(g.flight.lock == aim.course, "Shift locks onto the course");
+    Run(g, 25.0, hyper, aim);
+    CHECK(g.flight.drive.holding && g.flight.nearBody == d, "...and takes the ship there");
+    Aim other = aim; other.hovered = TargetId::MakeBody(H, 0);
+    Run(g, 0.1, {}, other);
+    CHECK(g.flight.selected == other.hovered, "whatever's under the reticle still comes first");
+
+    // Another system: no charts, so only what can be seen from afar
+    const StarSystem *next = nullptr;
+    for (const StarSystem *s : Neighbours(g, 20.0)) {
+        if (s->id == H) continue;
+        LoadedSystem L;
+        GenerateSystemContents(*s, L);
+        int planets = 0; bool people = false, moons = false;
+        for (const Body &b : L.bodies) { if (b.kind == Kind::Planet && b.population > 0) people = true; if (b.kind == Kind::Planet) planets++;
+                                         if (b.kind == Kind::Moon) moons = true; }
+        if (people && moons && planets >= 3) { next = s; break; }
+    }
+    CHECK(next != nullptr, "an inhabited neighbour to visit (%s)", next ? next->name.c_str() : "none");
+    if (!next) return;
+    g.player.ship.anchor = next->id; g.player.ship.pos = next->n * (0.5 * next->fieldH); g.player.ship.vel = { 0, 0, 0 };
+    g.player.ship.throttle = 0.0f;
+    Run(g, 0.05);
+    UpdateKnowledge(g, g);
+    rows = SystemMapRows(g);
+    int planets = 0, known = 0, deep = 0;
+    for (const MapRow &r : rows) {
+        if (r.target.type != TargetId::Body) continue;
+        const Body &b = g.loaded.bodies[r.target.index];
+        if (b.kind == Kind::Planet) { planets++; if (r.known) known++; }
+        if (b.kind == Kind::Moon || b.kind == Kind::Station) deep++;
+    }
+    CHECK(g.flight.drive.inField && planets >= 3 && known == 0 && deep == 0 && !g.know.charted.count(next->id),
+          "arriving at %s: %d planets on the map, none scanned, no moons or stations shown", next->name.c_str(), planets);
+
+    // Fly close to a world: it's scanned, and its moons and stations appear
+    int world = -1;
+    for (int i = 0; i < (int)g.loaded.bodies.size() && world < 0; i++) {
+        if (g.loaded.bodies[i].kind != Kind::Planet) continue;
+        for (const Body &m : g.loaded.bodies) if (m.kind == Kind::Moon && m.parent == i) world = i;
+    }
+    Park(g, world, 1.0);
+    Run(g, 0.05);
+    g.events.clear();
+    UpdateKnowledge(g, g);
+    bool told = false;
+    for (const GameEvent &e : g.events) if (e.text.find("Scanned " + g.loaded.bodies[world].name) == 0) told = true;
+    rows = SystemMapRows(g);
+    int shown = 0; bool worldKnown = false;
+    for (const MapRow &r : rows)
+        if (r.target.type == TargetId::Body) {
+            if (r.target.index == world) worldKnown = r.known;
+            if (g.loaded.bodies[r.target.index].parent == world) shown++;
+        }
+    CHECK(told && worldKnown && shown > 0 && Known(g, world) && !g.know.charted.count(next->id),
+          "one radius above %s: scanned; its %d moons and stations are on the map now", g.loaded.bodies[world].name.c_str(), shown);
+
+    // Hail someone who lives here: they send the lot
+    int tw = TradeWorld(g);
+    const Body &b = g.loaded.bodies[tw];
+    Park(g, tw, 0.9);
+    Run(g, 0.05);
+    Hail(g, tw);
+    UpdateKnowledge(g, g);
+    bool early = g.know.charted.count(next->id) > 0;
+    Run(g, 3.0);
+    UpdateKnowledge(g, g);
+    rows = SystemMapRows(g);
+    unknown = 0;
+    for (const MapRow &r : rows) if (!r.known) unknown++;
+    CHECK(!early && g.know.charted.count(next->id) && unknown == 0, "%s answered the hail: the whole system is charted (%d rows)",
+          b.name.c_str(), (int)rows.size());
+
+    // Charts are kept with the save
+    CHECK(SaveGame(g, "test_charts.txt"), "saved");
+    GameState h; NewGame(h);
+    CHECK(LoadGame(h, "test_charts.txt") && h.know.charted == g.know.charted && h.know.scanned == g.know.scanned &&
+          h.know.charted.count(H) && h.know.charted.size() == 2, "charts and scans round-trip through a save");
+    remove("test_charts.txt");
+
+    // Attitude against the ecliptic
+    float pitch, roll;
+    g.player.ship.rot = QuaternionFromMatrix(MatrixInvert(MatrixLookAt({ 0, 0, 0 }, ToF(next->u), ToF(next->n))));
+    PlaneAttitude(g.player.ship, next->n, pitch, roll);
+    bool level = fabsf(pitch) < 0.1f && fabsf(roll) < 0.1f;
+    Controls nose; nose.pitch = 30.0f / (float)SIM_HZ;
+    Run(g, 1.0, nose);
+    PlaneAttitude(g.player.ship, next->n, pitch, roll);
+    bool climbed = fabsf(pitch - 30.0f) < 0.5f && fabsf(roll) < 0.5f;
+    g.player.ship.rot = QuaternionFromMatrix(MatrixInvert(MatrixLookAt({ 0, 0, 0 }, ToF(next->u), ToF(next->n))));
+    Controls bank; bank.roll = -40.0f / (float)SIM_HZ;                       // E: roll right
+    Run(g, 1.0, bank);
+    PlaneAttitude(g.player.ship, next->n, pitch, roll);
+    CHECK(level && climbed && fabsf(roll - 40.0f) < 0.5f && fabsf(pitch) < 0.5f,
+          "attitude: level on the ecliptic reads 0 / 0; nose up 30 reads pitch +30; rolled right 40 reads roll %+.0f", roll);
+}
+
 static void TestMining()
 {
     GameState g; NewGame(g);
@@ -593,7 +869,7 @@ static void TestProtocol()
     GameState g; NewGame(g);
     g.player.cargo[ORE_PLATINUM] = 7.25; g.player.credits = 987.5; g.player.ship.vel = { 1.5f, -2.0f, 3.25f };
     InputStep in; in.seq = 77;
-    in.controls.forward = 1; in.controls.yaw = -0.37f; in.controls.hyper = true; in.controls.toggleDampeners = true;
+    in.controls.throttle = 1; in.controls.yaw = -0.37f; in.controls.hyper = true; in.controls.toggleDampeners = true;
     in.aim.hovered = TargetId::MakeRock(g.systems.home, 0xFEEDFACECAFEull); in.aim.retarget = TargetId::MakeShip(5);
     Writer w;
     WritePlayer(w, g.player);
@@ -609,10 +885,10 @@ static void TestProtocol()
     Reader shortR(w.buf.data(), 10);
     ReadPlayer(shortR);
     CHECK(!shortR.ok, "a truncated packet is caught, not read past its end");
-    Writer bad; bad.F32(NAN); bad.F32(50.0f); bad.F32(1e9f); bad.F32(0); bad.F32(0); bad.U8(0); bad.U8(0); bad.U8(0);
+    Writer bad; bad.F32(NAN); bad.F32(1e9f); bad.F32(-50.0f); bad.F32(0); bad.U8(0); bad.U8(0); bad.U8(0);
     Reader badR(bad.buf);
     InputStep sane = ReadInput(badR, 1);
-    CHECK(sane.controls.forward == 0.0f && sane.controls.strafe == 1.0f && sane.controls.yaw == 90.0f, "garbage inputs are clamped");
+    CHECK(sane.controls.throttle == 0.0f && sane.controls.yaw == 90.0f && sane.controls.pitch == -50.0f, "garbage inputs are clamped");
 
     // Reliable messages arrive once each, in order, through 30% loss and reordering
     Connection a, b;
@@ -738,15 +1014,16 @@ static void TestNetwork()
     CHECK(seen && Sees(bob, "Alice") && alice.g.traffic.size() == 1, "each sees the other (spawned %.0f m apart)", gap * METERS_PER_UNIT);
 
     // --- Prediction: the client flies ahead; the server, given the same inputs, lands in the same place ---
-    alice.c.forward = 1; alice.c.yaw = 0.05f; alice.c.roll = 0.2f;
+    alice.c.throttle = 1; alice.c.yaw = 0.05f; alice.c.roll = 0.2f;
     Pump(srv, { &alice, &bob }, 2.0);
-    alice.c = {};
+    alice.c = {}; alice.c.allStop = true;
     Pump(srv, { &alice, &bob }, 1.0);
+    alice.c = {};
     Pump(srv, { &alice, &bob }, 0.3, false);
     Captain *sa = OnServer(srv, "Alice");
     double err1 = sa ? Len(sa->player.ship.pos - alice.g.player.ship.pos) : 1e9;
     CHECK(sa && err1 < 1e-6 && alice.net.corrections == 0,
-          "3 s of thrusting and turning: server and client agree to %.1e units, %d corrections", err1, alice.net.corrections);
+          "3 s of throttling up, turning and stopping: server and client agree to %.1e units, %d corrections", err1, alice.net.corrections);
     seen = Sees(bob, "Alice");
     double err2 = seen && sa ? Len(FromShip(srv.world.systems, sa->player.ship, seen->ship.anchor, seen->ship.pos)) : 1e9;
     CHECK(err2 < 1.0, "Bob sees Alice where the server has her (%.2f m off)", err2 * METERS_PER_UNIT);
@@ -857,9 +1134,9 @@ static void TestNetwork()
     Pump(srv, { &alice2, &bob, &carol }, 2.0, true, 0.004);
     CHECK(carol.net.state == NetClient::State::Joined && carol.g.deltas.mined.count(rockId) == 1 && Sees(carol, "Bob") && Sees(carol, "Alice"),
           "Carol joined through 25%% packet loss and has the whole picture");
-    carol.c.forward = 1; carol.c.yaw = -0.1f;
+    carol.c.throttle = 1; carol.c.yaw = -0.1f;
     Pump(srv, { &alice2, &bob, &carol }, 1.5, true, 0.004);
-    carol.c = {};
+    carol.c = {}; carol.c.allStop = true;
     Pump(srv, { &alice2, &bob, &carol }, 0.5, true, 0.004);
     Pump(srv, { &alice2, &bob, &carol }, 0.5, false, 0.004);
     double err4 = Len(OnServer(srv, "Carol")->player.ship.pos - carol.g.player.ship.pos);
@@ -899,8 +1176,8 @@ int RunHeadlessTests(const char *only)
 {
     struct T { const char *name; void (*fn)(); };
     const T tests[] = {
-        { "fuel", TestFuel }, { "trade", TestTrade }, { "stations", TestStations }, { "hz", TestHabitableZone },
-        { "skimming", TestSkimming }, { "comms", TestComms }, { "galaxy", TestGalaxy }, { "systems", TestSystems },
+        { "fuel", TestFuel }, { "flight", TestFlight }, { "trade", TestTrade }, { "stations", TestStations }, { "hz", TestHabitableZone },
+        { "skimming", TestSkimming }, { "comms", TestComms }, { "galaxy", TestGalaxy }, { "systems", TestSystems }, { "maps", TestMaps },
         { "targeting", TestTargeting }, { "mining", TestMining }, { "save", TestSaveLoad },
         { "protocol", TestProtocol }, { "net", TestNetwork }, { "host", TestHosting },
     };
@@ -995,7 +1272,7 @@ int RunBot(const std::string &host, uint16_t port, const std::string &name, doub
                 // Lazy loops: thrust, turn, roll, now and then stop
                 double t = steps / SIM_HZ;
                 Controls c;
-                c.forward = fmod(t, 12.0) < 8.0 ? 1.0f : 0.0f;
+                c.throttle = fmod(t, 12.0) < 1.5 ? 1.0f : 0.0f;       // up to about half throttle
                 c.yaw     = (float)(0.6 * sin(t * 0.7));
                 c.pitch   = (float)(0.3 * sin(t * 0.31));
                 c.roll    = (float)(0.4 * cos(t * 0.5));
@@ -1059,6 +1336,68 @@ std::unique_ptr<ScriptedInput> MakeScript(const std::string &name)
             if (f == 720) in.Press(KEY_F9);                                   // back to the save
             if (f == 760) s.screenshot = "tour_loaded.png";
             if (f == 770) s.done = true;
+        };
+        return s;
+    }
+    if (name == "stations") {                                                // a look at each kind of station
+        s->body = [](ScriptedInput &s, InputFrame &in) {
+            (void)in;
+            GameState &g = *s.game;
+            static const struct { Settlement kind; const char *shot; } kinds[] = {
+                { Settlement::OrbitalPort, "station_port.png" }, { Settlement::Starbase, "station_starbase.png" },
+                { Settlement::Shipyard, "station_shipyard.png" }, { Settlement::SolarCollector, "station_collector.png" },
+                { Settlement::Greenhouse, "station_greenhouse.png" },
+                { Settlement::SkimmerStation, "station_skimmer.png" }, { Settlement::OreRefinery, "station_refinery.png" } };
+            const int COUNT = (int)(sizeof kinds / sizeof kinds[0]), EACH = 40;
+            int k = (s.frame - 20) / EACH, at = (s.frame - 20) % EACH;
+            if (s.frame < 20) return;
+            if (k >= COUNT) { s.done = true; return; }
+            if (at == 0)                                                     // the nearest one of this kind
+                for (const StarSystem *sys : Neighbours(g, 25.0)) {
+                    LoadedSystem L;
+                    GenerateSystemContents(*sys, L);
+                    int found = -1;
+                    for (int i = 0; i < (int)L.bodies.size() && found < 0; i++)
+                        if (L.bodies[i].kind == Kind::Station && L.bodies[i].settlement == kinds[k].kind) found = i;
+                    if (found < 0) continue;
+                    g.player.ship.anchor = sys->id; g.player.ship.pos = {};
+                    UpdateLoadedSystem(g);
+                    const Body &b = g.loaded.bodies[found];
+                    DVec3 from = Norm(sys->u * 0.7 + sys->v * 0.5 + sys->n * 0.45);
+                    g.player.ship.pos = b.local + from * (b.radius * 3.4);
+                    g.player.ship.vel = { 0, 0, 0 }; g.player.ship.throttle = 0.0f;
+                    Face(g, b.local - g.player.ship.pos);
+                    s.snap = true;
+                    break;
+                }
+            if (at == 30) s.screenshot = kinds[k].shot;
+        };
+        return s;
+    }
+    if (name == "maps") {                                                    // the system map (charted and not) and the sector map
+        s->body = [](ScriptedInput &s, InputFrame &in) {
+            GameState &g = *s.game;
+            int f = s.frame;
+            if (f == 20) in.Press(KEY_M);
+            if (f == 24) in.Press(KEY_DOWN), in.Press(KEY_DOWN);
+            if (f == 26) in.Press(KEY_DOWN), in.Press(KEY_DOWN);
+            if (f == 30) s.screenshot = "map_system.png";
+            if (f == 40) in.Press(KEY_M);
+            if (f == 50) s.screenshot = "map_sector.png";
+            if (f == 60) in.Press(KEY_ESCAPE);
+            if (f == 70)                                                     // somewhere without charts
+                for (const StarSystem *sys : Neighbours(g, 20.0))
+                    if (sys->id != g.systems.home && sys->develop > 0.5f && sys->stars[0].mass > 0.6) {
+                        g.player.ship.anchor = sys->id; g.player.ship.pos = sys->n * (0.5 * sys->fieldH) + sys->u * (0.2 * sys->fieldR);
+                        g.player.ship.vel = { 0, 0, 0 };
+                        s.snap = true;
+                        break;
+                    }
+            if (f == 90)  in.Press(KEY_M);
+            if (f == 100) s.screenshot = "map_uncharted.png";
+            if (f == 110) in.Press(KEY_ESCAPE);
+            if (f == 120) s.screenshot = "map_hud.png";
+            if (f == 125) s.done = true;
         };
         return s;
     }

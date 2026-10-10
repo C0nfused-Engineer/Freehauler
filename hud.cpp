@@ -215,20 +215,30 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
                              : (speed > MAX_SPEED * 1.01f ? "SPOOLING DOWN" : "CRUISE");
     DrawText(("SPEED " + FormatSpeed(speed)).c_str(), 20, 20, 24, HUD);
 
-    // Drive gauge, log scale from cruise to warp, tick at hyper
-    float gauge = (float)Clamp((float)(log(fmax(speed, MAX_SPEED) / MAX_SPEED) / log(WARP_SPEED / MAX_SPEED)), 0.0f, 1.0f);
-    int   tick  = 22 + (int)(196 * log(HYPER_SPEED / MAX_SPEED) / log(WARP_SPEED / MAX_SPEED));
+    // Drive gauge, log scale from a crawl to warp: ticks where cruise tops out (0.99 c) and at
+    // full hyper, and a marker under it for the speed the throttle is asking for
+    const double GAUGE_LOW = 2.0;
+    auto place = [&](double v) { return (float)Clamp((float)(log(fmax(v, GAUGE_LOW) / GAUGE_LOW) / log(WARP_SPEED / GAUGE_LOW)), 0.0f, 1.0f); };
+    double asked = ThrottleSpeed(p.ship.throttle);
     DrawRectangleLines(20, 52, 200, 12, HUD_DIM);
-    DrawRectangle(22, 54, (int)(196 * gauge), 8, hyper ? HUD : HUD_DIM);
-    DrawLine(tick, 50, tick, 66, HUD);
+    DrawRectangle(22, 54, (int)(196 * place(speed)), 8, hyper ? HUD : HUD_DIM);
+    for (double v : { (double)MAX_SPEED, HYPER_SPEED }) { int t = 22 + (int)(196 * place(v)); DrawLine(t, 50, t, 66, HUD); }
+    int mark = 22 + (int)(196 * place(fabs(asked)));
+    DrawTriangle({ (float)mark, 65.0f }, { mark - 5.0f, 73.0f }, { mark + 5.0f, 73.0f }, asked < 0.0 ? ORANGE : HUD);
     DrawText(mode, 228, 50, 16, hyper ? HUD : HUD_DIM);
 
-    DrawText(p.ship.dampeners ? "DAMPENERS ON" : "DAMPENERS OFF  - COASTING", 20, 74, 18,
+    DrawText(TextFormat("THROTTLE %s%d%%   %s", asked < 0.0 ? "REV " : "", (int)(fabsf(p.ship.throttle) * 100.0f + 0.5f),
+                        FormatSpeed((float)fabs(asked)).c_str()), 20, 78, 18, asked < 0.0 ? ORANGE : HUD);
+    DrawText(p.ship.dampeners ? "DAMPENERS ON" : "DAMPENERS OFF  - DRIFTING", 20, 102, 18,
              p.ship.dampeners ? HUD : ORANGE);
-    int y = 98;
+    int y = 126;
     if (p.ship.allStop) { DrawText("ALL STOP", 20, y, 18, YELLOW); y += 24; }
-    if (hyper && !drive.limiter.empty() && drive.limit < (drive.inField ? HYPER_SPEED : WARP_SPEED))
+    if (hyper && drive.holding)
+        { DrawText(TextFormat("ARRIVED: holding off %s", drive.limiter.c_str()), 20, y, 18, YELLOW); y += 24; }
+    else if (hyper && !drive.limiter.empty() && drive.limit < (drive.inField ? HYPER_SPEED : WARP_SPEED))
         { DrawText(TextFormat("GRAVITY WELL: slowing for %s", drive.limiter.c_str()), 20, y, 18, YELLOW); y += 24; }
+    else if (!hyper && !drive.cruiseLimiter.empty() && fabs(asked) > drive.cruiseLimit)
+        { DrawText(TextFormat("GRAVITY WELL: slowing for %s", drive.cruiseLimiter.c_str()), 20, y, 18, YELLOW); y += 24; }
     if (f.lock.valid())          { DrawText(TextFormat("TARGET LOCK: %s", TargetName(g, f.lock).c_str()), 20, y, 18, HUD); y += 24; }
     else if (f.selected.valid()) { DrawText(TextFormat("TARGET: %s   [MMB] info", TargetName(g, f.selected).c_str()), 20, y, 18, HUD_LABEL); y += 24; }
     if (!f.miningStatus.empty()) DrawText(f.miningStatus.c_str(), 20, y, 18, f.miningActive ? ORANGE : YELLOW);
@@ -312,6 +322,31 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
             }
     }
 
+    // Attitude: an artificial horizon against the system's ecliptic, or the galactic plane between the stars
+    {
+        bool inSystem = g.loaded.index >= 0 && anchorRatio < 1.5;
+        float pitch, roll;
+        PlaneAttitude(eye, inSystem ? systems[g.loaded.index].n : DVec3{ 0, 1, 0 }, pitch, roll);
+        const float R = 72.0f;
+        Vector2 c = { sw - 104.0f, sh - 196.0f };
+        // The horizon, as it would look out of the windscreen: roll right and it tips up on the right; nose up and it drops
+        float   a = -roll * DEG2RAD, off = Clamp(pitch / 90.0f, -1.0f, 1.0f) * R;
+        Vector2 along = { cosf(a), sinf(a) }, down = { -sinf(a), cosf(a) };
+        Vector2 mid = { c.x + down.x * off, c.y + down.y * off };
+        float   half = sqrtf(fmaxf(0.0f, R * R - off * off));
+        DrawCircleLinesV(c, R, HUD_DIM);
+        DrawLineEx({ mid.x - along.x * half, mid.y - along.y * half }, { mid.x + along.x * half, mid.y + along.y * half }, 2.0f, HUD);
+        DrawLineV(mid, { mid.x - down.x * 10.0f, mid.y - down.y * 10.0f }, HUD);            // a tick on the 'up' side
+        DrawLineEx({ c.x - 26, c.y }, { c.x - 9, c.y }, 2.0f, WHITE); DrawLineEx({ c.x + 9, c.y }, { c.x + 26, c.y }, 2.0f, WHITE);   // the ship
+        DrawCircleV(c, 2.5f, WHITE);
+        const char *plane = inSystem ? "ECLIPTIC" : "GALACTIC PLANE";
+        DrawText(plane, (int)(c.x - MeasureText(plane, 16) / 2), (int)(c.y - R - 24), 16, HUD_LABEL);
+        const char *p = TextFormat("PITCH %+.0f", pitch);
+        DrawText(p, (int)(c.x - MeasureText(p, 16) / 2), (int)(c.y + R + 8), 16, HUD);
+        const char *r = TextFormat("ROLL %+.0f", roll);                  // (TextFormat reuses its buffers: one at a time)
+        DrawText(r, (int)(c.x - MeasureText(r, 16) / 2), (int)(c.y + R + 28), 16, HUD);
+    }
+
     // Reticle
     Vector2 aim = AimPoint(eye, v);
     DrawLineV({ aim.x - 8, aim.y }, { aim.x - 3, aim.y }, HUD_DIM);
@@ -330,9 +365,9 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
     }
 
     if (showHelp) {
-        const char *help = online ? "W/S/A/D thrust  Q/E roll  SHIFT hyper/warp  X stop  CAPS damp  C comms  O orbits  "
+        const char *help = online ? "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  C comms  M map  O orbits  "
                                     "MMB info  F trade  LMB mine  ESC menu"
-                                  : "W/S/A/D thrust  Q/E roll  SHIFT hyper/warp  X stop  CAPS damp  C comms  O orbits  "
+                                  : "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  C comms  M map  O orbits  "
                                     "MMB info  F trade  LMB mine  F5/F9 quicksave/load  ESC menu";
         int size = 16;
         while (size > 10 && MeasureText(help, size) > sw - 40) size--;          // shrink to fit narrow windows

@@ -220,7 +220,7 @@ static std::vector<InfoRow> ShipRows(const World &w, const Traffic &t)
              { "Speed", FormatSpeed(speed) },
              { "Drive", drive },
              { "Near", w.systems[t.ship.anchor].name },
-             { "Activity", t.mining ? "Mining" : t.thrusting ? "Under thrust" : "Coasting" } };
+             { "Activity", t.mining ? "Mining" : t.thrusting ? "Under way" : "Stopped" } };
 }
 
 std::vector<InfoRow> TargetInfo(const World &w, const Captain &c, TargetId t)

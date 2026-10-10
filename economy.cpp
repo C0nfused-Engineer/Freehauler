@@ -63,6 +63,10 @@ static const EconTemplate &TemplateFor(Econ e)
           { GOOD_ALLOYS, ORE_TITANIUM, GOOD_ELECTRONICS, GOOD_MACHINERY, GOOD_REACTOR_PARTS, GOOD_ROBOTICS, GOOD_POLYMERS,
             GOOD_INSTRUMENTS },
           {}, 0.9 },
+        // Power (a stand-in until the economy is rebuilt): stored energy out, upkeep in
+        { { GOOD_FUEL_CELLS },
+          { GOOD_FOOD, GOOD_WATER, GOOD_MACHINERY, GOOD_ELECTRONICS, GOOD_MEDICAL },
+          {}, 0.6 },
     };
     int i = (int)e;
     return i >= 0 && i < (int)(sizeof t / sizeof t[0]) ? t[i] : none;

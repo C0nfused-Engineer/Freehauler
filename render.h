@@ -25,10 +25,12 @@ inline Vector3 MapPoint(DVec3 rel)
 }
 
 struct RenderAssets {
-    VectorModel ship, planet, star, station;
+    VectorModel ship, planet, star;
+    VectorModel station, starbase, drydock, collector, greenhouse, skimmer;   // stations: the common wheel, and the special kinds
     std::vector<VectorModel> rocks;          // AST_TEMPLATES procedural shapes
     void Load();
     void Unload();
+    const VectorModel &StationModel(Settlement kind) const;
 };
 
 // Space dust: specks in a box that wraps around the ship, giving a sense of motion

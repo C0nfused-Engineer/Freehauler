@@ -272,6 +272,7 @@ void NetClient::Step(GameState &g, const Controls &c, const Aim &aim, float dt)
 static bool Agrees(const Ship &a, double fuelA, const Ship &b, double fuelB)
 {
     if (a.anchor != b.anchor || a.dampeners != b.dampeners || a.allStop != b.allStop) return false;
+    if (fabsf(a.throttle - b.throttle) > 1e-4f) return false;
     double speed = Vector3Length(b.vel);
     if (Len(a.pos - b.pos) > 0.5 + 1e-6 * speed) return false;
     if (Vector3Length(Vector3Subtract(a.vel, b.vel)) > 0.05f + 1e-5f * speed) return false;

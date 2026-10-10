@@ -9,17 +9,32 @@
 // ---------------------------------------------------------------------------
 // Flight tuning
 // ---------------------------------------------------------------------------
-const float  THRUST_ACCEL = 25.0f;          // u/s^2   (125 m/s^2)
-const float  MAX_SPEED    = 240.0f;         // u/s     (1.2 km/s) cruise / combat / docking
-const float  DAMPER_ACCEL = 20.0f;          // how hard dampeners cancel drift
-const float  BRAKE_ACCEL  = 35.0f;          // all-stop deceleration
+// Cruise is flown like an aircraft: the throttle sets a speed, the nose sets the direction.
+const float  MAX_SPEED      = (float)(0.99 * LIGHT_SEC_U);   // cruise tops out at 0.99 c
+const float  APPROACH_SPEED = 240.0f;       // u/s (1.2 km/s): gravity wells never slow you below this
+const float  THRUST_ACCEL   = 25.0f;        // u/s^2 (125 m/s^2): the least the engines push...
+const double CRUISE_SPOOL   = 2.0;          // ...and above ~60 m/s, speed grows by e^2 (~7x) per second
+const float  BRAKE_ACCEL    = 35.0f;        // slowing down: at least this...
+const double CRUISE_BRAKE   = 6.0;          // ...and speed drops by e^6 per second
+const float  DAMPER_RATE    = 4.0f;         // dampeners: sideways drift dies off by e^4 per second...
+const float  DAMPER_ACCEL   = 20.0f;        // ...plus this, so it ends at zero
+const float  THROTTLE_RATE  = 0.35f;        // holding W or S moves the throttle this much per second (1 = full)
+const float  THROTTLE_REVERSE = 0.3f;       // how far the throttle goes into reverse (about 1.7 km/s backward)
+const double THROTTLE_MIN_SPEED = 2.0;      // u/s: sets how fine the bottom of the throttle is
 const double HYPER_SPEED  = 0.7 * AU_U;     // per second
 const double WARP_SPEED   = 0.35 * LY_U;    // per second
 const double SPOOL_UP     = 4.0;            // while spooling up, speed grows by e^4 (~55x) per second
 const double SPOOL_DOWN   = 40.0;           // coming down is 10x faster
-const double WELL_K       = 1.5;            // gravity-well limit in hyper: max speed = WELL_K * distance, per second
+const double WELL_K       = 1.5;            // gravity-well limit: max speed = WELL_K * distance, per second
 const double WARP_WELL_K  = 1.0;            // same for warp approaching a system
 const float  HYPER_ALIGN  = 4.0f;           // how fast hyper/warp velocity swings to follow the nose
+
+// Hyper stops by itself short of a body you fly straight at
+const double STOP_WORLD_RADII = 0.5;        // planets and moons: this many radii above the surface (in trading range)
+const double STOP_STAR_RADII  = 1.5;        // stars: this many radii above the surface (in scooping range)
+const double STOP_STATION     = 600.0;      // stations: 3 km off
+const double STOP_LOCK        = 100.0;      // a locked rock, ship or belt: 500 m off
+const double STOP_SPEED       = 10.0;       // closing slower than this (50 m/s) counts as arrived
 
 // Target lock: holding Shift while a body is targeted locks the nose onto it
 const float  LOCK_TURN_RATE   = 6.0f;       // how fast the nose swings onto the target (per second)
@@ -50,13 +65,13 @@ struct Ship {
     Quaternion rot       = { 0.0f, 0.0f, 0.0f, 1.0f };
     bool       dampeners = true;
     bool       allStop   = false;
-    float      thrustUse = 0.0f;                     // how hard the cruise thrusters worked this step (1 = full)
+    float      throttle  = 0.0f;                     // cruise speed setting: 0 stopped, 1 = 0.99 c, below 0 reverse (hyper zeroes it)
+    float      thrustUse = 0.0f;                     // how hard the cruise engines worked this step (1 = full)
 };
 
 // What the pilot (player or AI) wants this step
 struct Controls {
-    float forward = 0.0f;   // +1 forward, -1 back
-    float strafe  = 0.0f;   // +1 right, -1 left
+    float throttle = 0.0f;  // +1 throttle up, -1 throttle down
     float yaw     = 0.0f;   // degrees this step
     float pitch   = 0.0f;   // degrees this step
     float roll    = 0.0f;   // degrees this step
@@ -71,6 +86,9 @@ struct DriveInfo {
     bool        inField   = false;   // inside the loaded system's gravity field
     double      limit     = 0.0;     // top speed for hyper/warp right now
     std::string limiter;             // body/system that's slowing us, if any
+    bool        holding   = false;   // hyper has stopped short of 'limiter'
+    double      cruiseLimit = MAX_SPEED;   // top speed for cruise right now (bodies ahead slow it)
+    std::string cruiseLimiter;
     double      fieldRatio = 0.0;
     double      exitClimb  = 0.0;    // distance to leave the field by climbing out of the plane
     double      exitEdge   = 0.0;    // distance to leave it by flying outward in the plane
@@ -92,3 +110,8 @@ DriveInfo ComputeDrive(const Ship &ship, const Galaxy &sys, const LoadedSystem &
                        const DVec3 *lockRel, double lockRadius, const std::string &lockName, bool haveFuel);
 void      UpdateShip(Ship &s, const Controls &in, float dt, const DriveInfo &drive);
 double    DriveBurnRate(double speed);                                // hyper/warp fuel burn at a speed (t/s)
+double    ThrottleSpeed(float throttle);                              // the speed a throttle setting asks for (u/s)
+double    StopDistance(const Body &b);                                // from its center: where hyper stops short of it
+// The ship's attitude against a plane with normal 'up' (a system's ecliptic, the galactic disk): pitch is the
+// nose above (+) or below the plane, roll is the right wing down (+) or up, both in degrees
+void      PlaneAttitude(const Ship &s, DVec3 up, float &pitch, float &roll);
