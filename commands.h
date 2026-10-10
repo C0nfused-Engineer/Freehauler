@@ -7,7 +7,7 @@
 #include "game.h"
 
 struct Command {
-    enum Type : uint8_t { SellGoods, BuyFuel, Hail, MarketReport, LocalInfo, HangUp, BuyGoods, Count };
+    enum Type : uint8_t { SellGoods, BuyFuel, Hail, MarketReport, LocalInfo, HangUp, BuyGoods, BuyData, Count };
     Type     type = SellGoods;
     int32_t  arg  = 0;        // SellGoods / BuyGoods: which good (goods.h); the comms ones: body index in the loaded system
     double   qty  = 0.0;      // tonnes (1e30 = all you can)

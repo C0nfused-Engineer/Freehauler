@@ -288,33 +288,50 @@ static void TestTrade()
     Park(g, c, 0.9); Run(g, 0.05);
     CHECK(g.flight.nearBody == c && TradePartner(g), "0.9 radii up: can trade with %s", g.loaded.bodies[c].name.c_str());
 
-    Market mk = MakeMarket(g.loaded.bodies[c]);
-    g.player.cargo[ORE_IRON] = 30; g.player.cargo[ORE_PLATINUM] = 2;
-    double cr = g.player.credits;
-    SellGoods(g, ORE_IRON, 1.0);
-    CHECK(fabs(g.player.credits - cr - mk.SellPrice(ORE_IRON)) < 1e-6, "sold 1 t iron for %.0f cr", g.player.credits - cr);
-    SellGoods(g, ORE_IRON, 1e30);
-    CHECK(g.player.cargo[ORE_IRON] == 0.0, "sell all empties the iron");
-    g.player.fuel = 12; g.player.credits = 10000; cr = g.player.credits;
-    BuyFuel(g, 1e30);
-    CHECK(fabs(g.player.fuel - 50) < 1e-9 && fabs(cr - g.player.credits - 38 * mk.fuelPrice) < 1e-6,
-          "filled 38 t of fuel for %.0f cr", cr - g.player.credits);
-    bool sold = SellGoods(g, ORE_NICKEL, 1.0);
-    CHECK(!sold && !g.events.empty() && g.events.back().type == EventType::Notice, "selling ore you don't have fails with a message");
-
-    // Buying: an export, cheap; then something it doesn't sell
-    int ex = -1, notSold = -1;
+    Market mk = LiveMarket(g, g, g.loaded.bodies[c]);
+    // Something it wants (an import if it has one), something it makes, something it doesn't deal in
+    int want = -1, ex = -1, notSold = -1, none = -1;
     for (int gd = 0; gd < GOOD_COUNT; gd++) {
-        if (ex < 0 && mk.role[gd] == Role::Export) ex = gd;
+        if (mk.role[gd] == Role::Import && (want < 0 || mk.role[want] != Role::Import)) want = gd;
+        if (want < 0 && mk.Buys(gd)) want = gd;
+        if (mk.role[gd] == Role::Export && mk.Sells(gd) && (ex < 0 || mk.stock[gd] > mk.stock[ex])) ex = gd;
         if (notSold < 0 && !mk.Sells(gd)) notSold = gd;
+        if (none < 0 && mk.role[gd] == Role::None) none = gd;
     }
-    CHECK(ex >= 0, "%s exports %s", g.loaded.bodies[c].name.c_str(), ExportsLine(mk).c_str());
-    if (ex >= 0) {
+    CHECK(want >= 0 && ex >= 0 && mk.price[want] > 0.0, "%s needs %s and makes %s", g.loaded.bodies[c].name.c_str(),
+          ImportsLine(mk).c_str(), ExportsLine(mk).c_str());
+    if (want < 0 || ex < 0) return;
+    g.player.cargo[want] = 30;
+    double cr = g.player.credits;
+    SellGoods(g, want, 1.0);
+    double got = g.player.credits - cr;
+    CHECK(got <= mk.SellPrice(want) + 1e-6 && got > 0.97 * mk.SellPrice(want), "sold 1 t %s for %.1f cr (quoted %.1f)", GoodData(want).name, got, mk.SellPrice(want));
+    SellGoods(g, want, 1e30);
+    CHECK(g.player.cargo[want] == 0.0 && LiveMarket(g, g, g.loaded.bodies[c]).price[want] < mk.price[want] &&
+          fabs(LiveMarket(g, g, g.loaded.bodies[c]).stock[want] - mk.stock[want] - 30.0) < 0.01,
+          "sell all empties the hold, into its stock, and the price drops: %.1f to %.1f", mk.price[want], LiveMarket(g, g, g.loaded.bodies[c]).price[want]);
+    mk = LiveMarket(g, g, g.loaded.bodies[c]);
+    g.player.fuel = 12; g.player.credits = 100000; cr = g.player.credits;
+    BuyFuel(g, 1e30);
+    double paid = cr - g.player.credits;
+    CHECK(mk.fuelPrice > 0.0 && fabs(g.player.fuel - 50) < 1e-9 && paid >= 38 * mk.fuelPrice - 1e-6 && paid < 38 * mk.fuelPrice * 1.5,
+          "filled 38 t of fuel for %.0f cr (%.1f cr/t when asked)", paid, mk.fuelPrice);
+    bool sold = SellGoods(g, want, 1.0);
+    CHECK(!sold && !g.events.empty() && g.events.back().type == EventType::Notice, "selling what you don't have fails with a message");
+    if (none >= 0) {
+        g.player.cargo[none] = 1;
+        CHECK(!SellGoods(g, none, 1.0) && g.player.cargo[none] == 1, "%s isn't traded here: no sale", GoodData(none).name);
+        g.player.cargo[none] = 0;
+    }
+
+    // Buying: the price climbs as the deal goes through
+    {
+        mk = LiveMarket(g, g, g.loaded.bodies[c]);
         g.player.credits = 100000; cr = g.player.credits;
         bool bought = BuyGoods(g, ex, 2.0);
-        CHECK(bought && fabs(g.player.cargo[ex] - 2.0) < 1e-9 && fabs(cr - g.player.credits - 2.0 * mk.BuyPrice(ex)) < 1e-6 &&
-              mk.BuyPrice(ex) < GoodData(ex).basePrice,
-              "bought 2 t %s at %.0f cr/t (base %.0f)", GoodData(ex).name, mk.BuyPrice(ex), GoodData(ex).basePrice);
+        paid = cr - g.player.credits;
+        CHECK(bought && fabs(g.player.cargo[ex] - 2.0) < 1e-9 && paid >= 2.0 * mk.BuyPrice(ex) - 1e-6 && paid < 2.2 * mk.BuyPrice(ex),
+              "bought 2 t %s for %.1f cr (quoted %.1f cr/t)", GoodData(ex).name, paid, mk.BuyPrice(ex));
         g.player.credits = 1e9;
         BuyGoods(g, ex, 1e30);
         CHECK(fabs(g.player.CargoTotal() - CARGO_CAPACITY) < 1e-6, "buy max fills the hold (%.1f t)", g.player.CargoTotal());
@@ -345,12 +362,17 @@ static void TestStations()
     CHECK(stations >= (int)near.size() / 4 && inOrbit > 0 && free > 0,
           "%d stations across the %d systems within 20 ly (%d orbiting worlds, %d on their own)", stations, (int)near.size(), inOrbit, free);
     if (!b) return;
-    Market mk = MakeMarket(*b);
-    int ex = -1;
-    for (int gd = 0; gd < GOOD_COUNT; gd++) if (ex < 0 && mk.role[gd] == Role::Export) ex = gd;
-    g.player.cargo[ORE_IRON] = 5;
+    Market mk = LiveMarket(g, g, *b), seen;
+    CHECK(KnownMarket(g, *b, seen) && seen.price[REF_FUEL] == (float)mk.price[REF_FUEL], "docked: its prices are on record");
+    int ex = -1, want = -1;
+    for (int gd = 0; gd < GOOD_COUNT; gd++) {
+        if (ex < 0 && mk.Sells(gd)) ex = gd;
+        if (mk.Buys(gd) && gd != ex) want = gd;
+    }
+    if (want >= 0) g.player.cargo[want] = 5;
     double cr = g.player.credits;
-    CHECK(SellGoods(g, ORE_IRON, 1e30) && g.player.credits > cr, "%s buys iron (+%.0f cr)", b->name.c_str(), g.player.credits - cr);
+    CHECK(want >= 0 && SellGoods(g, want, 1e30) && g.player.credits > cr, "%s buys %s (+%.0f cr)", b->name.c_str(),
+          want >= 0 ? GoodData(want).name : "nothing", g.player.credits - cr);
     CHECK(ex >= 0 && BuyGoods(g, ex, 1.0), "...and sells %s", ex >= 0 ? GoodData(ex).name : "nothing");
 }
 
@@ -389,8 +411,8 @@ static void TestSkimming()
     CHECK(giant >= 0, "found a gas giant to skim (%s)", giant >= 0 ? g.loaded.bodies[giant].name.c_str() : "none");
     if (giant < 0) return;
     Park(g, giant, 0.15); Run(g, 2.0);
-    CHECK(g.flight.skimming && fabs(g.player.cargo[ORE_HELIUM3] - 2.0 * SKIM_RATE) < 0.01,
-          "2 s in the upper atmosphere: %.2f t helium-3", g.player.cargo[ORE_HELIUM3]);
+    CHECK(g.flight.skimming && fabs(g.player.cargo[RAW_HELIUM3] - 2.0 * SKIM_RATE) < 0.01,
+          "2 s in the upper atmosphere: %.2f t helium-3", g.player.cargo[RAW_HELIUM3]);
     Park(g, giant, 0.5); Run(g, 0.5);
     CHECK(!g.flight.skimming, "higher up: no skimming");
     Park(g, giant, 0.15);
@@ -710,12 +732,14 @@ static void TestSystems()
     // Markets belong to bodies, not names: the same body always has the same market
     int tw = TradeWorld(g);
     if (tw >= 0) {
+        EnsureEconomy(g);
         Body copy = g.loaded.bodies[tw];
         copy.name = "Renamed";
-        Market m1 = MakeMarket(g.loaded.bodies[tw]), m2 = MakeMarket(copy);
+        Market m1 = LiveMarket(g, g, g.loaded.bodies[tw]), m2 = LiveMarket(g, g, copy);
         copy.id ^= 1;
-        Market m3 = MakeMarket(copy);
-        CHECK(m1.fuelPrice == m2.fuelPrice && m1.fuelPrice != m3.fuelPrice, "a market's prices follow the body's id, not its name");
+        Market m3 = LiveMarket(g, g, copy);
+        CHECK(m1.price[REF_FOOD] > 0.0 && m1.price[REF_FOOD] == m2.price[REF_FOOD] && m3.price[REF_FOOD] == 0.0,
+              "a market belongs to the body's id, not its name");
     }
 }
 
@@ -1072,18 +1096,23 @@ static void TestSaveLoad()
     int c = TradeWorld(g);
     Park(g, c, 0.9);
     Run(g, 1.0);
-    g.player.credits = 1234.5; g.player.fuel = 17.25; g.player.cargo[ORE_PLATINUM] = 3.5;
+    g.player.credits = 1234.5; g.player.fuel = 17.25; g.player.cargo[ORE_PRECIOUS] = 3.5;
     g.player.ship.dampeners = false;
+    g.shipName = "Canterbury";
     g.deltas.mined[0xDEADBEEFull] = 12.5f;
     CHECK(SaveGame(g, "test_save.txt"), "saved");
     GameState h; NewGame(h);
     CHECK(LoadGame(h, "test_save.txt"), "loaded");
     CHECK(h.player.credits == g.player.credits && h.player.fuel == g.player.fuel &&
-          h.player.cargo[ORE_PLATINUM] == 3.5 && !h.player.ship.dampeners, "player state round-trips");
+          h.player.cargo[ORE_PRECIOUS] == 3.5 && !h.player.ship.dampeners, "player state round-trips");
     CHECK(Len(h.player.ship.pos - g.player.ship.pos) < 1e-6 && h.player.ship.anchor == g.player.ship.anchor,
           "ship position round-trips exactly");
     CHECK(h.deltas.mined.count(0xDEADBEEFull) && h.deltas.mined[0xDEADBEEFull] == 12.5f, "mined rocks round-trip");
     CHECK(h.loaded.index == g.systems.home && h.clock == g.clock, "system reloaded around the ship, clock restored");
+    CHECK(h.shipName == "Canterbury", "the ship keeps her name");
+    CHECK(SeedFromText("1977", 5) == 1977u && SeedFromText(" 42 ", 5) == 42u && SeedFromText("tycho", 1) == SeedFromText("tycho", 2) &&
+          SeedFromText("tycho", 1) != SeedFromText("ceres", 1) && SeedFromText("", 1) != SeedFromText("", 2) && SeedFromText("", 7) != 0,
+          "a seed can be typed as a number or as words; left blank it's random");
     Run(h, 0.05);
     CHECK(h.flight.nearBody == c, "still in trading range after loading");
     CHECK(!LoadGame(h, "no_such_file.txt") && h.player.credits == 1234.5, "a missing save leaves the game alone");
@@ -1109,6 +1138,300 @@ static void TestSaveLoad()
     remove("not_a_save.txt");
 }
 
+// The economy: stock, production, trade and prices; what the factions do to it
+static void RunEconomy(World &w, double days)
+{
+    for (int i = 0, n = (int)(days * 4 + 0.5); i < n; i++) { w.clock += MARKET_DAY / 4; StepEconomy(w, 0.25); }
+    w.econ.simulated = w.clock;
+}
+
+static void TestEconomy()
+{
+    GameState g; NewGame(g);
+    EnsureEconomy(g);
+    const EconBase &base = *g.econ.base;
+    const FactionSet &fs = g.systems.factions;
+    const int N = g.econ.Count();
+    int hubs = 0, stations = 0, small = -1, big = -1, lawful = 0;
+    for (int i = 0; i < N; i++) {
+        const MarketDef &d = base.defs[i];
+        if (d.hub == i) hubs++;
+        if (d.station) stations++;
+        if (small < 0 || d.scale < base.defs[small].scale) small = i;
+        if (big < 0 || d.scale > base.defs[big].scale) big = i;
+        for (int gd = 0; gd < GOOD_COUNT; gd++) if (d.banned[gd]) { lawful++; break; }
+    }
+    CHECK(N > 500 && hubs > 100 && stations > 0 && (int)base.lanes.size() > hubs && base.defs[big].scale > 50.0f * base.defs[small].scale,
+          "%d markets in %d systems, %d trade lanes; from %s (%.0f t a day) to %s (%.0f t a day)", N, hubs, (int)base.lanes.size(),
+          base.defs[small].name.c_str(), base.defs[small].scale, base.defs[big].name.c_str(), base.defs[big].scale);
+
+    // Every good is made somewhere and wanted somewhere, and prices start out spread but sane
+    int unmade = 0, unwanted = 0, capped = 0, priced = 0;
+    for (int gd = 0; gd < GOOD_COUNT; gd++) {
+        double out = 0, use = 0;
+        for (int i = 0; i < N; i++) {
+            out += base.defs[i].out[gd]; use += base.defs[i].use[gd];
+            double p = MarketPrice(g, i, gd);
+            if (p > 0.0) { priced++; if (p > 3.9 * GoodData(gd).basePrice || p < 0.31 * GoodData(gd).basePrice) capped++; }
+        }
+        for (int other = 0; other < GOOD_COUNT; other++)
+            for (const Ingredient &in : GoodData(other).recipe) if (in.tonnes > 0.0f && in.good == gd) use += 1.0;
+        if (out <= 0.0) unmade++;
+        if (use <= 0.0) unwanted++;
+    }
+    CHECK(unmade == 0 && unwanted == 0 && capped < priced / 5, "all %d goods are made and wanted somewhere; %.1f%% of %d prices are at a limit",
+          GOOD_COUNT, 100.0 * capped / priced, priced);
+
+    // Price follows stock
+    int home = g.econ.MarketOf(g.loaded.bodies[TradeWorld(g)].id);
+    CHECK(home >= 0, "the home world is a market");
+    if (home < 0) return;
+    {
+        Economy was = g.econ;
+        int gd = REF_FOOD;
+        float target = base.defs[home].target[gd];
+        g.econ.state[home].stock[gd] = target;
+        double at = MarketPrice(g, home, gd);
+        g.econ.state[home].stock[gd] = target * 0.5f;
+        double scarce = MarketPrice(g, home, gd);
+        g.econ.state[home].stock[gd] = target * 2.0f;
+        double glut = MarketPrice(g, home, gd);
+        g.econ.state[home].stock[gd] = 0.0f;
+        double none = MarketPrice(g, home, gd);
+        CHECK(fabs(at - GoodData(gd).basePrice) < 0.01 && fabs(scarce / at - pow(2.0, 0.6)) < 0.01 && fabs(glut / at - pow(0.5, 0.6)) < 0.01 &&
+              fabs(none / at - 4.0) < 0.01,
+              "food at its target stock costs %.0f; at half that %.0f, at double %.0f, with none left %.0f", at, scarce, glut, none);
+
+        // A hold of cargo matters at a small place and not at a big one
+        int both = -1;
+        for (int k = 0; k < GOOD_COUNT; k++) if (base.defs[small].target[k] > 0.0f && base.defs[big].target[k] > 0.0f) { both = k; break; }
+        if (both >= 0) {
+            double s0 = MarketPrice(g, small, both), b0 = MarketPrice(g, big, both);
+            g.econ.state[small].stock[both] += 50.0f; g.econ.state[big].stock[both] += 50.0f;
+            double sd = 1.0 - MarketPrice(g, small, both) / s0, bd = 1.0 - MarketPrice(g, big, both) / b0;
+            CHECK(sd > 0.05 && bd < 0.02 && sd > 5.0 * bd, "50 t of %s knocks %.0f%% off the price at %s and %.2f%% at %s", GoodData(both).name,
+                  sd * 100.0, base.defs[small].name.c_str(), bd * 100.0, base.defs[big].name.c_str());
+        }
+        g.econ = was;
+    }
+
+    // Production needs its inputs
+    {
+        int m = -1, gd = -1;
+        for (int i = 0; i < N && m < 0; i++)
+            for (int k = FIRST_REFINED; k < GOOD_COUNT; k++)
+                if (base.defs[i].out[k] > 0.2f * base.defs[i].scale && GoodData(k).recipe[0].tonnes > 0.0f && base.defs[i].sys != g.systems.home) { m = i; gd = k; break; }
+        CHECK(m >= 0, "found a plant: %s makes %s", m >= 0 ? base.defs[m].name.c_str() : "?", m >= 0 ? GoodData(gd).name : "?");
+        if (m >= 0) {
+            Economy was = g.econ;
+            auto made = [&](float inputs) {
+                g.econ = was;
+                g.econ.state[m].stock[gd] = 0.5f * base.defs[m].target[gd];
+                for (const Ingredient &in : GoodData(gd).recipe) if (in.tonnes > 0.0f) g.econ.state[m].stock[in.good] = inputs;
+                float before = g.econ.state[m].stock[gd];
+                StepEconomy(g, 0.01);
+                return g.econ.state[m].stock[gd] - before;
+            };
+            float starved = made(0.0f), fed = made(1e6f);
+            CHECK(fed - starved > 0.5f * base.defs[m].out[gd] * 0.01f, "in 1%% of a day its stock grows %.2f t with its inputs on hand and %.2f t without (what trade brought in)", fed, starved);
+            g.econ = was;
+        }
+    }
+
+    // Trade: a glut at one market flows to its hub
+    {
+        int m = -1, gd = -1;
+        for (int i = 0; i < N && m < 0; i++) {
+            const MarketDef &d = base.defs[i];
+            if (d.hub == i || d.hub < 0 || d.sys == g.systems.home) continue;
+            for (int k = 0; k < GOOD_COUNT; k++)
+                if (d.target[k] > 0.0f && d.out[k] == 0.0f && d.use[k] == 0.0f && base.defs[d.hub].target[k] > 0.0f) { m = i; gd = k; break; }
+        }
+        CHECK(m >= 0, "found a market that neither makes nor uses something it deals in (%s, %s)", m >= 0 ? base.defs[m].name.c_str() : "?", m >= 0 ? GoodData(gd).name : "?");
+        if (m >= 0) {
+            Economy was = g.econ;
+            int hub = base.defs[m].hub;
+            g.econ.state[m].stock[gd] = 3.0f * base.defs[m].target[gd];
+            double gap0 = MarketPrice(g, hub, gd) / MarketPrice(g, m, gd);
+            float s0 = g.econ.state[m].stock[gd];
+            for (int i = 0; i < 8; i++) StepEconomy(g, 0.25);
+            double gap1 = MarketPrice(g, hub, gd) / MarketPrice(g, m, gd);
+            CHECK(g.econ.state[m].stock[gd] < s0 && gap1 < gap0 && gap0 > 1.2, "a glut of %s at %s: two days of trade take %.0f t of it away, and the gap to %s closes from %.0f%% to %.0f%%",
+                  GoodData(gd).name, base.defs[m].name.c_str(), s0 - g.econ.state[m].stock[gd], base.defs[hub].name.c_str(), (gap0 - 1) * 100, (gap1 - 1) * 100);
+            g.econ = was;
+        }
+    }
+
+    // The law, and who you know
+    {
+        int c = TradeWorld(g);
+        Park(g, c, 0.9); Run(g, 1.1);
+        const Body &b = g.loaded.bodies[c];
+        const MarketDef &d = base.defs[home];
+        Market mk = LiveMarket(g, g, b), seen;
+        double at = -1.0;
+        CHECK(KnownMarket(g, b, seen, &at) && g.clock - at < 1.01 && seen.price[REF_FUEL] == (float)mk.price[REF_FUEL], "docked: the market's prices are on record, as of now");
+        // ...and the record goes stale when you leave
+        Park(g, c, 3.0); Run(g, 0.1);
+        g.econ.state[home].stock[REF_FUEL] *= 0.5f;
+        Run(g, 1.5);
+        KnownMarket(g, b, seen, &at);
+        CHECK(!TradePartner(g) && g.clock - at > 1.5 && seen.price[REF_FUEL] == (float)mk.price[REF_FUEL] && LiveMarket(g, g, b).price[REF_FUEL] > 1.3 * mk.price[REF_FUEL],
+              "away from it the record goes stale: fuel on record at %.0f, really %.0f", seen.price[REF_FUEL], LiveMarket(g, g, b).price[REF_FUEL]);
+        Park(g, c, 0.9); Run(g, 1.1);
+        KnownMarket(g, b, seen);
+        CHECK(seen.price[REF_FUEL] > 1.3 * mk.price[REF_FUEL], "back in dock it's brought up to date");
+
+        // Tariff: off what you're paid
+        int gd = -1;
+        for (int k = 0; k < GOOD_COUNT; k++) if (mk.Buys(k) && d.target[k] > 2000.0f) { gd = k; break; }
+        if (gd < 0) for (int k = 0; k < GOOD_COUNT; k++) if (mk.Buys(k)) { gd = k; break; }
+        float tariffWas = g.econ.tariff[d.ruler];
+        g.econ.tariff[d.ruler] = 0.0f;
+        double free = LiveMarket(g, g, b).SellPrice(gd);
+        g.econ.tariff[d.ruler] = 0.2f;
+        mk = LiveMarket(g, g, b);
+        g.player.cargo[gd] = 1.0;
+        double cr = g.player.credits;
+        SellGoods(g, gd, 1.0);
+        CHECK(fabs(mk.SellPrice(gd) / free - 0.8) < 1e-6 && g.player.credits - cr < 0.81 * free && g.player.credits - cr > 0.75 * free,
+              "a 20%% tariff: %s pays %.1f cr/t instead of %.1f", GoodData(gd).name, g.player.credits - cr, free);
+        g.econ.tariff[d.ruler] = tariffWas;
+
+        // Standing with the owner: up to 5% either way; trade builds it
+        int owner = g.econ.state[home].owner;
+        if (owner < 0) { owner = d.ruler; g.econ.state[home].owner = owner; }
+        g.standing.assign(fs.Count(), 0.0f);
+        double fair = LiveMarket(g, g, b).BuyPrice(gd);
+        g.standing[owner] = 100.0f;
+        double friendly = LiveMarket(g, g, b).BuyPrice(gd), friendSells = LiveMarket(g, g, b).SellPrice(gd);
+        g.standing[owner] = -100.0f;
+        double hostile = LiveMarket(g, g, b).BuyPrice(gd);
+        CHECK(fabs(friendly / fair - 0.97) < 1e-6 && fabs(hostile / fair - 1.03) < 1e-6 && friendSells < friendly,
+              "%s charges a friend %.1f, a stranger %.1f, an enemy %.1f - and never pays more than it charges", fs.Name(owner).c_str(), friendly, fair, hostile);
+        g.standing[owner] = 0.0f;
+        g.player.credits = 1e7;
+        for (int k = 0; k < GOOD_COUNT; k++) g.player.cargo[k] = 0.0;
+        int dear = -1;
+        mk = LiveMarket(g, g, b);
+        for (int k = 0; k < GOOD_COUNT; k++) if (mk.Sells(k) && mk.stock[k] > 2.0 * CARGO_CAPACITY && (dear < 0 || mk.price[k] > mk.price[dear])) dear = k;
+        cr = g.player.credits;
+        if (dear >= 0) BuyGoods(g, dear, 1e30);
+        CHECK(dear >= 0 && g.standing[owner] > 0.0f && fabs(g.standing[owner] - (cr - g.player.credits) / 40000.0) < 0.01,
+              "a hold of %s for %.0f cr: standing with %s up %.2f", dear >= 0 ? GoodData(dear).name : "?", cr - g.player.credits, fs.Name(owner).c_str(), g.standing[owner]);
+
+        // Trade data: the markets this one trades with
+        size_t knew = g.know.prices.size();
+        cr = g.player.credits;
+        bool boughtData = BuyTradeData(g, g);
+        int elsewhere = 0;
+        for (const auto &kv : g.know.prices) if (kv.second.sys != g.systems.home) elsewhere++;
+        CHECK(boughtData && cr - g.player.credits == TRADE_DATA_COST && g.know.prices.size() > knew + 3 && elsewhere > 3,
+              "trade data for %.0f cr: prices at %d markets, %d of them in other systems", TRADE_DATA_COST, (int)g.know.prices.size(), elsewhere);
+    }
+
+    // Contraband: lawful markets in a government's space won't touch what it bans; the rest don't ask
+    {
+        int banned = -1, gd = -1, lawless = -1;
+        for (int i = 0; i < N && banned < 0; i++)
+            for (int k = 0; k < GOOD_COUNT; k++) if (base.defs[i].banned[k] && !base.defs[i].station) { banned = i; gd = k; break; }
+        if (banned >= 0)
+            for (int i = 0; i < N && lawless < 0; i++)
+                if (base.defs[i].ruler == base.defs[banned].ruler && !base.defs[i].banned[gd] && base.defs[i].target[gd] > 0.0f) lawless = i;
+        CHECK(lawful > N / 10 && banned >= 0, "%d markets keep their government's bans (%s won't take %s)", lawful,
+              banned >= 0 ? base.defs[banned].name.c_str() : "?", banned >= 0 ? GoodData(gd).name : "?");
+        if (banned >= 0) {
+            const MarketDef &d = base.defs[banned];
+            g.player.ship.anchor = d.sys; g.player.ship.pos = {};
+            UpdateLoadedSystem(g);
+            Park(g, d.body, 0.9); Run(g, 0.1);
+            g.player.cargo[gd] = 2.0;
+            for (int k = 0; k < GOOD_COUNT; k++) if (k != gd) g.player.cargo[k] = 0.0;
+            bool sold = SellGoods(g, gd, 1.0);
+            std::string said = g.events.empty() ? "" : g.events.back().text;
+            CHECK(TradePartner(g) && TradePartner(g)->id == d.bodyId && !sold && g.player.cargo[gd] == 2.0 &&
+                  said.find("contraband") != std::string::npos && !BuyGoods(g, gd, 1.0), "at %s: \"%s\"", d.name.c_str(), said.c_str());
+            CHECK(lawless >= 0, "...but %s, in the same space, deals in it", lawless >= 0 ? base.defs[lawless].name.c_str() : "nowhere");
+        }
+    }
+
+    // The factions act on it, things happen locally, and it all makes the news
+    {
+        std::vector<float> tariff0 = g.econ.tariff;
+        size_t news0 = g.news.size();
+        RunEconomy(g, 14.0);
+        int byFaction = 0, local = 0, tariffs = 0, embargoes = 0, raids = 0, buyouts = 0, boosts = 0, wars = 0;
+        for (size_t i = news0; i < g.news.size(); i++) (g.news[i].faction == NO_FACTION ? local : byFaction)++;
+        const int F = fs.Count();
+        for (int f = 0; f < F; f++) {
+            if (g.econ.tariff[f] != tariff0[f]) tariffs++;
+            if (fs.list[f].kind == FactionKind::Clan && fabs(g.econ.raid[f] - 0.3f) > 0.01f) raids++;
+            if (g.econ.outputUntil[f] > 0.0) boosts++;
+            if (g.econ.pricingUntil[f] > 0.0) wars++;
+            for (int o = 0; o < F; o++) if (g.econ.embargoUntil[f * F + o] > 0.0) embargoes++;
+        }
+        for (int i = 0; i < N; i++) if (g.econ.state[i].owner != base.defs[i].owner) buyouts++;
+        CHECK(byFaction > 5 && local > 0 && tariffs + embargoes > 0 && raids > 0 && buyouts + boosts + wars > 0,
+              "two weeks: %d faction moves and %d local events in the news; %d tariffs changed, %d embargoes, %d clans stirred up or put down, "
+              "%d stations changed hands, %d subsidies, %d price wars", byFaction, local, tariffs, embargoes, raids, buyouts, boosts, wars);
+        printf("        latest: \"%s\"\n", g.news.empty() ? "" : g.news.back().text.c_str());
+        int wild = 0, counted = 0;
+        for (int i = 0; i < N; i++)
+            for (int k = 0; k < GOOD_COUNT; k++) {
+                double p = MarketPrice(g, i, k);
+                if (p <= 0.0) continue;
+                counted++;
+                if (p > 3.9 * GoodData(k).basePrice || p < 0.31 * GoodData(k).basePrice) wild++;
+                if (!(g.econ.state[i].stock[k] >= 0.0f)) wild += 1000000;                // (never negative, never NaN)
+            }
+        CHECK(wild < counted / 4, "...and the markets hold together: %.1f%% of prices at a limit", 100.0 * wild / counted);
+
+        // The same seed plays out the same way
+        GameState h; NewGame(h);
+        EnsureEconomy(h);
+        RunEconomy(h, 14.0);
+        double sumG = 0, sumH = 0;
+        GameState fresh; NewGame(fresh); EnsureEconomy(fresh);
+        for (int i = 0; i < N; i++) for (int k = 0; k < GOOD_COUNT; k++) { sumG += fresh.econ.state[i].stock[k]; sumH += h.econ.state[i].stock[k]; }
+        GameState h2; NewGame(h2);
+        EnsureEconomy(h2);
+        RunEconomy(h2, 14.0);
+        double sumH2 = 0;
+        for (int i = 0; i < N; i++) for (int k = 0; k < GOOD_COUNT; k++) sumH2 += h2.econ.state[i].stock[k];
+        CHECK(sumH == sumH2 && h.news.size() == h2.news.size() && (h.news.empty() || h.news.back().text == h2.news.back().text) && sumH != sumG,
+              "the same seed plays out the same way (%d news items both times)", (int)h.news.size());
+    }
+
+    // Saved and loaded
+    {
+        g.player.ship.anchor = g.systems.home; g.player.ship.pos = {};
+        UpdateLoadedSystem(g);
+        Park(g, TradeWorld(g), 0.9); Run(g, 1.1);
+        g.econ.state[home].stock[REF_FOOD] = 1234.5f;
+        int f = base.defs[home].ruler;
+        g.econ.tariff[f] = 0.17f;
+        int taken = -1;
+        for (int i = 0; i < N; i++) if (base.defs[i].station && base.defs[i].owner != 1) { taken = i; break; }
+        if (taken >= 0) g.econ.state[taken].owner = 1;
+        CHECK(SaveGame(g, "test_econ.txt"), "saved with the economy");
+        GameState h; NewGame(h);
+        bool loaded = LoadGame(h, "test_econ.txt");
+        double diff = 0;
+        if (loaded && h.econ.Built()) for (int i = 0; i < N; i++) for (int k = 0; k < GOOD_COUNT; k++) diff = fmax(diff, fabs(h.econ.state[i].stock[k] - g.econ.state[i].stock[k]) / fmax(1.0f, g.econ.state[i].stock[k]));
+        bool embargoesMatch = loaded && h.econ.Built();
+        for (size_t i = 0; embargoesMatch && i < g.econ.embargoUntil.size(); i++)                  // (the ones still in force)
+            if (g.econ.embargoUntil[i] > g.clock && h.econ.embargoUntil[i] != g.econ.embargoUntil[i]) embargoesMatch = false;
+        CHECK(loaded && h.econ.Built() && h.econ.state[home].stock[REF_FOOD] == 1234.5f && diff < 1e-4 && h.econ.tariff[f] == 0.17f &&
+              (taken < 0 || h.econ.state[taken].owner == 1) && h.econ.shocks.size() == g.econ.shocks.size() && h.econ.raid == g.econ.raid && embargoesMatch,
+              "stocks, tariffs, owners, raids, embargoes and shocks round-trip (worst stock off by %.4f%%)", diff * 100.0);
+        CHECK(h.news.size() == g.news.size() && (g.news.empty() || h.news.back().text == g.news.back().text) && h.know.prices.size() == g.know.prices.size() &&
+              h.know.prices.count(base.defs[home].bodyId) && h.know.prices[base.defs[home].bodyId].name == base.defs[home].name &&
+              h.know.prices[base.defs[home].bodyId].price[REF_FOOD] == g.know.prices[base.defs[home].bodyId].price[REF_FOOD],
+              "...and so do the news (%d items) and the captain's price records (%d markets)", (int)h.news.size(), (int)h.know.prices.size());
+        remove("test_econ.txt");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Multiplayer: the wire format and the reliable channel, without sockets
 // ---------------------------------------------------------------------------
@@ -1116,7 +1439,7 @@ static void TestProtocol()
 {
     // Game data round-trips exactly
     GameState g; NewGame(g);
-    g.player.cargo[ORE_PLATINUM] = 7.25; g.player.credits = 987.5; g.player.ship.vel = { 1.5f, -2.0f, 3.25f };
+    g.player.cargo[ORE_PRECIOUS] = 7.25; g.player.credits = 987.5; g.player.ship.vel = { 1.5f, -2.0f, 3.25f };
     InputStep in; in.seq = 77;
     in.controls.throttle = 1; in.controls.yaw = -0.37f; in.controls.hyper = true; in.controls.toggleDampeners = true;
     in.aim.hovered = TargetId::MakeRock(g.systems.home, 0xFEEDFACECAFEull); in.aim.retarget = TargetId::MakeShip(5);
@@ -1126,7 +1449,7 @@ static void TestProtocol()
     Reader r(w.buf);
     Player p = ReadPlayer(r);
     InputStep back = ReadInput(r, 77);
-    CHECK(r.ok && r.Left() == 0 && Len(p.ship.pos - g.player.ship.pos) == 0.0 && p.cargo[ORE_PLATINUM] == 7.25 &&
+    CHECK(r.ok && r.Left() == 0 && Len(p.ship.pos - g.player.ship.pos) == 0.0 && p.cargo[ORE_PRECIOUS] == 7.25 &&
           p.credits == 987.5 && p.ship.vel.z == 3.25f && p.ship.rot.w == g.player.ship.rot.w && p.ship.anchor == g.player.ship.anchor,
           "player state round-trips exactly");
     CHECK(back.controls.yaw == -0.37f && back.controls.hyper && back.controls.toggleDampeners && !back.controls.fire &&
@@ -1252,7 +1575,7 @@ static void TestNetwork()
 
     // --- Joining ---
     NetTester alice, bob;
-    CHECK(alice.net.Connect("127.0.0.1", PORT, "Alice", "", err) && bob.net.Connect("localhost", PORT, "Bob", "", err),
+    CHECK(alice.net.Connect("127.0.0.1", PORT, "Alice", "", err, "Tachi") && bob.net.Connect("localhost", PORT, "Bob", "", err),
           "two clients connect (%s)", err.c_str());
     Pump(srv, { &alice, &bob }, 0.5);
     CHECK(alice.net.state == NetClient::State::Joined && bob.net.state == NetClient::State::Joined && srv.PlayerCount() == 2 &&
@@ -1261,6 +1584,9 @@ static void TestNetwork()
     const Traffic *seen = Sees(alice, "Bob");
     double gap = seen ? Len(FromShip(alice.g.systems, alice.g.player.ship, seen->ship.anchor, seen->ship.pos)) : -1.0;
     CHECK(seen && Sees(bob, "Alice") && alice.g.traffic.size() == 1, "each sees the other (spawned %.0f m apart)", gap * METERS_PER_UNIT);
+    Pump(srv, { &alice, &bob }, 0.1);
+    CHECK(Sees(bob, "Alice") && Sees(bob, "Alice")->shipName == "Tachi" && Sees(alice, "Bob")->shipName.empty(),
+          "Bob sees that Alice's ship is the Tachi; Bob never named his");
 
     // --- Prediction: the client flies ahead; the server, given the same inputs, lands in the same place ---
     alice.c.throttle = 1; alice.c.yaw = 0.05f; alice.c.roll = 0.2f;
@@ -1307,16 +1633,34 @@ static void TestNetwork()
     sa = OnServer(srv, "Alice");
     int c = TradeWorld(*sa);
     Park(srv.world, *sa, c, 0.9);
-    sa->player.cargo[ORE_IRON] = 10;
-    Pump(srv, { &alice, &bob }, 0.5);
-    CHECK(alice.g.flight.nearBody == c && alice.g.player.cargo[ORE_IRON] == 10, "server parked Alice at %s with 10 t of iron",
-          alice.g.loaded.bodies[c].name.c_str());
+    Market smk = LiveMarket(srv.world, *sa, sa->loaded.bodies[c]);
+    int sg = 0;
+    for (int gd = 0; gd < GOOD_COUNT; gd++) if (smk.role[gd] == Role::Import) { sg = gd; break; }
+    sa->player.cargo[sg] = 10;
+    Pump(srv, { &alice, &bob }, 1.5);
+    CHECK(alice.g.flight.nearBody == c && alice.g.player.cargo[sg] == 10, "server parked Alice at %s with 10 t of %s",
+          alice.g.loaded.bodies[c].name.c_str(), GoodData(sg).name);
+    Market onRecord;
+    bool known = KnownMarket(alice.g, alice.g.loaded.bodies[c], onRecord);
+    CHECK(!alice.g.econ.Built() && known && fabs(onRecord.price[sg] - smk.price[sg]) < 0.02 * smk.price[sg] && onRecord.tariff == smk.tariff,
+          "her client runs no economy: the server sent the market's prices (%s at %.0f cr/t)", GoodData(sg).name, onRecord.price[sg]);
     double cr = alice.g.player.credits;
-    alice.net.SendCommand({ Command::SellGoods, ORE_IRON, 1e30 });
-    Pump(srv, { &alice, &bob }, 0.5);
-    CHECK(alice.g.player.cargo[ORE_IRON] == 0 && alice.g.player.credits > cr + 250 && alice.Heard("Sold 10.0 t Iron"),
-          "sold the iron through the server: +%.0f cr", alice.g.player.credits - cr);
+    alice.net.SendCommand({ Command::SellGoods, sg, 1e30 });
+    Pump(srv, { &alice, &bob }, 1.5);
+    CHECK(alice.g.player.cargo[sg] == 0 && alice.g.player.credits > cr + 9.0 * smk.SellPrice(sg) && alice.Heard("Sold 10.0 t "),
+          "sold it through the server: +%.0f cr", alice.g.player.credits - cr);
     CHECK(!bob.Heard("Sold"), "...and Bob didn't get Alice's message");
+    KnownMarket(alice.g, alice.g.loaded.bodies[c], onRecord);
+    CHECK(fabs(onRecord.stock[sg] - smk.stock[sg] - 10.0) < 0.5 && bob.g.know.prices.count(alice.g.loaded.bodies[c].id) == 0,
+          "her record of the market follows the sale; Bob, who isn't there, has none");
+    {
+        EconNews item;
+        item.at = srv.world.clock; item.where = srv.world.systems.home; item.text = "Test: the harvest is in"; item.seq = ++srv.world.newsSeq;
+        srv.world.news.push_back(item);
+        Pump(srv, { &alice, &bob }, 0.5);
+        CHECK(!alice.g.news.empty() && alice.g.news.back().text == item.text && !bob.g.news.empty() && bob.g.news.back().where == item.where,
+              "news reaches everyone");
+    }
 
     // --- Comms: the log comes back from the server, replies after the light-speed delay ---
     alice.net.SendCommand({ Command::Hail, c });
@@ -1444,7 +1788,7 @@ int RunHeadlessTests(const char *only)
     struct T { const char *name; void (*fn)(); };
     const T tests[] = {
         { "fuel", TestFuel }, { "flight", TestFlight }, { "trade", TestTrade }, { "stations", TestStations }, { "hz", TestHabitableZone },
-        { "skimming", TestSkimming }, { "comms", TestComms }, { "galaxy", TestGalaxy }, { "systems", TestSystems }, { "maps", TestMaps }, { "factions", TestFactions },
+        { "skimming", TestSkimming }, { "comms", TestComms }, { "galaxy", TestGalaxy }, { "systems", TestSystems }, { "maps", TestMaps }, { "factions", TestFactions }, { "economy", TestEconomy },
         { "targeting", TestTargeting }, { "mining", TestMining }, { "save", TestSaveLoad },
         { "protocol", TestProtocol }, { "net", TestNetwork }, { "host", TestHosting },
     };
@@ -1685,6 +2029,32 @@ std::unique_ptr<ScriptedInput> MakeScript(const std::string &name)
         };
         return s;
     }
+    if (name == "economy") {                                                 // the market, the trade log and the news
+        s->body = [](ScriptedInput &s, InputFrame &in) {
+            GameState &g = *s.game;
+            int f = s.frame, c = TradeWorld(g);
+            if (f == 10 && c >= 0) { Park(g, c, 0.9); s.snap = true; g.player.credits = 25000; g.player.cargo[ORE_IRON] = 12; g.player.cargo[GOOD_WEAPONS] = 3; }
+            if (f == 20)  in.Press(KEY_F);
+            if (f == 210) in.Press(KEY_THREE);
+            if (f == 216) in.Press(KEY_DOWN), in.Press(KEY_DOWN);
+            if (f == 220) in.Press(KEY_D);
+            if (f == 230) s.screenshot = "econ_market.png";
+            if (f == 234) in.Press(KEY_B);                                    // trade data
+            if (f == 238) in.Press(KEY_ESCAPE);
+            if (f == 246) RunEconomy(g, 9.0);                                 // some days go by
+            if (f == 250) in.Press(KEY_T);
+            if (f == 260) s.screenshot = "econ_tradelog.png";
+            if (f >= 262 && f < 270 && f % 2 == 0) in.Press(KEY_D);
+            if (f == 270) in.Press(KEY_TAB);
+            if (f == 280) s.screenshot = "econ_tradelog_sell.png";
+            if (f == 284) in.Press(KEY_ESCAPE);
+            if (f == 290) in.Press(KEY_N);
+            if (f == 300) s.screenshot = "econ_news.png";
+            if (f == 304) in.Press(KEY_ESCAPE);
+            if (f == 310) s.done = true;
+        };
+        return s;
+    }
     if (name == "factions") {                                                // the factions window, and whose space is whose
         s->body = [](ScriptedInput &s, InputFrame &in) {
             int f = s.frame;
@@ -1792,7 +2162,13 @@ std::unique_ptr<ScriptedInput> MakeScript(const std::string &name)
             if (f == 78)  in.Press(KEY_ESCAPE);                               // back to the main menu
             if (f == 80)  in.Press(KEY_UP);                                   // Single Player
             if (f == 82)  in.Press(KEY_ENTER);
-            if (f == 85)  in.Press(KEY_ENTER);                                // New Game
+            if (f == 85)  in.Press(KEY_ENTER);                                // New Game: the form
+            if (f == 87)  { for (int k = 0; k < 24; k++) in.Press(KEY_BACKSPACE); }
+            if (f == 88)  in.Type("Rocinante");
+            if (f == 89)  in.Press(KEY_TAB);
+            if (f == 90)  in.Type("tycho station");
+            if (f == 92)  s.screenshot = "mm_newgame.png";
+            if (f == 94)  in.Press(KEY_ENTER);                                // Launch
             if (f == 100) s.screenshot = "mm_ingame.png";
             if (f == 105) in.Press(KEY_ESCAPE);                               // pause
             if (f == 108) s.screenshot = "mm_pause.png";

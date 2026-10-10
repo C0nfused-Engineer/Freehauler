@@ -22,6 +22,7 @@
 // keyboard or draws anything, so it runs headless for tests and on the server.
 #pragma once
 #include "asteroids.h"
+#include "econ.h"
 #include "goods.h"
 #include "ship.h"
 #include "targets.h"
@@ -107,6 +108,7 @@ struct Aim {
 struct Knowledge {
     std::unordered_set<int64_t>  charted;    // whole systems (SysId): everything in them is known
     std::unordered_set<uint64_t> scanned;    // single bodies (Body::id), scanned in passing
+    std::unordered_map<uint64_t, PriceRecord> prices;   // markets (by Body::id) as last seen: docked at, reported, or bought data on
 };
 
 struct FlightState {
@@ -136,6 +138,7 @@ struct CommsMsg {
     std::string text;
     double sent = 0.0;                   // replies: when the request they answer went out
     bool   told = false;                 // replies: its arrival has been announced
+    bool   prices = false;               // replies: a market report (its arrival updates the captain's price records)
 };
 struct CommsChannel {
     TargetId with;                       // a Body
@@ -158,6 +161,7 @@ struct CommsState {
 struct Traffic {
     int         id = -1;
     std::string name;
+    std::string shipName;                // (may be empty)
     Ship        ship;
     bool        thrusting = false;       // engine flame
     bool        hyper = false;
@@ -172,6 +176,9 @@ struct World {
     unsigned                seed = DEFAULT_GALAXY_SEED;
     Galaxy                  systems;     // generated (on demand, around whoever is looking)
     WorldDeltas             deltas;      // saved
+    Economy                 econ;        // saved: markets' stocks, and what the factions are doing to them (econ.h)
+    std::vector<EconNews>   news;        // saved: the last few dozen headlines, oldest first
+    uint32_t                newsSeq = 0;
     double                  clock = 0.0; // saved: game seconds since the start
     std::vector<Traffic>    traffic;     // other captains' ships (never includes your own)
     MinedMap                minedChanged;// rocks mined since the last time someone looked (the server syncs these)
@@ -193,6 +200,7 @@ struct World {
 struct Captain {
     int           id = 0;                // 0 in single player; the server hands out 1, 2, ...
     std::string   name;                  // multiplayer: the name you joined with
+    std::string   shipName;              // saved: what the captain calls the ship
     Player        player;                // saved
     FlightState   flight;
     CommsState    comms;
@@ -218,6 +226,8 @@ struct GameState : World, Captain {
 void NewWorld(World &w, unsigned seed = DEFAULT_GALAXY_SEED);
 void NewCaptain(World &w, Captain &c, int id = 0, const std::string &name = "");   // at the start position
 void NewGame(GameState &g, unsigned seed = DEFAULT_GALAXY_SEED);                   // NewWorld + NewCaptain
+// A galaxy seed from what the player typed: a number as it is, any other text by its hash, nothing at all: a random one
+unsigned SeedFromText(const std::string &text, uint64_t entropy);
 
 // One fixed step for one captain. Doesn't advance the world clock (the caller
 // does that once per step, however many captains it steps).
@@ -226,10 +236,13 @@ void NewGame(GameState &g, unsigned seed = DEFAULT_GALAXY_SEED);                
 //                           only; mining and comms results come from the server
 void StepCaptain(World &w, Captain &c, const Controls &in, const Aim &aim, float dt, bool authoritative = true);
 
-// Single player: advance the clock, step your captain
+void UpdateEconomy(World &w);                    // economy.cpp: runs the economy up to the clock (whoever owns the world calls it)
+
+// Single player: advance the clock and the economy, step your captain
 inline void StepGame(GameState &g, const Controls &in, const Aim &aim, float dt)
 {
     g.clock += dt;
+    UpdateEconomy(g);
     StepCaptain(g, g, in, aim, dt);
 }
 

@@ -20,8 +20,8 @@
 #include <string>
 #include <vector>
 
-enum class WindowKind { Info, Market, Comms, SystemMap, SectorMap, Factions, Pause, SaveMenu, LoadMenu, SettingsMenu, ConfirmExit,
-                        MainMenu, SinglePlayerMenu, MultiplayerMenu, JoinMenu, HostMenu };
+enum class WindowKind { Info, Market, Comms, SystemMap, SectorMap, Factions, TradeLog, News, Pause, SaveMenu, LoadMenu, SettingsMenu, ConfirmExit,
+                        MainMenu, SinglePlayerMenu, MultiplayerMenu, JoinMenu, HostMenu, NewGameMenu };
 
 // What the main menu decided
 struct MenuChoice {
@@ -29,6 +29,8 @@ struct MenuChoice {
     std::string address;                 // Join: host name or IP
     uint16_t    port = 23500;            // Join / Host
     std::string name, password;          // your captain's name; the server password (may be empty)
+    std::string ship;                    // your ship's name (may be empty)
+    std::string seed;                    // Host: the galaxy seed, as typed (empty: a random one)
     int         maxPlayers = 16;         // Host
     bool        stopOnLeave = true;      // Host: stop the server when you leave it
 };
@@ -103,6 +105,10 @@ std::unique_ptr<Window> MakeSectorMap();
 
 // The factions window (factionui.cpp): R
 std::unique_ptr<Window> MakeFactionsWindow();
+
+// The trade log (T): every market you have prices for, good by good. The news (N). (tradeui.cpp)
+std::unique_ptr<Window> MakeTradeLog();
+std::unique_ptr<Window> MakeNewsWindow();
 
 // One line of the system map's list: a star, world, belt, moon or station (indented under its world)
 struct MapRow {

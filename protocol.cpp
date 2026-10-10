@@ -164,6 +164,38 @@ std::vector<uint8_t> MsgComms(const CommsChannel &c, bool open)
     return w.buf;
 }
 
+std::vector<uint8_t> MsgPrices(uint64_t body, const PriceRecord &r)
+{
+    Writer w;
+    w.U8(MSG_PRICES);
+    w.U64(body); w.F64(r.at); w.I64(r.sys); w.Str(r.name, 80);
+    w.I32(r.owner); w.I32(r.ruler); w.F32(r.tariff);
+    for (int g = 0; g < GOOD_COUNT; g++) {
+        w.U8(r.role[g]);
+        if (r.role[g] & 127) { w.F32(r.price[g]); w.F32(r.stock[g]); }      // (only what it deals in)
+    }
+    return w.buf;
+}
+
+bool ReadPrices(Reader &r, uint64_t &body, PriceRecord &out)
+{
+    body = r.U64(); out.at = r.F64(); out.sys = r.I64(); out.name = r.Str();
+    out.owner = r.I32(); out.ruler = r.I32(); out.tariff = r.F32();
+    for (int g = 0; g < GOOD_COUNT; g++) {
+        out.role[g] = r.U8();
+        if (out.role[g] & 127) { out.price[g] = r.F32(); out.stock[g] = r.F32(); }
+    }
+    return r.ok;
+}
+
+std::vector<uint8_t> MsgNews(const EconNews &n)
+{
+    Writer w;
+    w.U8(MSG_NEWS);
+    w.U32(n.seq); w.F64(n.at); w.I32(n.faction); w.I64(n.where); w.Str(n.text, 300);
+    return w.buf;
+}
+
 std::vector<std::vector<uint8_t>> MsgMined(const MinedMap &m)
 {
     const int PER_MESSAGE = 80;                    // 12 bytes each

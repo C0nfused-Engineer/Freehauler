@@ -252,7 +252,8 @@ double GalaxyDensity(DVec3 ly);
 // ---------------------------------------------------------------------------
 // Generation and queries
 // ---------------------------------------------------------------------------
-void        GenerateSystemContents(const StarSystem &sys, LoadedSystem &out);
+// 'lean': skip what only drawing needs (the belts' point clouds), for surveys of many systems
+void        GenerateSystemContents(const StarSystem &sys, LoadedSystem &out, bool lean = false);
 const char *StarDescription(const StarInfo &s);      // "G2 V yellow dwarf", "White dwarf", ...
 const char *StarClassCode(const StarInfo &s);        // "G2 V", "K1 III", "DA", "NS", "T5"
 const char *CompositionName(Composition c);          // "Metallic (M-type)", ...

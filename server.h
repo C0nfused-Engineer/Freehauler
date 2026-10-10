@@ -41,6 +41,8 @@ public:
         std::vector<Command>  commands;      // waiting for the input step they were issued after
         std::vector<double>   commandsSince; // when each arrived (applied anyway after a second)
         std::vector<float>    standingSent;  // the standings last sent (sent again when they change)
+        std::unordered_map<uint64_t, double> pricesSent;   // price records sent, by market: the time of the snapshot
+        uint32_t              newsSent = 0;  // the last headline sent
         std::vector<std::pair<TargetId, std::vector<uint8_t>>> commsSent;   // the last MSG_COMMS sent for each open channel
         uint32_t              echoTimeMs = 0;
     };
@@ -63,7 +65,7 @@ private:
     void Receive(double now);
     void HandleMessage(Peer &p, const std::vector<uint8_t> &msg, double now);
     void HandleInputs(Peer &p, const std::vector<uint8_t> &payload);
-    void Join(Peer &p, const std::string &name);
+    void Join(Peer &p, const std::string &name, const std::string &ship);
     void Reject(Peer &p, const std::string &reason);
     void Drop(Peer &p, const std::string &why);
     void ApplyDueCommands(Peer &p, double now);

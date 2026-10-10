@@ -1,6 +1,7 @@
 // game.cpp - new game, the simulation step, and target queries
 #include "game.h"
 #include "comms.h"
+#include "economy.h"
 #include "format.h"
 #include <algorithm>
 
@@ -78,6 +79,17 @@ void NewCaptain(World &w, Captain &c, int id, const std::string &name)
     Vector3 look = ToF(Norm(start->local - ship.pos));
     ship.rot = QuaternionFromMatrix(MatrixInvert(MatrixLookAt({ 0, 0, 0 }, look, { 0, 1, 0 })));
     if (id > 0) ship.pos = ship.pos + Cross(ToD(look), n) * (12.0 * ((id - 1) % 16 + 1));   // 60 m apart
+}
+
+unsigned SeedFromText(const std::string &text, uint64_t entropy)
+{
+    std::string t = text;
+    while (!t.empty() && t.back() == ' ') t.pop_back();
+    while (!t.empty() && t.front() == ' ') t.erase(0, 1);
+    if (t.empty()) return (unsigned)(Mix64(entropy) % 1000000000ull) + 1;          // (short enough to read out to a friend)
+    bool digits = t.size() <= 9;
+    for (char c : t) if (c < '0' || c > '9') digits = false;
+    return digits ? (unsigned)strtoul(t.c_str(), nullptr, 10) : (unsigned)(NameHash(t) % 4000000000ull);
 }
 
 void NewGame(GameState &g, unsigned seed)
@@ -395,7 +407,7 @@ void StepCaptain(World &w, Captain &c, const Controls &input, const Aim &aim, fl
                 double room = CARGO_CAPACITY - p.CargoTotal();
                 f.skimming = room > 1e-6;
                 f.skimFull = !f.skimming;
-                if (authoritative && f.skimming) p.cargo[ORE_HELIUM3] += fmin(room, SKIM_RATE * dt);
+                if (authoritative && f.skimming) p.cargo[RAW_HELIUM3] += fmin(room, SKIM_RATE * dt);
                 break;
             }
 
@@ -415,6 +427,12 @@ void StepCaptain(World &w, Captain &c, const Controls &input, const Aim &aim, fl
     }
 
     if (authoritative) UpdateComms(w, c);
+
+    // Docked: the captain's record of this market stays current (to the second)
+    if (authoritative && f.nearBody >= 0 && c.loaded.bodies[f.nearBody].population > 0 && w.econ.Built()) {
+        auto rec = c.know.prices.find(c.loaded.bodies[f.nearBody].id);
+        if (rec == c.know.prices.end() || w.clock - rec->second.at >= 1.0) RecordPrices(w, c, c.loaded.bodies[f.nearBody]);
+    }
 
     // Things that vanished (mined out, unloaded) can't stay selected
     DVec3 rel;

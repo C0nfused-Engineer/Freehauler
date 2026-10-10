@@ -14,9 +14,12 @@
 //   charted <system>                 (one line per system you have charts of)
 //   scanned <body id>                (one line per world you've scanned yourself)
 //   standing <faction> <-100..100>   (one line per faction you have any standing with)
+//   prices ...                       (one line per market you have prices for)
+//   econ / stock / owner / faction / embargo / shock / news ...   (the economy: see WriteEconomy)
 //   end
 // Unknown keys are ignored, so newer saves still partly load in older builds.
 #include "save.h"
+#include "economy.h"
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -49,6 +52,7 @@ bool SaveGame(const GameState &g, const char *path, const std::string &name)
     const Ship &s = p.ship;
     fprintf(f, "SPACEFLIGHT_SAVE %d\n", SAVE_VERSION);
     if (!name.empty()) fprintf(f, "name %s\n", name.c_str());
+    if (!g.shipName.empty()) fprintf(f, "shipname %s\n", g.shipName.c_str());
     fprintf(f, "location %s\n", g.systems[s.anchor].name.c_str());
     fprintf(f, "seed %u\n", g.seed);
     fprintf(f, "clock %.17g\n", g.clock);
@@ -63,6 +67,10 @@ bool SaveGame(const GameState &g, const char *path, const std::string &name)
     for (int64_t sys : g.know.charted) fprintf(f, "charted %lld\n", (long long)sys);
     for (uint64_t id : g.know.scanned) fprintf(f, "scanned %llu\n", (unsigned long long)id);
     for (size_t i = 0; i < g.standing.size(); i++) if (g.standing[i] != 0.0f) fprintf(f, "standing %d %.9g\n", (int)i, g.standing[i]);
+    std::string econ;
+    WritePrices(g, econ);
+    WriteEconomy(g, econ);
+    fputs(econ.c_str(), f);
     fprintf(f, "end\n");
     bool ok = !ferror(f);
     fclose(f);
@@ -73,7 +81,7 @@ bool LoadGame(GameState &g, const char *path)
 {
     FILE *f = fopen(path, "r");
     if (!f) return false;
-    char line[512];
+    static char line[8192];
     int version = 0;
     if (!fgets(line, sizeof line, f) || sscanf(line, "SPACEFLIGHT_SAVE %d", &version) != 1 ||
         version > SAVE_VERSION || version < SAVE_OLDEST) {
@@ -87,6 +95,9 @@ bool LoadGame(GameState &g, const char *path)
     Player   p;
     MinedMap mined;
     Knowledge know;
+    Captain scratch;                               // (price records are read into this)
+    std::vector<std::pair<std::string, std::string>> econ;   // the economy's lines, applied once the galaxy is rebuilt
+    std::string shipName;
     std::vector<std::pair<int, float>> standing;
     bool     haveShip = false, ended = false;
     while (fgets(line, sizeof line, f)) {
@@ -107,13 +118,20 @@ bool LoadGame(GameState &g, const char *path)
             s.dampeners = damp != 0;
         } else if (!strcmp(key, "cargo")) {
             int ore; double t;
-            if (sscanf(rest, "%d %lf", &ore, &t) == 2 && ore >= 0 && ore < GOOD_COUNT) p.cargo[ore] = t;
+            if (version >= SAVE_GOODS && sscanf(rest, "%d %lf", &ore, &t) == 2 && ore >= 0 && ore < GOOD_COUNT) p.cargo[ore] = t;
         } else if (!strcmp(key, "mined")) {
             unsigned long long id; float left;
             if (sscanf(rest, "%llu %f", &id, &left) == 2) mined[(uint64_t)id] = left;
         } else if (!strcmp(key, "charted")) {
             long long sys;
             if (sscanf(rest, "%lld", &sys) == 1) know.charted.insert(sys);
+        } else if (ReadPriceLine(scratch, key, rest)) {
+        } else if (!strcmp(key, "econ") || !strcmp(key, "stock") || !strcmp(key, "owner") || !strcmp(key, "faction") ||
+                   !strcmp(key, "embargo") || !strcmp(key, "shock") || !strcmp(key, "news")) {
+            econ.push_back({ key, rest });
+        } else if (!strcmp(key, "shipname")) {
+            shipName = rest + (*rest == ' ' ? 1 : 0);
+            while (!shipName.empty() && (shipName.back() == '\n' || shipName.back() == '\r')) shipName.pop_back();
         } else if (!strcmp(key, "standing")) {
             int id; float v;
             if (sscanf(rest, "%d %f", &id, &v) == 2) standing.push_back({ id, v });
@@ -129,8 +147,14 @@ bool LoadGame(GameState &g, const char *path)
     NewGame(fresh, seed);
     if (!fresh.systems.Exists(p.ship.anchor)) return false;
     fresh.clock         = clock;
+    if (!econ.empty()) {
+        EnsureEconomy(fresh);
+        for (const auto &l : econ) ReadEconomyLine(fresh, l.first.c_str(), l.second.c_str());
+    }
+    fresh.know.prices   = std::move(scratch.know.prices);
     fresh.player        = p;
     fresh.deltas.mined  = std::move(mined);
+    fresh.shipName      = shipName;
     fresh.know.charted.insert(know.charted.begin(), know.charted.end());   // (on top of home, which a new game already has)
     fresh.know.scanned  = std::move(know.scanned);
     for (const auto &s : standing) if (s.first >= 0 && s.first < (int)fresh.standing.size()) fresh.standing[s.first] = s.second;

@@ -13,6 +13,7 @@ bool ApplyCommand(World &w, Captain &c, const Command &cmd)
     case Command::MarketReport: RequestMarketReport(w, c, cmd.arg); return true;
     case Command::LocalInfo:    RequestLocalInfo(w, c, cmd.arg); return true;
     case Command::HangUp:       HangUp(w, c, cmd.arg); return true;
+    case Command::BuyData:      return BuyTradeData(w, c);
     default:                    return false;
     }
 }

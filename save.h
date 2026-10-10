@@ -7,8 +7,9 @@
 
 #include <string>
 
-const int SAVE_VERSION = 2;           // 2: the galaxy at full size (systems are numbered by where they are)
+const int SAVE_VERSION = 3;           // 2: the galaxy at full size. 3: the economy, and the goods redrawn
 const int SAVE_OLDEST  = 2;           // saves from the old twelve-star galaxy can't be placed in this one
+const int SAVE_GOODS   = 3;           // cargo is stored by good number: older saves' holds can't be read, and load empty
 
 // Saves live in a "saves" folder beside the executable
 std::string SaveDirectory();                       // ends with a path separator; created if missing

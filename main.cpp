@@ -31,7 +31,9 @@
 //   targets.h       TargetId: stable references to things
 //   game            World (shared), Captain (one player), GameState (World + your Captain),
 //                   StepCaptain (fixed time step), events, target queries
-//   economy, comms  markets and trading; hailing worlds (actions on a Captain)
+//   econ.h, economy the markets of human space: stock, production, trade, prices; what the
+//                   factions do to them; trading (actions on a Captain)
+//   comms           hailing worlds and stations (actions on a Captain)
 //   commands        player actions as data: applied here, or sent to the server
 //   targetinfo      info-panel facts
 //   save            save games (seed + deltas + player)
@@ -59,6 +61,7 @@
 //   F            comms: hail whoever the nose is on (or you're docked beside), else list
 //                everyone in the system (C: the list)      O   toggle orbit rings
 //   R            the factions: who they are, what they want, where you stand
+//   T            the trade log: prices at every market you know of      N   the news
 //   M            map: the system you're in (list its worlds, pick one to set course); M again,
 //                or M between the stars, for the sector map of nearby systems
 //   MMB or I     info on the target   3 (on a channel, in docking range)   trade
@@ -378,7 +381,7 @@ static bool JoinAndPlay(InputSource &input, const RenderAssets &assets, const Me
 {
     NetClient net;
     std::string error;
-    if (!net.Connect(c.address, c.port, c.name, c.password, error)) { ShowError("COULDN'T JOIN", error); return true; }
+    if (!net.Connect(c.address, c.port, c.name, c.password, error, c.ship)) { ShowError("COULDN'T JOIN", error); return true; }
     net.adminKey = adminKey;
     net.stopServerOnLeave = server && c.stopOnLeave;
     GameState g;
@@ -401,6 +404,8 @@ static bool HostAndPlay(InputSource &input, const RenderAssets &assets, const Me
     std::vector<std::string> args = { "--server", "--port", std::to_string(c.port), "--max-players", std::to_string(c.maxPlayers),
                                       "--data", dataDir, "--admin-key", key, "--pause-on-error" };
     if (!c.password.empty()) { args.push_back("--password"); args.push_back(c.password); }
+    args.push_back("--seed");                 // (only used if this data folder has no galaxy yet)
+    args.push_back(std::to_string(SeedFromText(c.seed, (uint64_t)(NetTime() * 1e6))));
     ProcessHandle server;
     std::string error;
     if (!LaunchProcess(SelfPath(), args, server, error, dataDir + "/server.log")) { ShowError("COULDN'T START THE SERVER", error); return true; }

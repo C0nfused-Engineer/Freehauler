@@ -122,17 +122,20 @@ static std::vector<InfoRow> StarRows(const StarSystem &s, const StarInfo &st, co
 }
 
 // Economy, exports and imports of an inhabited world or station
-static void AddEconomyRows(std::vector<InfoRow> &rows, const Body &b, const FactionSet &factions)
+static void AddEconomyRows(std::vector<InfoRow> &rows, const World &w, const Captain &c, const Body &b)
 {
     if (b.population <= 0) return;
-    rows.push_back({ "Run by", factions.Name(b.owner, b.kind == Kind::Station ? "Itself - an independent station" : "Its own people") });
-    if (b.econ == Econ::None) return;
-    Market m = MakeMarket(b);
-    rows.push_back({ "Economy", EconName(b.econ) });
+    rows.push_back({ "Run by", w.systems.factions.Name(b.owner, b.kind == Kind::Station ? "Itself - an independent station" : "Its own people") });
+    Market m;
+    double at = 0.0;
+    if (!KnownMarket(c, b, m, &at)) { rows.push_back({ "Market", "No price data - dock, hail or buy data" }); return; }
     std::string ex = ExportsLine(m, 99), im = ImportsLine(m, 99);
-    if (!ex.empty()) AddListRows(rows, "Exports", ex, 2);
-    if (!im.empty()) AddListRows(rows, "Imports", im, 2);
-    rows.push_back({ "Fuel", TextFormat("%.0f cr/t", m.fuelPrice) });
+    if (!ex.empty()) AddListRows(rows, "Makes", ex, 2);
+    if (!im.empty()) AddListRows(rows, "Needs", im, 2);
+    rows.push_back({ "Fuel", m.fuelPrice > 0.0 ? TextFormat("%.0f cr/t", m.fuelPrice) : "None" });
+    if (m.tariff > 0.0) rows.push_back({ "Tariff", TextFormat("%.0f%% on sales", m.tariff * 100.0) });
+    double age = w.clock - at;
+    rows.push_back({ "Prices as of", age < 5.0 ? std::string("now") : FormatETA(age) + " ago" });
 }
 
 // How to get the rest: shown in place of what an unscanned body's rows would say
@@ -144,9 +147,9 @@ static void AddUnscannedRows(std::vector<InfoRow> &rows, const Body &b)
     rows.push_back({ "", "or get charts from someone here" });
 }
 
-static std::vector<InfoRow> StationRows(const LoadedSystem &L, const Body &b, bool known, const FactionSet &factions)
+static std::vector<InfoRow> StationRows(const World &w, const Captain &c, const Body &b, bool known)
 {
-    const Body &host = L.bodies[b.parent];
+    const Body &host = c.loaded.bodies[b.parent];
     std::vector<InfoRow> rows = {
         { "Type", known ? b.type : std::string(BasicKind(b)) },
         { "Orbit", host.kind == Kind::Star ? TextFormat("%.2f AU from %s", b.orbit / AU_U, host.name.c_str())
@@ -155,7 +158,7 @@ static std::vector<InfoRow> StationRows(const LoadedSystem &L, const Body &b, bo
     if (!known) { AddUnscannedRows(rows, b); return rows; }
     rows.push_back({ "Spin gravity", TextFormat("%.2f g", b.gravity) });
     rows.push_back({ "Population", FormatPopulation(b.population) });
-    AddEconomyRows(rows, b, factions);
+    AddEconomyRows(rows, w, c, b);
     return rows;
 }
 
@@ -171,7 +174,7 @@ static std::vector<InfoRow> BodyRows(const World &w, const Captain &c, int bi)
         return rows;
     }
     const bool known = Known(c, bi);
-    if (b.kind == Kind::Station) return StationRows(L, b, known, w.systems.factions);
+    if (b.kind == Kind::Station) return StationRows(w, c, b, known);
     const Body &host = b.kind == Kind::Moon ? L.bodies[b.parent] : L.bodies[0];
     double period;
     if (b.kind == Kind::Planet) {
@@ -223,7 +226,7 @@ static std::vector<InfoRow> BodyRows(const World &w, const Captain &c, int bi)
         rows.push_back({ "Stations", TextFormat("%d", (int)stations.size()) });
         for (const std::string &sn : stations) rows.push_back({ "", "  " + sn });
     }
-    AddEconomyRows(rows, b, w.systems.factions);
+    AddEconomyRows(rows, w, c, b);
     return rows;
 }
 
@@ -258,7 +261,8 @@ static std::vector<InfoRow> ShipRows(const World &w, const Traffic &t)
     float speed = Vector3Length(t.ship.vel);
     const char *drive = !t.hyper ? (speed > MAX_SPEED * 1.01f ? "Spooling down" : "Cruise")
                                  : (speed > HYPER_SPEED * 1.01 ? "Warp" : "Hyper");
-    return { { "Captain", t.name },
+    return { { "Ship", t.shipName.empty() ? std::string("(unnamed)") : t.shipName },
+             { "Captain", t.name },
              { "Speed", FormatSpeed(speed) },
              { "Drive", drive },
              { "Near", w.systems[t.ship.anchor].name },

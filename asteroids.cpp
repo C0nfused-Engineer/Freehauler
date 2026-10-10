@@ -8,19 +8,18 @@ struct OreShare { int ore; double share; };
 static const std::vector<OreShare> &OreTable(Composition c)
 {
     static const std::vector<OreShare> metallic = {
-        { ORE_IRON, .35 }, { ORE_NICKEL, .20 }, { ORE_COBALT, .12 }, { ORE_COPPER, .10 }, { ORE_PLATINUM, .08 },
-        { ORE_GOLD, .06 }, { ORE_RARE_EARTHS, .05 }, { ORE_IRIDIUM, .04 } };
+        { ORE_IRON, .45 }, { ORE_COPPER, .20 }, { ORE_TITANIUM, .15 }, { ORE_PRECIOUS, .12 }, { ORE_RARE_EARTHS, .08 } };
     static const std::vector<OreShare> stony = {
-        { ORE_SILICATES, .35 }, { ORE_IRON, .18 }, { ORE_TITANIUM, .14 }, { ORE_COPPER, .10 }, { ORE_RARE_EARTHS, .08 },
-        { ORE_NICKEL, .07 }, { ORE_URANIUM, .05 }, { ORE_PLATINUM, .03 } };
+        { ORE_SILICATES, .40 }, { ORE_IRON, .20 }, { ORE_TITANIUM, .14 }, { ORE_COPPER, .10 }, { ORE_RARE_EARTHS, .08 },
+        { ORE_URANIUM, .05 }, { ORE_PRECIOUS, .03 } };
     static const std::vector<OreShare> carbonaceous = {
-        { ORE_CARBONACEOUS, .40 }, { ORE_WATER_ICE, .20 }, { ORE_SILICATES, .15 }, { ORE_AMMONIA_ICE, .08 },
-        { ORE_IRON, .07 }, { ORE_RARE_EARTHS, .05 }, { ORE_URANIUM, .03 }, { ORE_GOLD, .02 } };
+        { ORE_CARBON, .45 }, { ORE_WATER_ICE, .20 }, { ORE_SILICATES, .15 }, { ORE_VOLATILES, .10 },
+        { ORE_IRON, .05 }, { ORE_URANIUM, .03 }, { ORE_PRECIOUS, .02 } };
     static const std::vector<OreShare> mixed = {
-        { ORE_IRON, .25 }, { ORE_SILICATES, .20 }, { ORE_NICKEL, .12 }, { ORE_CARBONACEOUS, .10 }, { ORE_COPPER, .08 },
-        { ORE_TITANIUM, .08 }, { ORE_PLATINUM, .07 }, { ORE_WATER_ICE, .05 }, { ORE_COBALT, .05 } };
+        { ORE_IRON, .28 }, { ORE_SILICATES, .22 }, { ORE_CARBON, .15 }, { ORE_COPPER, .12 }, { ORE_TITANIUM, .10 },
+        { ORE_WATER_ICE, .07 }, { ORE_PRECIOUS, .06 } };
     static const std::vector<OreShare> icy = {
-        { ORE_WATER_ICE, .70 }, { ORE_AMMONIA_ICE, .14 }, { ORE_METHANE_ICE, .10 }, { ORE_CARBONACEOUS, .06 } };
+        { ORE_WATER_ICE, .70 }, { ORE_VOLATILES, .24 }, { ORE_CARBON, .06 } };
     switch (c) {
     case Composition::Metallic:     return metallic;
     case Composition::Stony:        return stony;

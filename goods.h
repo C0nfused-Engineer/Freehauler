@@ -1,83 +1,101 @@
-// goods.h - everything you can carry and trade.
+// goods.h - everything you can carry and trade: forty goods in three tiers.
 //
-// Ores come out of asteroids (and helium-3 out of gas giants' upper clouds);
-// goods are bought and sold at markets. Every settlement and station has an
-// economy (see economy.h) that decides what it exports cheaply and what it
-// pays well for, so trade routes run from producers to consumers.
+//   Raw        dug, pumped, skimmed or grown: ores and ices (which also come
+//              out of asteroids), helium-3 (skimmed from gas giants), crops
+//   Refined    made from raw materials: metals, chemicals, fuel, food
+//   Finished   made from refined goods (and the odd raw one): machines,
+//              electronics, ship parts, weapons, what people buy
 //
-// The first seven entries keep their original numbers: save files store cargo
-// by index, so new goods only ever go on the end.
+// Every refined and finished good has a recipe: the tonnes of each input that
+// go into a tonne of it. A place that makes something needs its inputs, so a
+// shortage upstream is felt downstream (economy.h).
+//
+// Saves and the network store cargo by number: new goods go on the END of
+// their tier's block only with a new save version.
 #pragma once
 #include "raylib.h"
 
 enum Good {
-    // --- Ores (mined) ---
-    ORE_IRON, ORE_NICKEL, ORE_SILICATES, ORE_PLATINUM, ORE_WATER_ICE, ORE_AMMONIA_ICE, ORE_METHANE_ICE,
-    ORE_COPPER, ORE_COBALT, ORE_TITANIUM, ORE_GOLD, ORE_IRIDIUM, ORE_URANIUM, ORE_RARE_EARTHS, ORE_CARBONACEOUS,
-    ORE_HELIUM3,                                   // skimmed from gas giants
-    // --- Goods (made, grown and traded) ---
-    GOOD_FOOD, GOOD_FINE_FOOD, GOOD_WATER, GOOD_SPIRITS, GOOD_TEXTILES, GOOD_FERTILIZER,
-    GOOD_ALLOYS, GOOD_POLYMERS, GOOD_MACHINERY, GOOD_ELECTRONICS, GOOD_ROBOTICS, GOOD_REACTOR_PARTS,
-    GOOD_FUEL_CELLS, GOOD_MEDICAL, GOOD_CONSUMER, GOOD_LUXURY, GOOD_EXOTIC_BIO, GOOD_RESEARCH_DATA,
-    GOOD_INSTRUMENTS, GOOD_HABITAT_MODULES,
+    // --- Raw ---
+    ORE_IRON, ORE_COPPER, ORE_TITANIUM, ORE_PRECIOUS, ORE_RARE_EARTHS, ORE_URANIUM, ORE_SILICATES, ORE_CARBON,
+    ORE_WATER_ICE, ORE_VOLATILES,                  // (the ten above are what asteroids and ring chunks hold)
+    RAW_HELIUM3,                                   // skimmed from gas giants
+    RAW_GRAIN, RAW_LIVESTOCK, RAW_FLORA,           // grown
+    // --- Refined ---
+    REF_STEEL, REF_ALLOYS, REF_CONDUCTORS, REF_SILICON, REF_CERAMICS, REF_POLYMERS, REF_CHEMICALS, REF_FERTILIZER,
+    REF_WATER, REF_FUEL, REF_REACTOR_FUEL, REF_FOOD,
+    // --- Finished ---
+    GOOD_MACHINERY, GOOD_ELECTRONICS, GOOD_ROBOTICS, GOOD_HULL_PLATING, GOOD_SHIP_COMPONENTS, GOOD_REACTOR_CORES,
+    GOOD_WEAPONS, GOOD_MUNITIONS, GOOD_MEDICINES, GOOD_CONSUMER, GOOD_LUXURY, GOOD_LIQUOR, GOOD_HABITAT_MODULES,
+    GOOD_INSTRUMENTS,
     GOOD_COUNT,
-    FIRST_GOOD = GOOD_FOOD,                        // ores are [0, FIRST_GOOD)
+    FIRST_REFINED = REF_STEEL, FIRST_FINISHED = GOOD_MACHINERY,
+    MINED_COUNT = RAW_HELIUM3,                     // ores and ices are [0, MINED_COUNT)
 };
 
-enum class GoodClass { Metal, PreciousMetal, Mineral, Ice, Gas, Food, Industrial, Tech, Medical, Consumer, Luxury, Science };
+struct Ingredient { int good; float tonnes; };     // per tonne made
 
 struct GoodInfo {
     const char *name;
     Color       color;
-    double      basePrice;    // credits per tonne, before each market's adjustment
-    GoodClass   cls;
-    bool        ice;          // ores: ice chunks rather than rock (ring particles)
+    double      basePrice;    // credits per tonne where supply meets demand
+    bool        ice;          // mined as ice chunks rather than rock
+    Ingredient  recipe[3];    // unused slots: tonnes 0
 };
 
-inline bool IsOre(int g) { return g >= 0 && g < FIRST_GOOD; }
+inline int GoodTier(int g) { return g < FIRST_REFINED ? 0 : g < FIRST_FINISHED ? 1 : 2; }
+inline const char *TierName(int tier) { return tier == 0 ? "Raw" : tier == 1 ? "Refined" : "Finished"; }
 
 inline const GoodInfo &GoodData(int g)
 {
-    static const Color ICE = { 170, 220, 255, 255 }, FOOD = { 150, 230, 120, 255 }, INDUSTRIAL = { 200, 200, 210, 255 },
-                       TECH = { 110, 210, 255, 255 }, MEDICAL = { 255, 140, 150, 255 }, CONSUMER = { 240, 200, 150, 255 },
-                       LUXURY = { 220, 150, 255, 255 }, SCIENCE = { 140, 255, 220, 255 };
+    static const Color ICE = { 170, 220, 255, 255 }, CROP = { 150, 230, 120, 255 }, METAL = { 200, 200, 210, 255 },
+                       CHEM = { 210, 185, 255, 255 }, TECH = { 110, 210, 255, 255 }, ARMS = { 255, 120, 110, 255 },
+                       LIFE = { 255, 150, 190, 255 }, SHOP = { 240, 200, 150, 255 }, RICH = { 220, 150, 255, 255 };
+    const Ingredient _ = { 0, 0.0f };
     static const GoodInfo table[GOOD_COUNT] = {
-        { "Iron",               { 190, 150, 120, 255 },   40, GoodClass::Metal,         false },
-        { "Nickel",             { 160, 170, 185, 255 },   55, GoodClass::Metal,         false },
-        { "Silicates",          { 180, 170, 140, 255 },   25, GoodClass::Mineral,       false },
-        { "Platinum",           { 245, 245, 255, 255 },  600, GoodClass::PreciousMetal, false },
-        { "Water Ice",          { 170, 220, 255, 255 },   30, GoodClass::Ice,           true  },
-        { "Ammonia Ice",        { 170, 255, 220, 255 },   45, GoodClass::Ice,           true  },
-        { "Methane Ice",        { 210, 185, 255, 255 },   50, GoodClass::Ice,           true  },
-        { "Copper",             { 230, 140,  90, 255 },   70, GoodClass::Metal,         false },
-        { "Cobalt",             { 120, 140, 230, 255 },  110, GoodClass::Metal,         false },
-        { "Titanium",           { 200, 205, 215, 255 },  140, GoodClass::Metal,         false },
-        { "Gold",               { 255, 210,  70, 255 },  900, GoodClass::PreciousMetal, false },
-        { "Iridium",            { 230, 230, 200, 255 }, 1100, GoodClass::PreciousMetal, false },
-        { "Uranium Ore",        { 170, 255, 110, 255 },  400, GoodClass::Mineral,       false },
-        { "Rare Earths",        { 255, 160, 200, 255 },  320, GoodClass::Mineral,       false },
-        { "Carbonaceous",       { 130, 120, 110, 255 },   35, GoodClass::Mineral,       false },
-        { "Helium-3",           { 255, 240, 170, 255 }, 1500, GoodClass::Gas,           false },
-        { "Food",               FOOD,                     25, GoodClass::Food,          false },
-        { "Fine Food",          FOOD,                    180, GoodClass::Food,          false },
-        { "Purified Water",     ICE,                      12, GoodClass::Food,          false },
-        { "Spirits",            CONSUMER,                260, GoodClass::Consumer,      false },
-        { "Textiles",           CONSUMER,                 90, GoodClass::Consumer,      false },
-        { "Fertilizer",         FOOD,                     40, GoodClass::Industrial,    false },
-        { "Alloys",             INDUSTRIAL,              160, GoodClass::Industrial,    false },
-        { "Polymers",           INDUSTRIAL,              110, GoodClass::Industrial,    false },
-        { "Machinery",          INDUSTRIAL,              420, GoodClass::Industrial,    false },
-        { "Electronics",        TECH,                    750, GoodClass::Tech,          false },
-        { "Robotics",           TECH,                   1300, GoodClass::Tech,          false },
-        { "Reactor Parts",      TECH,                   1800, GoodClass::Tech,          false },
-        { "Fuel Cells",         TECH,                    220, GoodClass::Industrial,    false },
-        { "Medical Supplies",   MEDICAL,                 650, GoodClass::Medical,       false },
-        { "Consumer Goods",     CONSUMER,                300, GoodClass::Consumer,      false },
-        { "Luxury Goods",       LUXURY,                 1600, GoodClass::Luxury,        false },
-        { "Exotic Biologicals", LUXURY,                 1200, GoodClass::Luxury,        false },
-        { "Research Data",      SCIENCE,                 900, GoodClass::Science,       false },
-        { "Sci Instruments",    SCIENCE,                1000, GoodClass::Science,       false },
-        { "Habitat Modules",    INDUSTRIAL,              500, GoodClass::Industrial,    false },
+        // Raw
+        { "Iron Ore",            { 190, 150, 120, 255 },   40, false, { _, _, _ } },
+        { "Copper Ore",          { 230, 140,  90, 255 },   70, false, { _, _, _ } },
+        { "Titanium Ore",        { 200, 205, 215, 255 },  140, false, { _, _, _ } },
+        { "Precious Metals",     { 255, 210,  70, 255 },  800, false, { _, _, _ } },
+        { "Rare Earths",         { 255, 160, 200, 255 },  320, false, { _, _, _ } },
+        { "Uranium Ore",         { 170, 255, 110, 255 },  400, false, { _, _, _ } },
+        { "Silicates",           { 180, 170, 140, 255 },   25, false, { _, _, _ } },
+        { "Carbonaceous Rock",   { 130, 120, 110, 255 },   35, false, { _, _, _ } },
+        { "Water Ice",           ICE,                      30, true,  { _, _, _ } },
+        { "Volatile Ices",       { 190, 240, 220, 255 },   50, true,  { _, _, _ } },
+        { "Helium-3",            { 255, 240, 170, 255 },  600, false, { _, _, _ } },
+        { "Grain",               CROP,                     30, false, { _, _, _ } },
+        { "Livestock",           CROP,                     90, false, { _, _, _ } },
+        { "Exotic Flora",        LIFE,                    500, false, { _, _, _ } },
+        // Refined
+        { "Steel",               METAL,                   110, false, { { ORE_IRON, 1.0f }, { ORE_CARBON, 0.5f }, _ } },
+        { "Light Alloys",        METAL,                   280, false, { { ORE_TITANIUM, 1.0f }, { ORE_IRON, 0.5f }, _ } },
+        { "Conductors",          { 240, 170, 110, 255 },  200, false, { { ORE_COPPER, 1.0f }, { ORE_PRECIOUS, 0.05f }, _ } },
+        { "Silicon",             TECH,                    180, false, { { ORE_SILICATES, 1.0f }, { ORE_RARE_EARTHS, 0.2f }, _ } },
+        { "Ceramics",            { 220, 210, 190, 255 },   80, false, { { ORE_SILICATES, 1.5f }, _, _ } },
+        { "Polymers",            CHEM,                    120, false, { { ORE_CARBON, 1.0f }, { ORE_VOLATILES, 0.5f }, _ } },
+        { "Chemicals",           CHEM,                    130, false, { { ORE_VOLATILES, 1.0f }, { ORE_WATER_ICE, 0.5f }, _ } },
+        { "Fertilizer",          CROP,                     70, false, { { ORE_VOLATILES, 0.5f }, { ORE_CARBON, 0.5f }, _ } },
+        { "Purified Water",      ICE,                      45, false, { { ORE_WATER_ICE, 1.0f }, _, _ } },
+        { "Fuel",                { 255, 230, 140, 255 },   60, false, { { RAW_HELIUM3, 0.05f }, { ORE_WATER_ICE, 0.5f }, _ } },
+        { "Reactor Fuel",        { 170, 255, 110, 255 },  600, false, { { ORE_URANIUM, 1.0f }, _, _ } },
+        { "Foodstuffs",          CROP,                     70, false, { { RAW_GRAIN, 0.8f }, { RAW_LIVESTOCK, 0.2f }, { REF_WATER, 0.2f } } },
+        // Finished
+        { "Machinery",           METAL,                   420, false, { { REF_STEEL, 1.0f }, { REF_CONDUCTORS, 0.5f }, _ } },
+        { "Electronics",         TECH,                    700, false, { { REF_SILICON, 0.5f }, { REF_CONDUCTORS, 0.5f }, _ } },
+        { "Robotics",            TECH,                   1300, false, { { REF_ALLOYS, 0.5f }, { REF_SILICON, 0.5f }, { REF_CONDUCTORS, 0.5f } } },
+        { "Hull Plating",        METAL,                   450, false, { { REF_STEEL, 1.0f }, { REF_ALLOYS, 0.5f }, { REF_CERAMICS, 0.3f } } },
+        { "Ship Components",     TECH,                   1100, false, { { REF_ALLOYS, 0.7f }, { REF_CONDUCTORS, 0.5f }, { REF_SILICON, 0.5f } } },
+        { "Reactor Cores",       { 170, 255, 110, 255 }, 1800, false, { { REF_STEEL, 1.0f }, { REF_REACTOR_FUEL, 0.5f }, { REF_CERAMICS, 0.5f } } },
+        { "Weapons",             ARMS,                   1500, false, { { REF_ALLOYS, 0.6f }, { REF_CONDUCTORS, 0.5f }, { REF_CHEMICALS, 0.3f } } },
+        { "Munitions",           ARMS,                    300, false, { { REF_STEEL, 0.5f }, { REF_CHEMICALS, 0.6f }, _ } },
+        { "Medicines",           LIFE,                    650, false, { { REF_CHEMICALS, 0.6f }, { RAW_FLORA, 0.2f }, _ } },
+        { "Consumer Goods",      SHOP,                    300, false, { { REF_POLYMERS, 0.6f }, { REF_SILICON, 0.2f }, _ } },
+        { "Luxury Goods",        RICH,                   1600, false, { { ORE_PRECIOUS, 0.3f }, { REF_POLYMERS, 0.4f }, _ } },
+        { "Liquor",              SHOP,                    260, false, { { RAW_GRAIN, 1.0f }, { REF_WATER, 0.5f }, _ } },
+        { "Habitat Modules",     METAL,                   500, false, { { REF_STEEL, 1.0f }, { REF_POLYMERS, 0.5f }, { REF_CERAMICS, 0.5f } } },
+        { "Instruments",         { 140, 255, 220, 255 }, 1000, false, { { REF_SILICON, 0.5f }, { REF_CERAMICS, 0.3f }, { REF_CONDUCTORS, 0.4f } } },
     };
     return table[g];
 }

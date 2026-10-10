@@ -698,7 +698,7 @@ static void DescribeWorld(Body &b, const Body *parent, const WorldCtx &ctx, Gen 
 // ---------------------------------------------------------------------------
 // Asteroid belts (from the system's layout) and rings (around some giants)
 // ---------------------------------------------------------------------------
-static void GenerateZones(const StarSystem &sys, const SystemPlan &plan, LoadedSystem &out)
+static void GenerateZones(const StarSystem &sys, const SystemPlan &plan, LoadedSystem &out, bool lean)
 {
     Gen g(sys.seed ^ 0x5bd1e995ull);
     out.zones.clear();
@@ -726,7 +726,7 @@ static void GenerateZones(const StarSystem &sys, const SystemPlan &plan, LoadedS
         else                      z.name = sys.name + (inner == 0 ? " Inner Belt" : " Outer Belt");
         if (!bp.outer) inner++;
         // Point cloud for seeing the belt from a distance
-        for (int k = 0; k < 2500; k++) {
+        for (int k = 0; k < (lean ? 0 : 2500); k++) {
             double r  = ClampD(c + bg.gauss() * w * 0.22, z.rIn, z.rOut);
             double h  = ClampD(bg.gauss() * z.halfH * 0.35, -z.halfH, z.halfH);
             double an = bg.uni(0, 2 * PI);
@@ -899,7 +899,7 @@ static void GenerateStations(const StarSystem &sys, LoadedSystem &out)
 // Everything in one system. Deterministic: the same system always comes out
 // the same, so it can be thrown away and rebuilt. Every body draws from its
 // own stream (seeded by its id), so tuning one world never changes another.
-void GenerateSystemContents(const StarSystem &sys, LoadedSystem &out)
+void GenerateSystemContents(const StarSystem &sys, LoadedSystem &out, bool lean)
 {
     static const char *roman[] = { "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII" };
     const SystemPlan plan = PlanSystem(sys);
@@ -1003,7 +1003,7 @@ void GenerateSystemContents(const StarSystem &sys, LoadedSystem &out)
     out.orbits.push_back({ sys.u, sys.v, sys.hzIn,  { 30, 110, 55, 255 } });
     out.orbits.push_back({ sys.u, sys.v, sys.hzOut, { 30, 110, 55, 255 } });
 
-    GenerateZones(sys, plan, out);
+    GenerateZones(sys, plan, out, lean);
     GenerateStations(sys, out);
 }
 

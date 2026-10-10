@@ -10,7 +10,7 @@ static const double INTERP_DELAY = 12.0;        // draw other ships this many se
 // Connecting
 // ---------------------------------------------------------------------------
 bool NetClient::Connect(const std::string &hostName, uint16_t port, const std::string &playerName,
-                        const std::string &pass, std::string &error)
+                        const std::string &pass, std::string &error, const std::string &shipName)
 {
     Disconnect();
     host = hostName;
@@ -27,6 +27,7 @@ bool NetClient::Connect(const std::string &hostName, uint16_t port, const std::s
     w.U8(MSG_HELLO);
     w.Str(name);
     w.Str(password);
+    w.Str(shipName, MAX_PLAYER_NAME);
     conn.Send(w.buf);
     startedAt = NetTime();
     conn.lastHeard = startedAt;
@@ -35,6 +36,7 @@ bool NetClient::Connect(const std::string &hostName, uint16_t port, const std::s
     lastSeq = serverReceived = reconciledTo = lastSnapTick = 0;
     haveSnap = false;
     names.clear();
+    ships.clear();
     samples.clear();
     return true;
 }
@@ -175,6 +177,19 @@ void NetClient::HandleMessage(GameState &g, const std::vector<uint8_t> &msg)
         if (r.ok) g.events.push_back(e);
         return;
     }
+    case MSG_PRICES: {
+        uint64_t body; PriceRecord rec;
+        if (ReadPrices(r, body, rec)) g.know.prices[body] = rec;
+        return;
+    }
+    case MSG_NEWS: {
+        EconNews n;
+        n.seq = r.U32(); n.at = r.F64(); n.faction = r.I32(); n.where = r.I64(); n.text = r.Str();
+        if (!r.ok) return;
+        g.news.push_back(n);
+        if (g.news.size() > 80) g.news.erase(g.news.begin());
+        return;
+    }
     case MSG_STANDING: {
         uint8_t n = r.U8();
         std::vector<float> s;
@@ -206,8 +221,10 @@ void NetClient::HandleMessage(GameState &g, const std::vector<uint8_t> &msg)
         int id = r.I32();
         std::string who = r.Str();
         bool justNow = r.U8() != 0;          // (0: was already here when we joined)
+        std::string ship = r.Str();
         if (!r.ok) return;
         names[id] = who;
+        ships[id] = ship;
         if (justNow) g.events.push_back({ EventType::PlayerJoined, "Captain " + who + " joined", {}, -1, 0.0, 0.0, g.id });
         return;
     }
@@ -216,6 +233,7 @@ void NetClient::HandleMessage(GameState &g, const std::vector<uint8_t> &msg)
         std::string who = r.Str();
         if (!r.ok) return;
         names.erase(id);
+        ships.erase(id);
         samples.erase(id);
         g.events.push_back({ EventType::PlayerLeft, "Captain " + who + " left", {}, -1, 0.0, 0.0, g.id });
         return;
@@ -395,6 +413,8 @@ void NetClient::UpdateTraffic(GameState &g, float frameDt)
         }
         auto nm = names.find(entry.first);
         t.name = nm != names.end() ? nm->second : "Captain " + std::to_string(entry.first);
+        auto sn = ships.find(entry.first);
+        if (sn != ships.end()) t.shipName = sn->second;
         g.traffic.push_back(t);
     }
 }

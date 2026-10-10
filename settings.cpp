@@ -26,6 +26,7 @@ bool LoadSettings(Settings &s)
         else if (!strcmp(key, "fullscreen"))         s.fullscreen = v != 0;
         else if (!strcmp(key, "player_name"))        s.playerName = value;
         else if (!strcmp(key, "last_server"))        s.lastServer = value;
+        else if (!strcmp(key, "ship_name"))          s.shipName = value;
         else if (!strcmp(key, "host_port"))          s.hostPort = (int)v;
         else if (!strcmp(key, "host_max_players"))   s.hostMaxPlayers = (int)v;
         else if (!strcmp(key, "host_stop_on_leave")) s.hostStopOnLeave = v != 0;
@@ -45,6 +46,7 @@ bool SaveSettings(const Settings &s)
     fprintf(f, "fullscreen %d\n", s.fullscreen ? 1 : 0);
     if (!s.playerName.empty()) fprintf(f, "player_name %s\n", s.playerName.c_str());
     if (!s.lastServer.empty()) fprintf(f, "last_server %s\n", s.lastServer.c_str());
+    if (!s.shipName.empty())   fprintf(f, "ship_name %s\n", s.shipName.c_str());
     fprintf(f, "host_port %d\n", s.hostPort);
     fprintf(f, "host_max_players %d\n", s.hostMaxPlayers);
     fprintf(f, "host_stop_on_leave %d\n", s.hostStopOnLeave ? 1 : 0);

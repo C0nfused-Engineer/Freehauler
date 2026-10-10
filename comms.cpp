@@ -54,16 +54,16 @@ static std::string Greeting(const Body &b)
     return TextFormat("This is %s. Go ahead, captain.", b.name.c_str());
 }
 
-static std::vector<std::string> MarketReport(const Body &b)
+static std::vector<std::string> MarketReport(const World &w, const Captain &c, const Body &b)
 {
-    Market m = MakeMarket(b);
+    Market m = LiveMarket(w, c, b);
     std::vector<std::string> out;
     // Lists goods of one role with a price, wrapped a few to a line
     auto list = [&](const char *head, Role r, bool buying) {
         std::string line = head;
         int n = 0;
         for (int g = 0; g < GOOD_COUNT; g++) {
-            if (m.role[g] != r) continue;
+            if (m.role[g] != r || (buying ? !m.Sells(g) : !m.Buys(g))) continue;
             if (n && n % 3 == 0) { out.push_back(line); line = "   "; }
             line += TextFormat("  %s %.0f", GoodData(g).name, buying ? m.BuyPrice(g) : m.SellPrice(g));
             n++;
@@ -74,13 +74,14 @@ static std::vector<std::string> MarketReport(const Body &b)
     int ex = list("Selling cheap:", Role::Export, true);
     int im = list("Paying well for:", Role::Import, false);
     if (!ex && !im) list("Trading:", Role::Trade, true);
-    out.push_back(TextFormat("Prices in cr/t. Fuel is %.0f cr/t.", m.fuelPrice));
+    out.push_back(m.fuelPrice > 0.0 ? TextFormat("Prices in cr/t. Fuel is %.0f cr/t.", m.fuelPrice) : "Prices in cr/t. No fuel to spare.");
+    if (m.tariff > 0.0) out.push_back(TextFormat("%.0f%% tariff on what you sell here.", m.tariff * 100.0));
     return out;
 }
 
-static std::string LocalInfo(const Body &b)
+static std::string LocalInfo(const World &w, const Captain &c, const Body &b)
 {
-    Market m = MakeMarket(b);
+    Market m = LiveMarket(w, c, b);
     std::string s = TextFormat("%s, population %s. ", SettlementName(b.settlement), FormatPopulation(b.population).c_str());
     if (b.kind == Kind::Station) s += std::string(EconName(b.econ)) + " economy. ";
     else {
@@ -199,14 +200,16 @@ void Hail(World &w, Captain &c, int body)
 void RequestMarketReport(World &w, Captain &c, int body)
 {
     if (body < 0 || body >= (int)c.loaded.bodies.size()) return;
-    Ask(w, c, body, "Requesting a market report.", MarketReport(c.loaded.bodies[body]), 0.8);
+    Ask(w, c, body, "Requesting a market report.", MarketReport(w, c, c.loaded.bodies[body]), 0.8);
+    if (CommsChannel *ch = c.comms.Find(TargetId::MakeBody(c.loaded.index, body)))        // (its arrival updates the price records)
+        for (CommsMsg &m : ch->log) if (!m.ours && m.at > w.clock && m.sent == w.clock) m.prices = true;
 }
 
 void RequestLocalInfo(World &w, Captain &c, int body)
 {
     if (body < 0 || body >= (int)c.loaded.bodies.size()) return;
     const Body &b = c.loaded.bodies[body];
-    Ask(w, c, body, "What can you tell me about " + b.name + "?", { LocalInfo(b) }, 1.0);   // (a different pause from a market
+    Ask(w, c, body, "What can you tell me about " + b.name + "?", { LocalInfo(w, c, b) }, 1.0);   // (a different pause from a market
                                                                                           // report's: replies are told apart by when they land)
 }
 
@@ -239,6 +242,7 @@ void UpdateComms(World &w, Captain &c)
             if (m.ours || m.told || m.at > w.clock) continue;
             m.told = true;
             if (m.at - m.sent > 5.0) tell = true;
+            if (m.prices && ch.with.index >= 0 && ch.with.index < (int)c.loaded.bodies.size()) RecordPrices(w, c, c.loaded.bodies[ch.with.index]);
         }
         if (tell) w.Emit(EventType::Notice, ch.withName + " has replied  -  F for comms", ch.with, -1, 0.0, 0.0, c.id);
     }

@@ -11,6 +11,7 @@ struct Settings {
 
     // Multiplayer: remembered from the last time you joined or hosted
     std::string playerName;       // your captain's name on servers
+    std::string shipName;         // what you last called your ship
     std::string lastServer;       // "host" or "host:port"
     int   hostPort        = 23500;
     int   hostMaxPlayers  = 16;

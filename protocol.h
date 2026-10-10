@@ -30,7 +30,7 @@
 #include <vector>
 
 const uint32_t PROTOCOL_MAGIC   = 0x31504D53;   // "SMP1"
-const uint16_t PROTOCOL_VERSION = 7;            // bump when anything below changes (7: factions)
+const uint16_t PROTOCOL_VERSION = 8;            // bump when anything below changes (8: ship names, the economy)
 const uint16_t DEFAULT_PORT     = 23500;
 const int      MAX_PACKET       = 1400;         // stays under a typical 1500-byte MTU
 const int      MAX_MESSAGE      = 1100;         // biggest reliable message
@@ -109,7 +109,7 @@ InputStep ReadInput(Reader &r, uint32_t seq);
 // ---------------------------------------------------------------------------
 enum MsgType : uint8_t {
     // client -> server
-    MSG_HELLO = 1,          // str name, str password
+    MSG_HELLO = 1,          // str name, str password, str ship name
     MSG_COMMAND,            // u8 type, i32 arg, f64 qty, u32 step
     MSG_BYE,                // leaving
     MSG_ADMIN,              // str key, u8 action (1 = stop the server): from the player who started it
@@ -119,9 +119,11 @@ enum MsgType : uint8_t {
     MSG_MINED,              // u16 n, n x (u64 rock, f32 ore left)
     MSG_EVENT,              // u8 type, str text, target, i32 item, f64 amount, f64 value
     MSG_COMMS,              // one channel: target with, u8 open (0: it's closed), str withName, u8 n, n x (f64 sent, f64 at, u8 ours, str text)
-    MSG_JOINED,             // i32 id, str name, u8 justNow (0: already here when you joined)
+    MSG_JOINED,             // i32 id, str name, u8 justNow (0: already here when you joined), str ship name
     MSG_LEFT,               // i32 id, str name
     MSG_STANDING,           // u8 n, n x f32: your standing with each faction, by id
+    MSG_PRICES,             // one market as you now know it: see MsgPrices
+    MSG_NEWS,               // u32 seq, f64 at, i32 faction, i64 where, str text
 };
 
 // Unreliable payload types (first byte after the reliable section)
@@ -138,6 +140,9 @@ const uint8_t PACKET_FLAG_DISCONNECT = 1;   // "I'm leaving" (sent a few times o
 std::vector<uint8_t> MsgCommand(const Command &c);
 std::vector<uint8_t> MsgEvent(const GameEvent &e);
 std::vector<uint8_t> MsgComms(const CommsChannel &c, bool open = true);   // the latest messages that fit
+std::vector<uint8_t> MsgPrices(uint64_t body, const PriceRecord &r);
+bool                 ReadPrices(Reader &r, uint64_t &body, PriceRecord &out);
+std::vector<uint8_t> MsgNews(const EconNews &n);
 std::vector<std::vector<uint8_t>> MsgMined(const MinedMap &m); // split into messages that fit
 
 // ---------------------------------------------------------------------------

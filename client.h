@@ -23,7 +23,7 @@ public:
 
     // Resolves the address and starts saying hello; check 'state' each frame after
     bool Connect(const std::string &host, uint16_t port, const std::string &name, const std::string &password,
-                 std::string &error);
+                 std::string &error, const std::string &shipName = "");
     void Disconnect();                                    // tells the server (if connected) and closes
 
     void Poll(GameState &g, double now);
@@ -81,6 +81,7 @@ private:
     double     tickClock = 0.0;          // estimate of the server's tick right now (for interpolation)
     std::vector<Predicted> history = std::vector<Predicted>(HISTORY);
     std::map<int, std::string> names;    // other captains by id
+    std::map<int, std::string> ships;    // ...and what they call their ships
     std::map<int, std::vector<Sample>> samples;
     uint64_t   lossState = 0x9E3779B97F4A7C15ull;
 };

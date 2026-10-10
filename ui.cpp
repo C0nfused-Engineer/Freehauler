@@ -59,9 +59,11 @@ public:
 
 // ===========================================================================
 // Market: buy and sell goods, buy fuel. Modal: flight pauses while it's open.
+// It shows the captain's record of the market, which is kept up to the second
+// while docked (online, the server sends it).
 // ===========================================================================
-// The rows: what this market trades (exports, imports, trades, ores), then
-// anything in the hold it doesn't, then fuel (-1)
+// The rows: what this market trades (what it makes, what it needs, the rest), then
+// anything in the hold it doesn't, then the fuel tank (-1)
 static std::vector<int> MarketRows(const Market &mk, const Player &p)
 {
     std::vector<int> rows = mk.Listed();
@@ -84,10 +86,12 @@ public:
     void HandleInput(InputFrame &in, GameState &g, Ui &ui) override
     {
         const Body *b = TradePartner(g);
+        Market mk;
         if (!b) { in.ConsumeAll(); return; }
-        std::vector<int> rows = MarketRows(MakeMarket(*b), g.player);
-        int n = (int)rows.size();
         if (in.Pressed(KEY_F) || in.Pressed(KEY_ESCAPE)) closed = true;
+        if (!KnownMarket(g, *b, mk)) { in.ConsumeAll(); return; }          // (its prices are on their way)
+        std::vector<int> rows = MarketRows(mk, g.player);
+        int n = (int)rows.size();
         if (in.Pressed(KEY_UP)   || in.Pressed(KEY_W)) row = (row + n - 1) % n;
         if (in.Pressed(KEY_DOWN) || in.Pressed(KEY_S)) row = (row + 1) % n;
         row = std::max(0, std::min(n - 1, row + in.WheelStep()));      // (the wheel stops at the ends)
@@ -97,7 +101,7 @@ public:
         bool shift = in.Down(KEY_LEFT_SHIFT) || in.Down(KEY_RIGHT_SHIFT);
         bool buy  = in.Pressed(KEY_RIGHT) || in.Pressed(KEY_D);
         bool sell = in.Pressed(KEY_LEFT)  || in.Pressed(KEY_A);
-        // ENTER / SPACE: sell 1 t / all of a good, or buy 1 t / fill up on fuel
+        // ENTER / SPACE: sell 1 t / all of a good, or buy 1 t / fill up on fuel. SHIFT: ten at a time... or the lot with SPACE
         bool one = in.Pressed(KEY_ENTER) || in.Pressed(KEY_KP_ENTER), all = in.Pressed(KEY_SPACE);
         int gd = rows[row];
         if (gd < 0) {
@@ -107,6 +111,7 @@ public:
             if (sell || one) ui.Do(g, { Command::SellGoods, gd, shift ? 1e30 : 1.0 });
             if (all)         ui.Do(g, { Command::SellGoods, gd, 1e30 });
         }
+        if (in.Pressed(KEY_B)) ui.Do(g, { Command::BuyData });
         // keep the selection in view
         if (row < top) top = row;
         if (row >= top + VISIBLE) top = row - VISIBLE + 1;
@@ -118,62 +123,72 @@ public:
         const Body *b = TradePartner(g);
         if (!b) return;
         const Player &p = g.player;
-        Market mk = MakeMarket(*b);
-        std::vector<int> rows = MarketRows(mk, p);
-        int n = (int)rows.size(), first = std::max(0, std::min(top, n - VISIBLE));
+        const FactionSet &fs = g.systems.factions;
         int sw = GetScreenWidth(), sh = GetScreenHeight();
-        int pw = 760, ph = 150 + 24 * VISIBLE + 76;
+        int pw = 800, ph = 168 + 24 * VISIBLE + 76;
         int px = sw / 2 - pw / 2, py = sh / 2 - ph / 2;
         DrawRectangle(px, py, pw, ph, Fade(BLACK, 0.9f));
         DrawRectangleLines(px, py, pw, ph, HUD);
         DrawText(TextFormat("MARKET  -  %s", b->name.c_str()), px + 18, py + 14, 24, WHITE);
-        DrawText(TextFormat("%s  -  %s economy  -  population %s", SettlementName(b->settlement), EconName(b->econ),
-                            FormatPopulation(b->population).c_str()), px + 18, py + 44, 16, LIGHTGRAY);
-        std::string ex = ExportsLine(mk, 4), im = ImportsLine(mk, 4);
-        DrawText(TextFormat("Makes: %s", ex.empty() ? "-" : ex.c_str()), px + 18, py + 64, 14, Color{ 140, 220, 140, 255 });
-        DrawText(TextFormat("Needs: %s", im.empty() ? "-" : im.c_str()), px + 18, py + 82, 14, Color{ 240, 170, 110, 255 });
-        DrawLine(px + 18, py + 102, px + pw - 18, py + 102, HUD_DIM);
-        int cx[] = { px + 30, px + 250, px + 350, px + 460, px + 570, px + 660 };
-        int hy = py + 110;
-        DrawText("ITEM", cx[0], hy, 16, HUD_LABEL);  DrawText("HOLD", cx[1], hy, 16, HUD_LABEL);
-        DrawText("BUY", cx[2], hy, 16, HUD_LABEL);   DrawText("SELL", cx[3], hy, 16, HUD_LABEL);
-        DrawText("VALUE", cx[4], hy, 16, HUD_LABEL); DrawText("", cx[5], hy, 16, HUD_LABEL);
+        Market mk;
+        if (!KnownMarket(g, *b, mk)) { DrawText("Opening the market...", px + 18, py + 60, 18, HUD_DIM); return; }
+        std::vector<int> rows = MarketRows(mk, p);
+        int n = (int)rows.size(), first = std::max(0, std::min(top, n - VISIBLE));
+
+        // Who you're dealing with, and what that costs you
+        const Faction *owner = fs.Get(mk.owner);
+        std::string who = std::string(SettlementName(b->settlement)) + "  -  run by " + fs.Name(mk.owner, "itself") + "  -  population " + FormatPopulation(b->population);
+        DrawText(who.c_str(), px + 18, py + 44, 16, owner ? owner->color : LIGHTGRAY);
+        std::string terms = mk.tariff > 0.0 ? TextFormat("%s takes %.0f%% of what you're paid", fs.Name(mk.ruler).c_str(), mk.tariff * 100.0)
+                                            : std::string("No tariff here");
+        if (owner && fabs(mk.edge) >= 0.0005) terms += TextFormat("   -   %s: prices %.1f%% %s", RankName(*owner, g.Standing(mk.owner)), fabs(mk.edge) * 100.0, mk.edge > 0.0 ? "in your favour" : "against you");
+        else if (owner) terms += TextFormat("   -   %s: the going rate", RankName(*owner, g.Standing(mk.owner)));
+        DrawText(terms.c_str(), px + 18, py + 64, 14, HUD_LABEL);
+        std::string ex = ExportsLine(mk, 5), im = ImportsLine(mk, 5);
+        DrawText(TextFormat("Makes: %s", ex.empty() ? "-" : ex.c_str()), px + 18, py + 82, 14, Color{ 140, 220, 140, 255 });
+        DrawText(TextFormat("Needs: %s", im.empty() ? "-" : im.c_str()), px + 18, py + 100, 14, Color{ 240, 170, 110, 255 });
+        DrawLine(px + 18, py + 120, px + pw - 18, py + 120, HUD_DIM);
+        int cx[] = { px + 30, px + 250, px + 350, px + 440, px + 530, px + 630 };
+        int hy = py + 128;
+        DrawText("ITEM", cx[0], hy, 16, HUD_LABEL);  DrawText("IN STOCK", cx[1], hy, 16, HUD_LABEL);
+        DrawText("HOLD", cx[2], hy, 16, HUD_LABEL);  DrawText("BUY", cx[3], hy, 16, HUD_LABEL);
+        DrawText("SELL", cx[4], hy, 16, HUD_LABEL);
+        const Color CHEAP = { 140, 220, 140, 255 }, DEAR = { 240, 170, 110, 255 }, OFF = { 120, 120, 120, 255 };
         for (int i = 0; i < VISIBLE && first + i < n; i++) {
             int r = first + i, gd = rows[r];
-            int ry = py + 136 + 24 * i;
+            int ry = py + 154 + 24 * i;
             if (r == row) DrawRectangle(px + 18, ry - 4, pw - 36, 24, Fade(HUD, 0.18f));
             if (gd >= 0) {
                 const GoodInfo &info = GoodData(gd);
-                bool have = p.cargo[gd] > 0.05;
-                Color c = have || mk.Sells(gd) ? info.color : Color{ 120, 120, 120, 255 };
+                bool have = p.cargo[gd] > 0.05, traded = mk.role[gd] != Role::None && !mk.banned[gd];
+                Color c = have || mk.Sells(gd) ? info.color : OFF;
+                // Against the going rate: green is cheap here (buy), orange is dear (sell)
+                Color pc = !traded ? OFF : mk.price[gd] < 0.8 * info.basePrice ? CHEAP : mk.price[gd] > 1.3 * info.basePrice ? DEAR : LIGHTGRAY;
                 DrawText(info.name, cx[0], ry, 18, c);
-                DrawText(have ? TextFormat("%.1f t", p.cargo[gd]) : "-", cx[1], ry, 18, c);
-                DrawText(mk.Sells(gd) ? TextFormat("%.0f", mk.BuyPrice(gd)) : "-", cx[2], ry, 18, c);
-                DrawText(mk.Buys(gd) ? TextFormat("%.0f", mk.SellPrice(gd)) : "-", cx[3], ry, 18, c);
-                if (have && mk.Buys(gd)) DrawText(Thousands(p.cargo[gd] * mk.SellPrice(gd)).c_str(), cx[4], ry, 18, c);
-                const char *tag = ""; Color tc = HUD_DIM;
-                switch (mk.role[gd]) {
-                case Role::Export: tag = "export"; tc = { 140, 220, 140, 255 }; break;
-                case Role::Import: tag = "import"; tc = { 240, 170, 110, 255 }; break;
-                case Role::Trade:  tag = "trade"; break;
-                case Role::Ore:    tag = "ore";   break;
-                default:           tag = "not traded"; tc = { 200, 90, 90, 255 }; break;
-                }
+                DrawText(traded ? TextFormat("%s t", Thousands(mk.stock[gd]).c_str()) : "-", cx[1], ry, 18, traded ? LIGHTGRAY : OFF);
+                DrawText(have ? TextFormat("%.1f t", p.cargo[gd]) : "-", cx[2], ry, 18, c);
+                DrawText(mk.Sells(gd) ? TextFormat("%.0f", mk.BuyPrice(gd)) : "-", cx[3], ry, 18, pc);
+                DrawText(mk.Buys(gd) ? TextFormat("%.0f", mk.SellPrice(gd)) : "-", cx[4], ry, 18, pc);
+                const char *tag = "not traded"; Color tc = { 200, 90, 90, 255 };
+                if (mk.banned[gd])                      { tag = "CONTRABAND"; tc = RED; }
+                else if (mk.role[gd] == Role::Export)   { tag = "made here"; tc = CHEAP; }
+                else if (mk.role[gd] == Role::Import)   { tag = "needed"; tc = DEAR; }
+                else if (mk.role[gd] == Role::Trade)    { tag = "traded"; tc = HUD_DIM; }
                 DrawText(tag, cx[5], ry, 16, tc);
             } else {
-                DrawText("Fuel", cx[0], ry, 18, WHITE);
-                DrawText(TextFormat("%.1f/%.0f", p.fuel, FUEL_CAPACITY), cx[1], ry, 18, WHITE);
-                DrawText(TextFormat("%.0f", mk.fuelPrice), cx[2], ry, 18, WHITE);
-                DrawText("-", cx[3], ry, 18, WHITE);
-                DrawText(TextFormat("fill %s", Thousands((FUEL_CAPACITY - p.fuel) * mk.fuelPrice).c_str()), cx[4], ry, 18, WHITE);
+                DrawText("Fuel, into the tank", cx[0], ry, 18, WHITE);
+                DrawText(TextFormat("%.1f/%.0f", p.fuel, FUEL_CAPACITY), cx[2], ry, 18, WHITE);
+                DrawText(mk.fuelPrice > 0.0 ? TextFormat("%.0f", mk.fuelPrice) : "none", cx[3], ry, 18, mk.fuelPrice > 0.0 ? WHITE : OFF);
+                if (mk.fuelPrice > 0.0) DrawText(TextFormat("fill: about %s", Thousands((FUEL_CAPACITY - p.fuel) * mk.fuelPrice).c_str()), cx[5] - 60, ry, 16, HUD_DIM);
             }
         }
-        if (first > 0)             DrawText("^ more", px + pw - 90, py + 110, 14, HUD_DIM);
-        if (first + VISIBLE < n)   DrawText("v more", px + pw - 90, py + 136 + 24 * VISIBLE - 2, 14, HUD_DIM);
+        if (first > 0)             DrawText("^ more", px + pw - 90, py + 128, 14, HUD_DIM);
+        if (first + VISIBLE < n)   DrawText("v more", px + pw - 90, py + 154 + 24 * VISIBLE - 2, 14, HUD_DIM);
         int fy = py + ph - 62;
         DrawLine(px + 18, fy - 8, px + pw - 18, fy - 8, HUD_DIM);
         DrawText(TextFormat("CREDITS  %s cr", Thousands(p.credits).c_str()), px + 30, fy, 20, HUD);
         DrawText(TextFormat("HOLD  %.1f / %.0f t", p.CargoTotal(), CARGO_CAPACITY), px + 350, fy, 20, HUD);
+        DrawText(TextFormat("B: trade data, %.0f cr", TRADE_DATA_COST), px + 590, fy + 2, 16, HUD_LABEL);
         DrawText(rows[std::min(row, n - 1)] >= 0
                      ? "W/S select   D buy 1 t   A sell 1 t   SHIFT: max   SPACE sell all   F / ESC close"
                      : "W/S select   D buy 1 t   SHIFT+D / SPACE fill tank   F / ESC close",
@@ -429,6 +444,8 @@ void Ui::HandleInput(InputFrame &in, GameState &g)
     }
     if (in.Pressed(KEY_O)) { settings.showOrbits = !settings.showOrbits; SaveSettings(settings); }
     if (in.Pressed(KEY_R)) Open(MakeFactionsWindow());     // (and takes R itself to close)
+    if (in.Pressed(KEY_T)) Open(MakeTradeLog());
+    if (in.Pressed(KEY_N)) Open(MakeNewsWindow());
     if (in.Pressed(KEY_M)) {                               // (an open map takes M itself)
         if (g.loaded.index >= 0 && g.flight.drive.inField) Open(MakeSystemMap());
         else                                               Open(MakeSectorMap());

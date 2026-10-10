@@ -701,39 +701,53 @@ struct TextField {
 // ===========================================================================
 class ServerForm : public Window {
 public:
-    ServerForm(bool host, const Settings &s) : host(host)
+    // host: start a server and join it. solo: a new single player game. Neither: join a server.
+    ServerForm(bool host, const Settings &s, bool solo = false) : host(host), solo(solo)
     {
-        if (host) {
-            fields = { { "Captain name", s.playerName, "what other captains see", TextField::Name, (size_t)MAX_PLAYER_NAME },
+        const TextField ship = { "Ship name", s.shipName, "what she's called", TextField::Name, (size_t)MAX_PLAYER_NAME };
+        const TextField seed = { "Galaxy seed", "", "blank = a random galaxy", TextField::Any, 24 };
+        const TextField captain = { "Captain name", s.playerName, "what other captains see", TextField::Name, (size_t)MAX_PLAYER_NAME };
+        if (solo) {
+            fields = { ship, seed };
+            iShip = 0; iSeed = 1;
+        } else if (host) {
+            fields = { captain, ship,
                        { "Port", std::to_string(s.hostPort), "23500", TextField::Digits, 5 },
                        { "Password", "", "optional", TextField::Any, 40, true },
-                       { "Max players", std::to_string(s.hostMaxPlayers), "16", TextField::Digits, 3 } };
+                       { "Max players", std::to_string(s.hostMaxPlayers), "16", TextField::Digits, 3 },
+                       seed };
+            iName = 0; iShip = 1; iPort = 2; iPassword = 3; iMax = 4; iSeed = 5;
             stopOnLeave = s.hostStopOnLeave;
             lan = NetLocalAddress();
         } else {
             fields = { { "Server address", s.lastServer, "e.g. 192.168.1.20  or  myserver.net:23500", TextField::Address, 80 },
-                       { "Captain name", s.playerName, "what other captains see", TextField::Name, (size_t)MAX_PLAYER_NAME },
+                       captain, ship,
                        { "Password", "", "if it has one", TextField::Any, 40, true } };
+            iAddress = 0; iName = 1; iShip = 2; iPassword = 3;
         }
-        for (int i = 0; i < (int)fields.size(); i++) if (fields[i].value.empty()) { focus = i; break; }
+        for (int i = 0; i < (int)fields.size(); i++) if (fields[i].value.empty() && i != iSeed) { focus = i; break; }
     }
-    WindowKind Kind() const override { return host ? WindowKind::HostMenu : WindowKind::JoinMenu; }
+    WindowKind Kind() const override { return solo ? WindowKind::NewGameMenu : host ? WindowKind::HostMenu : WindowKind::JoinMenu; }
     bool Modal() const override { return true; }
     bool PausesGame() const override { return true; }
     bool WantsCursor() const override { return true; }
 
     void HandleInput(InputFrame &in, GameState &g, Ui &ui) override
     {
-        (void)g;
         Layout L = Lay();
         int rows = Rows();
         if (in.Pressed(KEY_ESCAPE) || Clicked(in, L.back)) { closed = true; return; }
+        if (iSeed >= 0 && Clicked(in, RollBox(L))) {                // a random seed, shown so it can be passed on
+            fields[iSeed].value = std::to_string(SeedFromText("", (uint64_t)(GetTime() * 1e6) ^ ((uint64_t)in.mousePos.x << 32)));
+            focus = iSeed;
+            return;
+        }
         // Arrows and Tab move between rows (W and S are letters here, not "up" and "down")
         bool shift = in.Down(KEY_LEFT_SHIFT) || in.Down(KEY_RIGHT_SHIFT);
         if (in.Pressed(KEY_UP) || (in.Pressed(KEY_TAB) && shift)) focus = (focus + rows - 1) % rows;
         else if (in.Pressed(KEY_DOWN) || in.Pressed(KEY_TAB))     focus = (focus + 1) % rows;
         WheelFocus(in, focus, rows);
-        for (int i = 0; i < (int)fields.size(); i++) if (Clicked(in, Box(L, i))) focus = i;
+        for (int i = 0; i < (int)fields.size(); i++) if (Clicked(in, FieldBox(L, i))) focus = i;
         if (host && Clicked(in, L.toggle)) { stopOnLeave = !stopOnLeave; focus = ToggleRow(); }
         if (MouseMoved(in)) { if (Over(in, L.go)) focus = GoRow(); if (Over(in, L.back)) focus = GoRow() + 1; }
 
@@ -748,7 +762,7 @@ public:
             return;
         }
         if (focus == GoRow() + 1 && enter) { closed = true; return; }
-        if (enter || Clicked(in, L.go)) Submit(ui);
+        if (enter || Clicked(in, L.go)) Submit(ui, g);
     }
 
     void Draw(const GameState &g) const override
@@ -756,11 +770,16 @@ public:
         (void)g;
         Layout L = Lay();
         DimScreen();
-        DrawPanel(L.panel, host ? "HOST A SERVER" : "JOIN A SERVER");
+        DrawPanel(L.panel, solo ? "NEW GAME" : host ? "HOST A SERVER" : "JOIN A SERVER");
         for (int i = 0; i < (int)fields.size(); i++) {
-            Rectangle b = Box(L, i);
+            Rectangle b = FieldBox(L, i);
             DrawText(fields[i].label.c_str(), (int)L.panel.x + 30, (int)b.y + 10, 18, focus == i ? WHITE : HUD_LABEL);
             fields[i].Draw(b, focus == i);
+        }
+        if (iSeed >= 0) {
+            Rectangle r = RollBox(L);
+            DrawRectangleLinesEx(r, 1.0f, HUD_DIM);
+            DrawText("RANDOM", (int)(r.x + (r.width - MeasureText("RANDOM", 16)) / 2), (int)r.y + 11, 16, HUD_LABEL);
         }
         int y = (int)(Box(L, (int)fields.size() - 1).y + 56);
         int x = (int)L.panel.x + 30;
@@ -774,15 +793,19 @@ public:
             const char *v = stopOnLeave ? "ON" : "OFF";
             DrawText(v, (int)(sw.x + (sw.width - MeasureText(v, 18)) / 2), (int)sw.y + 5, 18, stopOnLeave ? WHITE : GRAY);
             y = (int)(L.toggle.y + L.toggle.height + 14);
-            const std::string &port = fields[1].value.empty() ? fields[1].hint : fields[1].value;
+            const std::string &port = fields[iPort].value.empty() ? fields[iPort].hint : fields[iPort].value;
             DrawText("Starts a dedicated server in its own window; you join it like everyone else.", x, y, 16, HUD_DIM); y += 22;
+            DrawText("The seed is for a new world: a server that already has a galaxy keeps it.", x, y, 16, HUD_DIM); y += 22;
             DrawText(TextFormat("Players on your network join:  %s:%s", lan.c_str(), port.c_str()), x, y, 16, HUD_LABEL); y += 22;
             DrawText(TextFormat("Over the internet: forward UDP %s on your router, or use Tailscale.", port.c_str()), x, y, 16, HUD_DIM);
+        } else if (solo) {
+            DrawText("The same seed always makes the same galaxy: its stars, its powers, its pirates.", x, y, 16, HUD_DIM); y += 22;
+            DrawText("Type a number or any words, or leave it blank for one nobody has seen.", x, y, 16, HUD_DIM);
         } else {
             DrawText("Ask the host for the address. Port 23500 unless they say otherwise.", x, y, 16, HUD_DIM);
         }
         if (!error.empty()) DrawText(error.c_str(), x, (int)L.go.y - 30, 16, ORANGE);
-        DrawButton(L.go, host ? "Start Server" : "Join", focus == GoRow());
+        DrawButton(L.go, solo ? "Launch" : host ? "Start Server" : "Join", focus == GoRow());
         DrawButton(L.back, "Back", focus == GoRow() + 1);
         DrawText("TAB / arrows move   ENTER go   ESC back", x, (int)(L.panel.y + L.panel.height) - 28, 16, HUD_DIM);
     }
@@ -795,7 +818,7 @@ private:
     Layout Lay() const
     {
         Layout L;
-        float h = 90 + 50.0f * fields.size() + (host ? 50 + 80 : 40) + 40 + 100;
+        float h = 90 + 50.0f * fields.size() + (host ? 50 + 102 : solo ? 62 : 40) + 40 + 100;
         L.panel  = Centered(680, h);
         float y  = L.panel.y + 80 + 50.0f * fields.size() + 6;
         L.toggle = { L.panel.x + 24, y, L.panel.width - 48, 38 };
@@ -804,18 +827,32 @@ private:
         return L;
     }
     static Rectangle Box(const Layout &L, int i) { return { L.panel.x + 210, L.panel.y + 80 + 50.0f * i, L.panel.width - 240, 38 }; }
+    // (the seed's box leaves room for its RANDOM button)
+    Rectangle FieldBox(const Layout &L, int i) const { Rectangle b = Box(L, i); if (i == iSeed) b.width -= 110; return b; }
+    Rectangle RollBox(const Layout &L) const { Rectangle b = Box(L, iSeed); return { b.x + b.width - 100, b.y, 100, b.height }; }
 
-    void Submit(Ui &ui)
+    void Submit(Ui &ui, GameState &g)
     {
         MenuChoice c;
+        c.ship = fields[iShip].value;
+        while (!c.ship.empty() && c.ship.back() == ' ') c.ship.pop_back();
+        if (iSeed >= 0) c.seed = fields[iSeed].value;
+        ui.settings.shipName = c.ship;
+        if (solo) {
+            NewGame(g, SeedFromText(c.seed, (uint64_t)(GetTime() * 1e6)));
+            g.shipName = c.ship;
+            SaveSettings(ui.settings);
+            ui.choice.kind = MenuChoice::Play;
+            return;
+        }
         if (host) {
-            c.name = fields[0].value;
-            int port = atoi((fields[1].value.empty() ? fields[1].hint : fields[1].value).c_str());
-            c.password = fields[2].value;
-            c.maxPlayers = atoi((fields[3].value.empty() ? fields[3].hint : fields[3].value).c_str());
-            if (!ValidPlayerName(c.name)) { error = "Captain name: 1-20 letters, digits, spaces, - or _"; focus = 0; return; }
-            if (port < 1024 || port > 65535) { error = "Pick a port from 1024 to 65535"; focus = 1; return; }
-            if (c.maxPlayers < 1 || c.maxPlayers > 64) { error = "Max players: 1 to 64"; focus = 3; return; }
+            c.name = fields[iName].value;
+            int port = atoi((fields[iPort].value.empty() ? fields[iPort].hint : fields[iPort].value).c_str());
+            c.password = fields[iPassword].value;
+            c.maxPlayers = atoi((fields[iMax].value.empty() ? fields[iMax].hint : fields[iMax].value).c_str());
+            if (!ValidPlayerName(c.name)) { error = "Captain name: 1-20 letters, digits, spaces, - or _"; focus = iName; return; }
+            if (port < 1024 || port > 65535) { error = "Pick a port from 1024 to 65535"; focus = iPort; return; }
+            if (c.maxPlayers < 1 || c.maxPlayers > 64) { error = "Max players: 1 to 64"; focus = iMax; return; }
             c.kind = MenuChoice::Host;
             c.address = "127.0.0.1";
             c.port = (uint16_t)port;
@@ -824,29 +861,30 @@ private:
             ui.settings.hostMaxPlayers = c.maxPlayers;
             ui.settings.hostStopOnLeave = stopOnLeave;
         } else {
-            std::string addr = fields[0].value;
-            c.name = fields[1].value;
-            c.password = fields[2].value;
+            std::string addr = fields[iAddress].value;
+            c.name = fields[iName].value;
+            c.password = fields[iPassword].value;
             c.port = DEFAULT_PORT;
             size_t colon = addr.rfind(':');
             if (colon != std::string::npos) {
                 int port = atoi(addr.c_str() + colon + 1);
-                if (port < 1 || port > 65535) { error = "The port after ':' should be a number up to 65535"; focus = 0; return; }
+                if (port < 1 || port > 65535) { error = "The port after ':' should be a number up to 65535"; focus = iAddress; return; }
                 c.port = (uint16_t)port;
                 addr.resize(colon);
             }
-            if (addr.empty()) { error = "Type the server's address"; focus = 0; return; }
-            if (!ValidPlayerName(c.name)) { error = "Captain name: 1-20 letters, digits, spaces, - or _"; focus = 1; return; }
+            if (addr.empty()) { error = "Type the server's address"; focus = iAddress; return; }
+            if (!ValidPlayerName(c.name)) { error = "Captain name: 1-20 letters, digits, spaces, - or _"; focus = iName; return; }
             c.kind = MenuChoice::Join;
             c.address = addr;
-            ui.settings.lastServer = fields[0].value;
+            ui.settings.lastServer = fields[iAddress].value;
         }
         ui.settings.playerName = c.name;
         SaveSettings(ui.settings);
         ui.choice = c;
     }
 
-    bool host;
+    bool host, solo;
+    int  iName = -1, iShip = -1, iSeed = -1, iPort = -1, iPassword = -1, iMax = -1, iAddress = -1;   // which field is which
     std::vector<TextField> fields;
     bool stopOnLeave = true;
     std::string lan, error;
@@ -938,7 +976,7 @@ private:
 std::unique_ptr<Window> MakeSinglePlayerMenu()
 {
     return std::make_unique<ListMenu>(WindowKind::SinglePlayerMenu, "SINGLE PLAYER", std::vector<ListMenu::Item>{
-        { "New Game",  [](GameState &g, Ui &ui) { NewGame(g); ui.choice.kind = MenuChoice::Play; } },
+        { "New Game",  [](GameState &, Ui &ui) { ui.Open(std::make_unique<ServerForm>(false, ui.settings, true)); } },
         { "Load Game", [](GameState &, Ui &ui) { ui.Open(std::make_unique<LoadMenu>()); } },
         { "Back", nullptr } }, false, true);
 }

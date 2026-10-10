@@ -291,13 +291,13 @@ FactionSet GenerateFactions(const Galaxy &g)
             f.policing = Clamp01f(fmax(0.15, 0.55 + 0.35 * f.axis[AX_ORDER] + 0.1 * f.axis[AX_FORCE]));
             // What it bans says what it fears
             struct Ban { int good; double urge; };
-            const Ban bans[] = { { GOOD_SPIRITS,      0.4 * f.axis[AX_ORDER] - 0.4 * f.axis[AX_OUTLOOK] },
+            const Ban bans[] = { { GOOD_LIQUOR,       0.4 * f.axis[AX_ORDER] - 0.4 * f.axis[AX_OUTLOOK] },
                                  { GOOD_LUXURY,       0.7 * f.axis[AX_MARKETS] },
-                                 { GOOD_EXOTIC_BIO,   0.3 * f.axis[AX_ORDER] - 0.5 * f.axis[AX_OUTLOOK] },
+                                 { RAW_FLORA,         0.3 * f.axis[AX_ORDER] - 0.5 * f.axis[AX_OUTLOOK] },
                                  { GOOD_ROBOTICS,    -0.7 * f.axis[AX_OUTLOOK] },
-                                 { GOOD_RESEARCH_DATA, 0.6 * f.axis[AX_ORDER] },
-                                 { ORE_URANIUM,      -0.7 * f.axis[AX_FORCE] },
-                                 { GOOD_REACTOR_PARTS, -0.5 * f.axis[AX_FORCE] + 0.2 * f.axis[AX_ORDER] } };
+                                 { GOOD_WEAPONS,      0.5 * f.axis[AX_ORDER] - 0.4 * f.axis[AX_FORCE] },
+                                 { GOOD_MUNITIONS,   -0.7 * f.axis[AX_FORCE] },
+                                 { ORE_URANIUM,      -0.5 * f.axis[AX_FORCE] + 0.2 * f.axis[AX_ORDER] } };
             for (const Ban &b : bans) if (b.urge + d.uni(-0.15, 0.15) > 0.3) f.contraband.push_back(b.good);
         }
     }

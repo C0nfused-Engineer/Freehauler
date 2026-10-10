@@ -805,7 +805,8 @@ void DrawScene(const GameState &g, const Ship &eye, ViewState &v, const RenderAs
                 }
         }
         NavBody nb;
-        nb.id = TargetId::MakeShip(t.id); nb.name = t.name; nb.rel = rel; nb.radius = SHIP_RADIUS;
+        nb.id = TargetId::MakeShip(t.id); nb.name = t.shipName.empty() ? t.name : t.shipName + "  (" + t.name + ")";
+        nb.rel = rel; nb.radius = SHIP_RADIUS;
         nb.color = col; nb.dot = !big;
         nb.info = TextFormat("Captain  -  %s", t.mining ? "mining" : t.hyper ? "under drive" : "cruising");
         nav.push_back(nb);

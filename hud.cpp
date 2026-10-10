@@ -278,7 +278,7 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
         DrawText(TextFormat("CREDITS  %s cr", Thousands(p.credits).c_str()), 20, top - 50, 18, HUD);
         int sy = top - 74;
         if (f.scooping) { DrawText(TextFormat("FUEL SCOOPING  +%.1f t/s", SCOOP_RATE), 20, sy, 18, ORANGE); sy -= 24; }
-        if (f.skimming) DrawText(TextFormat("SKIMMING HELIUM-3  +%.2f t/s", SKIM_RATE), 20, sy, 18, GoodData(ORE_HELIUM3).color);
+        if (f.skimming) DrawText(TextFormat("SKIMMING HELIUM-3  +%.2f t/s", SKIM_RATE), 20, sy, 18, GoodData(RAW_HELIUM3).color);
         else if (f.skimFull) DrawText("SKIMMING HELIUM-3  -  HOLD FULL", 20, sy, 18, ORANGE);
     }
 
@@ -383,6 +383,12 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
         DrawText(r, (int)(c.x - MeasureText(r, 16) / 2), (int)(c.y + R + 28), 16, HUD);
     }
 
+    // The ship's name, and which galaxy this is (the seed, to pass on to a friend)
+    {
+        std::string id = (g.shipName.empty() ? std::string() : g.shipName + "   -   ") + TextFormat("galaxy %u", g.seed);
+        DrawText(id.c_str(), sw / 2 - MeasureText(id.c_str(), 14) / 2, 30, 14, HUD_DIM);
+    }
+
     // Reticle
     Vector2 aim = AimPoint(eye, v);
     DrawLineV({ aim.x - 8, aim.y }, { aim.x - 3, aim.y }, HUD_DIM);
@@ -402,9 +408,9 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
     }
 
     if (showHelp) {
-        const char *help = online ? "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  M map  R factions  O orbits  "
+        const char *help = online ? "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  M map  R factions  T trade log  N news  "
                                     "MMB info  F hail / comms  LMB mine  ESC menu"
-                                  : "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  M map  R factions  O orbits  "
+                                  : "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  M map  R factions  T trade log  N news  "
                                     "MMB info  F hail / comms  LMB mine  F5/F9 quicksave/load  ESC menu";
         int size = 16;
         while (size > 10 && MeasureText(help, size) > sw - 40) size--;          // shrink to fit narrow windows

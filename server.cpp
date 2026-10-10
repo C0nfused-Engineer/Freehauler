@@ -1,5 +1,6 @@
 // server.cpp - the dedicated server
 #include "server.h"
+#include "economy.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -133,7 +134,7 @@ void Server::Tick()
         if (!p->joined || p->remove) continue;
         const Captain &c = p->cap;
         Traffic t;
-        t.id = c.id; t.name = c.name; t.ship = c.player.ship;
+        t.id = c.id; t.name = c.name; t.shipName = c.shipName; t.ship = c.player.ship;
         t.thrusting  = c.player.ship.throttle > 0.0f;
         t.hyper      = c.flight.last.hyper;
         t.mining     = c.flight.miningActive;
@@ -159,6 +160,7 @@ void Server::Tick()
         ApplyDueCommands(p, now);                    // stragglers whose input step never arrived
     }
     world.clock += STEP;
+    UpdateEconomy(world);
 
     // Mined rocks: every captain's copy of the field, then (every 0.1 s) every client
     for (const auto &m : world.minedChanged) {
@@ -183,6 +185,15 @@ void Server::Tick()
     if (tick % SNAPSHOT_EVERY == 0)
         for (auto &p : peers) {
             if (!p->joined || p->remove) continue;
+            // The markets this captain has fresh prices for, and the news they haven't had
+            for (const auto &kv : p->cap.know.prices) {
+                double &sent = p->pricesSent[kv.first];
+                if (sent == kv.second.at) continue;
+                sent = kv.second.at;
+                p->conn.Send(MsgPrices(kv.first, kv.second));
+            }
+            for (const EconNews &n : world.news)
+                if (n.seq > p->newsSent) { p->conn.Send(MsgNews(n)); p->newsSent = n.seq; }
             if (p->cap.standing != p->standingSent) {
                 Writer w;
                 w.U8(MSG_STANDING);
@@ -277,7 +288,8 @@ void Server::HandleMessage(Peer &p, const std::vector<uint8_t> &msg, double now)
     switch (r.U8()) {
     case MSG_HELLO: {
         if (p.joined) return;
-        std::string name = r.Str(), password = r.Str();
+        std::string name = r.Str(), password = r.Str(), ship = r.Str();
+        if (!ValidPlayerName(ship)) ship.clear();              // (optional; anything odd is just dropped)
         while (!name.empty() && name.back() == ' ') name.pop_back();
         while (!name.empty() && name.front() == ' ') name.erase(0, 1);
         if (!r.ok) return;
@@ -288,7 +300,7 @@ void Server::HandleMessage(Peer &p, const std::vector<uint8_t> &msg, double now)
             else { Reject(p, "A captain named " + name + " is already flying here"); return; }
         }
         if (PlayerCount() >= cfg.maxPlayers) { Reject(p, "The server is full"); return; }
-        Join(p, name);
+        Join(p, name, ship);
         return;
     }
     case MSG_COMMAND: {
@@ -343,10 +355,11 @@ void Server::HandleInputs(Peer &p, const std::vector<uint8_t> &payload)
 // ---------------------------------------------------------------------------
 // Joining and leaving
 // ---------------------------------------------------------------------------
-void Server::Join(Peer &p, const std::string &name)
+void Server::Join(Peer &p, const std::string &name, const std::string &ship)
 {
     p.joined = true;
     NewCaptain(world, p.cap, nextId++, name);
+    p.cap.shipName = ship;
     Player saved;
     bool returning = LoadPlayer(name, saved, p.cap.standing);
     if (returning) {
@@ -371,11 +384,11 @@ void Server::Join(Peer &p, const std::string &name)
     for (auto &q : peers) {
         if (!q->joined || q->remove || q.get() == &p) continue;
         Writer j;                                   // everyone already here, to the newcomer
-        j.U8(MSG_JOINED); j.I32(q->cap.id); j.Str(q->cap.name); j.U8(0);
+        j.U8(MSG_JOINED); j.I32(q->cap.id); j.Str(q->cap.name); j.U8(0); j.Str(q->cap.shipName);
         p.conn.Send(j.buf);
     }
     Writer j;                                       // the newcomer, to everyone already here
-    j.U8(MSG_JOINED); j.I32(p.cap.id); j.Str(name); j.U8(1);
+    j.U8(MSG_JOINED); j.I32(p.cap.id); j.Str(name); j.U8(1); j.Str(ship);
     Broadcast(j.buf, &p);
 
     int others = PlayerCount() - 1;
@@ -476,6 +489,7 @@ bool Server::SaveWorld()
 {
     std::string s = TextFormat("SPACEFLIGHT_WORLD 2\nseed %u\nclock %.17g\n", world.seed, world.clock);
     for (const auto &m : world.deltas.mined) s += TextFormat("mined %llu %.9g\n", (unsigned long long)m.first, m.second);
+    WriteEconomy(world, s);
     s += "end\n";
     return WriteFileSafely(fs::path(cfg.dataDir) / "world.txt", s);
 }
@@ -484,8 +498,9 @@ bool Server::LoadWorld()
 {
     FILE *f = fopen((fs::path(cfg.dataDir) / "world.txt").string().c_str(), "r");
     if (!f) return false;
-    char line[256];
+    static char line[8192];
     int version = 0;
+    std::vector<std::pair<std::string, std::string>> econ;
     unsigned seed = DEFAULT_GALAXY_SEED;
     double clock = 0.0;
     MinedMap mined;
@@ -497,12 +512,16 @@ bool Server::LoadWorld()
             if (sscanf(line, "clock %lf", &clock) == 1) continue;
             if (sscanf(line, "mined %llu %f", &id, &left) == 2) { mined[(uint64_t)id] = left; continue; }
             if (!strncmp(line, "end", 3)) { ended = true; break; }
+            char key[32] = "";                               // anything else: the economy's
+            if (sscanf(line, "%31s", key) == 1) econ.push_back({ key, line + strlen(key) });
         }
     fclose(f);
     if (!ended || version < 2) return false;        // (version 1: the old twelve-star galaxy, which is gone)
     NewWorld(world, seed);
     world.clock = clock;
     world.deltas.mined = std::move(mined);
+    EnsureEconomy(world);
+    for (const auto &l : econ) ReadEconomyLine(world, l.first.c_str(), l.second.c_str());
     return true;
 }
 
@@ -515,7 +534,7 @@ bool Server::SavePlayer(const Captain &c)
 {
     const Player &p = c.player;
     const Ship &s = p.ship;
-    std::string text = TextFormat("SPACEFLIGHT_PLAYER 2\nname %s\n", c.name.c_str());
+    std::string text = TextFormat("SPACEFLIGHT_PLAYER 3\nname %s\n", c.name.c_str());
     text += TextFormat("ship %lld %.17g %.17g %.17g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %d %.9g\n", (long long)s.anchor,
                        s.pos.x, s.pos.y, s.pos.z, s.vel.x, s.vel.y, s.vel.z, s.rot.x, s.rot.y, s.rot.z, s.rot.w, s.dampeners ? 1 : 0,
                        s.throttle);
@@ -549,7 +568,7 @@ bool Server::LoadPlayer(const std::string &name, Player &out, std::vector<float>
             }
             else if (sscanf(line, "fuel %lf", &p.fuel) == 1) {}
             else if (sscanf(line, "credits %lf", &p.credits) == 1) {}
-            else if (sscanf(line, "cargo %d %lf", &ore, &t) == 2) { if (ore >= 0 && ore < GOOD_COUNT) p.cargo[ore] = t; }
+            else if (sscanf(line, "cargo %d %lf", &ore, &t) == 2) { if (version >= 3 && ore >= 0 && ore < GOOD_COUNT) p.cargo[ore] = t; }   // (2: the old goods)
             else if (sscanf(line, "standing %d %lf", &ore, &t) == 2) { if (ore >= 0 && ore < (int)standing.size()) standing[ore] = (float)t; }
             else if (!strncmp(line, "end", 3)) { ended = true; break; }
         }
