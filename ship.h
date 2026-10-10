@@ -39,11 +39,12 @@ const double LIMP_SPEED  = 0.02 * AU_U;     // hyper on emergency power, with an
 // ---------------------------------------------------------------------------
 // Ship
 // ---------------------------------------------------------------------------
-// Position is stored relative to an "anchor" star (always the nearest one),
-// so it stays precise to well under a meter anywhere in the galaxy.
+// Position is stored relative to an "anchor" star (the nearest one, wherever
+// there's a star within a few light years), so it stays precise to well under
+// a meter anywhere near a system.
 // Local axes: forward = -Z, up = +Y, right = +X
 struct Ship {
-    int        anchor    = 0;
+    SysId      anchor    = NO_SYSTEM;
     DVec3      pos;                                  // relative to the anchor star
     Vector3    vel       = { 0.0f, 0.0f, 0.0f };     // units per second
     Quaternion rot       = { 0.0f, 0.0f, 0.0f, 1.0f };
@@ -81,13 +82,13 @@ inline Vector3 ShipRight  (const Ship &s) { return Vector3RotateByQuaternion({ 1
 inline Vector3 ShipUp     (const Ship &s) { return Vector3RotateByQuaternion({ 0, 1,  0 }, s.rot); }
 
 // Vector from the ship to a point given relative to system j's star
-inline DVec3 FromShip(const std::vector<StarSystem> &sys, const Ship &s, int j, DVec3 local = {})
+inline DVec3 FromShip(const Galaxy &sys, const Ship &s, SysId j, DVec3 local = {})
 {
-    return (sys[j].gal - sys[s.anchor].gal) + local - s.pos;
+    return sys.Between(s.anchor, j) + local - s.pos;
 }
 
-void      Rebase(Ship &s, const std::vector<StarSystem> &sys);       // re-anchor on the nearest star
-DriveInfo ComputeDrive(const Ship &ship, const std::vector<StarSystem> &sys, const LoadedSystem &loaded,
+void      Rebase(Ship &s, const Galaxy &sys);                        // re-anchor on the nearest star
+DriveInfo ComputeDrive(const Ship &ship, const Galaxy &sys, const LoadedSystem &loaded,
                        const DVec3 *lockRel, double lockRadius, const std::string &lockName, bool haveFuel);
 void      UpdateShip(Ship &s, const Controls &in, float dt, const DriveInfo &drive);
 double    DriveBurnRate(double speed);                                // hyper/warp fuel burn at a speed (t/s)

@@ -6,7 +6,7 @@
 //   location <nearest star system>   (display only)
 //   seed 1977
 //   clock 123.4
-//   ship <anchor> <pos x y z> <vel x y z> <rot x y z w> <dampeners>
+//   ship <anchor system> <pos x y z> <vel x y z> <rot x y z w> <dampeners>
 //   fuel 41.2
 //   credits 1068
 //   cargo <ore index> <tonnes>       (one line per ore carried)
@@ -49,7 +49,7 @@ bool SaveGame(const GameState &g, const char *path, const std::string &name)
     fprintf(f, "location %s\n", g.systems[s.anchor].name.c_str());
     fprintf(f, "seed %u\n", g.seed);
     fprintf(f, "clock %.17g\n", g.clock);
-    fprintf(f, "ship %d %.17g %.17g %.17g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %d\n", s.anchor,
+    fprintf(f, "ship %lld %.17g %.17g %.17g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %d\n", (long long)s.anchor,
             s.pos.x, s.pos.y, s.pos.z, s.vel.x, s.vel.y, s.vel.z, s.rot.x, s.rot.y, s.rot.z, s.rot.w, s.dampeners ? 1 : 0);
     fprintf(f, "fuel %.17g\n", p.fuel);
     fprintf(f, "credits %.17g\n", p.credits);
@@ -69,7 +69,8 @@ bool LoadGame(GameState &g, const char *path)
     if (!f) return false;
     char line[512];
     int version = 0;
-    if (!fgets(line, sizeof line, f) || sscanf(line, "SPACEFLIGHT_SAVE %d", &version) != 1 || version > SAVE_VERSION) {
+    if (!fgets(line, sizeof line, f) || sscanf(line, "SPACEFLIGHT_SAVE %d", &version) != 1 ||
+        version > SAVE_VERSION || version < SAVE_OLDEST) {
         fclose(f);
         return false;
     }
@@ -91,8 +92,10 @@ bool LoadGame(GameState &g, const char *path)
         else if (!strcmp(key, "ship")) {
             Ship &s = p.ship;
             int damp = 1;
-            haveShip = sscanf(rest, "%d %lf %lf %lf %f %f %f %f %f %f %f %d", &s.anchor, &s.pos.x, &s.pos.y, &s.pos.z,
+            long long anchor = -1;
+            haveShip = sscanf(rest, "%lld %lf %lf %lf %f %f %f %f %f %f %f %d", &anchor, &s.pos.x, &s.pos.y, &s.pos.z,
                               &s.vel.x, &s.vel.y, &s.vel.z, &s.rot.x, &s.rot.y, &s.rot.z, &s.rot.w, &damp) == 12;
+            s.anchor = anchor;
             s.dampeners = damp != 0;
         } else if (!strcmp(key, "cargo")) {
             int ore; double t;
@@ -107,7 +110,7 @@ bool LoadGame(GameState &g, const char *path)
 
     GameState fresh;
     NewGame(fresh, seed);
-    if (p.ship.anchor < 0 || p.ship.anchor >= (int)fresh.systems.size()) return false;
+    if (!fresh.systems.Exists(p.ship.anchor)) return false;
     fresh.clock         = clock;
     fresh.player        = p;
     fresh.deltas.mined  = std::move(mined);
@@ -146,6 +149,6 @@ SaveSummary ReadSaveSummary(const char *path)
         else if (!strcmp(key, "end"))      { ended = true; break; }
     }
     fclose(f);
-    sum.valid = ended && sum.version <= SAVE_VERSION;
+    sum.valid = ended && sum.version <= SAVE_VERSION && sum.version >= SAVE_OLDEST;
     return sum;
 }

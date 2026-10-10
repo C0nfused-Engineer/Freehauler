@@ -15,22 +15,20 @@ double DriveBurnRate(double speed)
     return seg(speed, HYPER_SPEED, WARP_SPEED, HYPER_BURN, WARP_BURN);
 }
 
-// Re-anchor the ship on whichever star is nearest
-void Rebase(Ship &s, const std::vector<StarSystem> &sys)
+// Re-anchor the ship on whichever star is nearest. In the empty stretches (no
+// star within a few cells) it keeps the one it had.
+void Rebase(Ship &s, const Galaxy &sys)
 {
-    int best = s.anchor;
-    double bestDist = Len(s.pos);
-    for (int j = 0; j < (int)sys.size(); j++) {
-        double d = Len(FromShip(sys, s, j));
-        if (d < bestDist) { bestDist = d; best = j; }
-    }
-    if (best != s.anchor) {
-        s.pos = s.pos + (sys[s.anchor].gal - sys[best].gal);
-        s.anchor = best;
+    const StarSystem *near = sys.Nearest(s.anchor, s.pos);
+    if (!near || near->id == s.anchor) return;
+    DVec3 fromNew = s.pos - sys.Between(s.anchor, near->id);
+    if (Len(fromNew) < Len(s.pos)) {
+        s.pos = fromNew;
+        s.anchor = near->id;
     }
 }
 
-DriveInfo ComputeDrive(const Ship &ship, const std::vector<StarSystem> &sys, const LoadedSystem &loaded,
+DriveInfo ComputeDrive(const Ship &ship, const Galaxy &sys, const LoadedSystem &loaded,
                        const DVec3 *lockRel, double lockRadius, const std::string &lockName, bool haveFuel)
 {
     DriveInfo d;
@@ -69,15 +67,18 @@ DriveInfo ComputeDrive(const Ship &ship, const std::vector<StarSystem> &sys, con
         d.noFuel = true;
     } else {
         // Warp: slow down for any system's gravity field ahead
+        // (only fields within full warp speed's braking distance can matter)
         d.limit = WARP_SPEED;
-        for (int j = 0; j < (int)sys.size(); j++) {
-            DVec3 to = FromShip(sys, ship, j);
+        std::vector<const StarSystem *> ahead;
+        sys.Nearby(ship.anchor, ship.pos, WARP_SPEED / WARP_WELL_K + 0.05 * LY_U, ahead);
+        for (const StarSystem *s : ahead) {
+            DVec3 to = FromShip(sys, ship, s->id);
             if (Dot(to, dir) <= 0.0) continue;
-            double e = FieldRatio(sys[j], to * -1.0);
+            double e = FieldRatio(*s, to * -1.0);
             if (e <= 1.0) continue;
             double distToField = Len(to) * (1.0 - 1.0 / e);   // along the line to the star
             double lim = fmax(HYPER_SPEED, WARP_WELL_K * distToField);
-            if (lim < d.limit) { d.limit = lim; d.limiter = sys[j].name; }
+            if (lim < d.limit) { d.limit = lim; d.limiter = s->name; }
         }
     }
     return d;

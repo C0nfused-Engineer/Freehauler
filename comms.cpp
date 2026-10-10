@@ -9,40 +9,40 @@
 // ---------------------------------------------------------------------------
 static std::string Greeting(const Body &b)
 {
-    struct Line { const char *settlement; const char *text[2]; };
+    struct Line { Settlement settlement; const char *text[2]; };
     static const Line lines[] = {
-        { "Core world",       { "%s Orbital Control. Welcome, captain - traffic is heavy today, keep to your assigned lane.",
+        { Settlement::CoreWorld,       { "%s Orbital Control. Welcome, captain - traffic is heavy today, keep to your assigned lane.",
                                 "This is %s Approach. We have you on scope, captain. Go ahead." } },
-        { "Settled world",    { "This is %s Traffic. Go ahead, captain.",
+        { Settlement::SettledWorld,    { "This is %s Traffic. Go ahead, captain.",
                                 "%s Port Authority, receiving. What can we do for you?" } },
-        { "Domed colonies",   { "%s Dome Authority here. We read you, captain.",
+        { Settlement::DomedColonies,   { "%s Dome Authority here. We read you, captain.",
                                 "%s Colonial Comms. Good to hear a new voice out here - go ahead." } },
-        { "Orbital habitats, gas mining", { "%s Habitat Ring, receiving. Mind the tankers on the way in.",
+        { Settlement::OrbitalHabitats, { "%s Habitat Ring, receiving. Mind the tankers on the way in.",
                                 "This is %s Skimmer Control. Go ahead, but keep it short - storm season." } },
-        { "Research station", { "%s Research, duty officer speaking. We don't get many visitors.",
+        { Settlement::ResearchStation, { "%s Research, duty officer speaking. We don't get many visitors.",
                                 "%s Station here. Please don't fly through our sensor field, captain." } },
-        { "Research outpost", { "%s Outpost. Two of us out here and we're both listening. Go ahead.",
+        { Settlement::ResearchOutpost, { "%s Outpost. Two of us out here and we're both listening. Go ahead.",
                                 "This is %s Survey Camp. Surprised anyone's out this way." } },
-        { "Mining outpost",   { "%s Mining Co-op. Make it quick, captain, shift change in ten.",
+        { Settlement::MiningOutpost,   { "%s Mining Co-op. Make it quick, captain, shift change in ten.",
                                 "This is %s Pit Boss. If you're hauling ore, we're listening." } },
-        { "Orbital port",     { "%s Control. Docking ring's clear, captain - match spin and come on in.",
+        { Settlement::OrbitalPort,     { "%s Control. Docking ring's clear, captain - match spin and come on in.",
                                 "This is %s. Welcome aboard, captain; market deck is open." } },
-        { "Orbital shipyard", { "%s Yard Control. Keep clear of the slipways, captain.",
+        { Settlement::Shipyard,        { "%s Yard Control. Keep clear of the slipways, captain.",
                                 "This is %s. Unless you're delivering steel, make it quick." } },
-        { "Gas skimmer station", { "%s here. Tanks are full and fuel's cheap - go ahead.",
+        { Settlement::SkimmerStation,  { "%s here. Tanks are full and fuel's cheap - go ahead.",
                                 "This is %s. Watch the scoop booms on approach, captain." } },
-        { "Ore terminal",     { "%s Dispatch. Got ore? We've got credits.",
+        { Settlement::OreTerminal,     { "%s Dispatch. Got ore? We've got credits.",
                                 "This is %s. Loading arms are busy - state your business." } },
-        { "Ore refinery",     { "%s, smelter control. Bring us rock, captain, any rock.",
+        { Settlement::OreRefinery,     { "%s, smelter control. Bring us rock, captain, any rock.",
                                 "This is %s. Mind the slag plume. Go ahead." } },
-        { "Waystation",       { "%s, receiving. Fuel, food, and a little of everything.",
+        { Settlement::Waystation,      { "%s, receiving. Fuel, food, and a little of everything.",
                                 "This is %s. Long way between worlds, captain - rest up." } },
-        { "Freeport",         { "%s. No tariffs, no questions. What are you buying?",
+        { Settlement::Freeport,        { "%s. No tariffs, no questions. What are you buying?",
                                 "This is %s. Everyone's welcome out here, captain." } },
-        { "Underground colony", { "%s Deep Colony comms. Signal's weak down here - go ahead.",
+        { Settlement::UndergroundColony, { "%s Deep Colony comms. Signal's weak down here - go ahead.",
                                 "This is %s Undercity. We hear you, captain." } },
     };
-    int pick = (int)(Mix64(NameHash(b.name) + 7) & 1);
+    int pick = (int)(Mix64(b.id + 7) & 1);
     for (const Line &l : lines)
         if (b.settlement == l.settlement) return TextFormat(l.text[pick], b.name.c_str());
     return TextFormat("This is %s. Go ahead, captain.", b.name.c_str());
@@ -75,7 +75,7 @@ static std::vector<std::string> MarketReport(const Body &b)
 static std::string LocalInfo(const Body &b)
 {
     Market m = MakeMarket(b);
-    std::string s = TextFormat("%s, population %s. ", b.settlement.c_str(), FormatPopulation(b.population).c_str());
+    std::string s = TextFormat("%s, population %s. ", SettlementName(b.settlement), FormatPopulation(b.population).c_str());
     if (b.kind == Kind::Station) s += std::string(EconName(b.econ)) + " economy. ";
     else {
         s += "World type: " + b.type + ". ";

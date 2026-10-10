@@ -454,7 +454,7 @@ void Server::SaveAll()
 
 bool Server::SaveWorld()
 {
-    std::string s = TextFormat("SPACEFLIGHT_WORLD 1\nseed %u\nclock %.17g\n", world.seed, world.clock);
+    std::string s = TextFormat("SPACEFLIGHT_WORLD 2\nseed %u\nclock %.17g\n", world.seed, world.clock);
     for (const auto &m : world.deltas.mined) s += TextFormat("mined %llu %.9g\n", (unsigned long long)m.first, m.second);
     s += "end\n";
     return WriteFileSafely(fs::path(cfg.dataDir) / "world.txt", s);
@@ -479,7 +479,7 @@ bool Server::LoadWorld()
             if (!strncmp(line, "end", 3)) { ended = true; break; }
         }
     fclose(f);
-    if (!ended) return false;
+    if (!ended || version < 2) return false;        // (version 1: the old twelve-star galaxy, which is gone)
     NewWorld(world, seed);
     world.clock = clock;
     world.deltas.mined = std::move(mined);
@@ -495,8 +495,8 @@ bool Server::SavePlayer(const Captain &c)
 {
     const Player &p = c.player;
     const Ship &s = p.ship;
-    std::string text = TextFormat("SPACEFLIGHT_PLAYER 1\nname %s\n", c.name.c_str());
-    text += TextFormat("ship %d %.17g %.17g %.17g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %d\n", s.anchor,
+    std::string text = TextFormat("SPACEFLIGHT_PLAYER 2\nname %s\n", c.name.c_str());
+    text += TextFormat("ship %lld %.17g %.17g %.17g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %d\n", (long long)s.anchor,
                        s.pos.x, s.pos.y, s.pos.z, s.vel.x, s.vel.y, s.vel.z, s.rot.x, s.rot.y, s.rot.z, s.rot.w, s.dampeners ? 1 : 0);
     text += TextFormat("fuel %.17g\ncredits %.17g\n", p.fuel, p.credits);
     for (int o = 0; o < GOOD_COUNT; o++)
@@ -512,12 +512,15 @@ bool Server::LoadPlayer(const std::string &name, Player &out)
     char line[512];
     Player p;
     bool haveShip = false, ended = false;
-    if (fgets(line, sizeof line, f) && !strncmp(line, "SPACEFLIGHT_PLAYER", 18))
+    int version = 0;
+    if (fgets(line, sizeof line, f) && sscanf(line, "SPACEFLIGHT_PLAYER %d", &version) == 1)
         while (fgets(line, sizeof line, f)) {
             Ship &s = p.ship;
             int damp = 1, ore; double t;
-            if (sscanf(line, "ship %d %lf %lf %lf %f %f %f %f %f %f %f %d", &s.anchor, &s.pos.x, &s.pos.y, &s.pos.z,
+            long long anchor = -1;
+            if (sscanf(line, "ship %lld %lf %lf %lf %f %f %f %f %f %f %f %d", &anchor, &s.pos.x, &s.pos.y, &s.pos.z,
                        &s.vel.x, &s.vel.y, &s.vel.z, &s.rot.x, &s.rot.y, &s.rot.z, &s.rot.w, &damp) == 12) {
+                s.anchor = anchor;
                 s.dampeners = damp != 0;
                 haveShip = true;
             }
@@ -527,7 +530,7 @@ bool Server::LoadPlayer(const std::string &name, Player &out)
             else if (!strncmp(line, "end", 3)) { ended = true; break; }
         }
     fclose(f);
-    if (!haveShip || !ended || p.ship.anchor < 0 || p.ship.anchor >= (int)world.systems.size()) return false;
+    if (!haveShip || !ended || version < 2 || !world.systems.Exists(p.ship.anchor)) return false;
     out = p;
     return true;
 }

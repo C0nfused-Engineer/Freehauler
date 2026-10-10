@@ -3,19 +3,26 @@
 #include "economy.h"
 #include "format.h"
 
-const double G_SI = 6.674e-11, MSUN_KG = 1.989e30, REARTH_KM = 6371.0;
+const double G_SI = 6.674e-11, MSUN_KG = 1.989e30;
 
 static double BodyMassKg(const Body &b)
 {
-    if (b.kind == Kind::Star) return b.massSolar * MSUN_KG;
-    double km = b.radius / KM_U, rho = 3000.0;                  // moons: rock and ice
-    if (b.kind == Kind::Planet)
-        rho = km >= 35000 ? 1300.0 : km >= 20000 ? 1600.0 : km >= 7000 ? 6000.0 : km >= 3000 ? 5500.0 : 3900.0;
-    double r = b.radius * METERS_PER_UNIT;
-    return 4.0 / 3.0 * PI * r * r * r * rho;
+    return b.kind == Kind::Star ? b.massSolar * MSUN_KG : b.massEarth * MEARTH_KG;
 }
 
 static std::vector<InfoRow> ZoneBasics(const Captain &c, const Zone &z);
+
+// "Metals (rich), Ices (some)": what's worth having here
+static std::string ResourcesLine(const Body &b)
+{
+    std::string s;
+    for (int r = 0; r < RES_COUNT; r++) {
+        float v = b.resource[r];
+        if (v < 0.2f) continue;
+        s += (s.empty() ? "" : ", ") + std::string(ResourceName(r)) + (v >= 0.7f ? " (rich)" : v >= 0.45f ? "" : " (some)");
+    }
+    return s.empty() ? "Nothing of note" : s;
+}
 
 // "Ores" rows: the full list, a few names to a line
 static void AddListRows(std::vector<InfoRow> &rows, const char *label, const std::string &list, int perLine = 3)
@@ -48,7 +55,8 @@ std::string WorldSummary(const Body &b)
 std::string StarSummary(const StarSystem &s)
 {
     return std::string(StarDescription(s.stars[0])) +
-           (s.stars.size() > 1 ? (s.stars.size() == 2 ? "  -  binary" : "  -  trinary") : "");
+           (s.stars.size() > 1 ? (s.stars.size() == 2 ? "  -  binary" : "  -  trinary") : "") +
+           (s.develop > 0.0f ? "" : "  -  uncharted");
 }
 
 static std::string SystemKind(const StarSystem &s)
@@ -56,7 +64,7 @@ static std::string SystemKind(const StarSystem &s)
     if (s.stars.size() == 1) return "Single star";
     std::string k = s.stars.size() == 2 ? "Binary" : "Trinary";
     for (size_t i = 1; i < s.stars.size(); i++)
-        k += TextFormat("  +%c%d %s", s.stars[i].cls, s.stars[i].sub, s.stars[i].close ? "(close)" : "(wide)");
+        k += TextFormat("  +%s %s", StarClassCode(s.stars[i]), s.stars[i].close ? "(close)" : "(wide)");
     return k;
 }
 
@@ -71,16 +79,20 @@ static std::vector<InfoRow> StarRows(const StarSystem &s, const StarInfo &st, co
         { "Luminosity",  st.lum < 0.01 ? TextFormat("%.4f Sun", st.lum) : st.lum < 100 ? TextFormat("%.2f Sun", st.lum)
                                                                        : TextFormat("%s Sun", Thousands(st.lum).c_str()) },
         { "System",      SystemKind(s) },
-        { "Habitable zone", TextFormat("%.2f - %.2f AU", s.hzIn / AU_U, s.hzOut / AU_U) } };
+        { "Age",         s.age < 0.1 ? TextFormat("%.0f million years", s.age * 1000.0) : TextFormat("%.1f billion years", s.age) },
+        { "Heavy elements", TextFormat("%.0f%% of the Sun's", 100.0 * pow(10.0, s.metal)) },
+        { "Habitable zone", s.hzOut < 0.01 * AU_U ? TextFormat("%s - %s km", Thousands(s.hzIn / KM_U).c_str(), Thousands(s.hzOut / KM_U).c_str())
+                                                  : TextFormat("%.2f - %.2f AU", s.hzIn / AU_U, s.hzOut / AU_U) },
+        { "Human presence", s.develop >= 0.75f ? "Core systems" : s.develop >= 0.3f ? "Settled space" : s.develop > 0.0f ? "Frontier" : "None - uncharted" } };
     if (L) {
-        int planets = 0, belts = 0, life = 0, stations = 0; double pop = 0;
+        int planets = 0, dwarfs = 0, belts = 0, life = 0, stations = 0; double pop = 0;
         for (const Body &o : L->bodies) {
-            if (o.kind == Kind::Planet) planets++;
+            if (o.kind == Kind::Planet) (o.dwarf ? dwarfs : planets)++;
             if (o.kind == Kind::Station) stations++;
             if (o.kind != Kind::Star) { pop += o.population; if (o.lifeLevel > 0) life++; }
         }
         for (const Zone &z : L->zones) if (!z.ring) belts++;
-        rows.push_back({ "Planets", TextFormat("%d   (%d asteroid belt%s)", planets, belts, belts == 1 ? "" : "s") });
+        rows.push_back({ "Planets", TextFormat("%d   (%d dwarf, %d belt%s)", planets, dwarfs, belts, belts == 1 ? "" : "s") });
         rows.push_back({ "Stations", TextFormat("%d", stations) });
         rows.push_back({ "Worlds with life", TextFormat("%d", life) });
         rows.push_back({ "Population", pop > 0 ? FormatPopulation(pop) : "None" });
@@ -139,6 +151,7 @@ static std::vector<InfoRow> BodyRows(const World &w, const Captain &c, int bi)
         period = 2.0 * PI * sqrt(a * a * a / (G_SI * BodyMassKg(host)));
     }
     rows = { { "Type", b.kind == Kind::Moon ? b.type + " of " + host.name : b.type },
+             { "Mass", b.massEarth >= 0.01 ? TextFormat("%.2f Earth", b.massEarth) : TextFormat("%.5f Earth", b.massEarth) },
              { "Radius", TextFormat("%s km  (%.2f Earth)", Thousands(b.radius / KM_U).c_str(), b.radius / KM_U / REARTH_KM) },
              { "Gravity", TextFormat("%.2f g", b.gravity) },
              { "Orbit", b.kind == Kind::Planet
@@ -149,7 +162,9 @@ static std::vector<InfoRow> BodyRows(const World &w, const Captain &c, int bi)
              { "Atmosphere", b.atmosphere },
              { "Water", b.water },
              { "Life", b.life },
-             { "Settlement", b.population > 0 ? b.settlement + "  -  " + FormatPopulation(b.population) : b.settlement } };
+             { "Resources", ResourcesLine(b) },
+             { "Settlement", b.population > 0 ? std::string(SettlementName(b.settlement)) + "  -  " + FormatPopulation(b.population)
+                                              : std::string(SettlementName(b.settlement)) } };
     if (b.kind == Kind::Planet) {
         std::vector<std::string> moons;
         for (const Body &o : L.bodies) if (o.kind == Kind::Moon && o.parent == bi) moons.push_back(o.name);
@@ -213,7 +228,7 @@ std::vector<InfoRow> TargetInfo(const World &w, const Captain &c, TargetId t)
     t = CanonicalTarget(c, t);
     switch (t.type) {
     case TargetId::Star:
-        if (t.system < 0 || t.system >= (int)w.systems.size()) return {};
+        if (!w.systems.Exists(t.system)) return {};
         return StarRows(w.systems[t.system], w.systems[t.system].stars[0], nullptr);
     case TargetId::Body:
         if (!TargetBody(c, t)) return {};

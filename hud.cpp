@@ -48,7 +48,8 @@ Aim DrawNavOverlay(const GameState &g, const Ship &eye, const ViewState &v, cons
     for (int pass = 0; pass < 2; pass++)
         for (int i = 0; i < (int)nav.size(); i++)
             if (scr[i].visible && nav[i].dot && nav[i].star == (pass == 1))
-                DrawCircleV(scr[i].pos, nav[i].star ? 2.5f : nav[i].radius == 0.0 ? 1.5f : 2.0f, nav[i].color);
+                DrawCircleV(scr[i].pos, nav[i].star ? 1.1f + 1.5f * nav[i].bright : nav[i].radius == 0.0 ? 1.5f : 2.0f,
+                            nav[i].star ? Dim(nav[i].color, 0.45f + 0.55f * nav[i].bright) : nav[i].color);
 
     // Other captains: a small name tag beside their dot, so you can find each other
     for (int i = 0; i < (int)nav.size(); i++)
@@ -204,7 +205,7 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
     const FlightState &f = g.flight;
     const Player &p = g.player;
     const DriveInfo &drive = f.drive;
-    const std::vector<StarSystem> &systems = g.systems;
+    const Galaxy &systems = g.systems;
     int sw = GetScreenWidth(), sh = GetScreenHeight();
     float speed = Vector3Length(eye.vel);
     bool hyper = f.last.hyper;
@@ -272,19 +273,19 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
 
     // --- Right column: navigation ---
     int x = sw - 400; y = 20;
-    DVec3 galPos = (systems[eye.anchor].gal + eye.pos) * (1.0 / LY_U);
+    DVec3 galPos = systems.PositionLy(eye.anchor, eye.pos);
     double anchorRatio = FieldRatio(systems[eye.anchor], eye.pos);
     if (g.loaded.index >= 0 && anchorRatio < 1.5) {
         const StarSystem &s = systems[g.loaded.index];
         DVec3  sp = FromShip(systems, eye, g.loaded.index) * -1.0;
         double h = Dot(sp, s.n), r = Len(sp - s.n * h);
         DrawText(TextFormat("SYSTEM  %s", s.name.c_str()), x, y, 20, HUD);                              y += 26;
-        DrawText(TextFormat("GAL  %.2f  %.2f  %.2f ly", galPos.x, galPos.y, galPos.z), x, y, 16, HUD_DIM); y += 20;
+        DrawText(TextFormat("GAL  %.1f  %.1f  %.1f ly", galPos.x, galPos.y, galPos.z), x, y, 16, HUD_DIM); y += 20;
         DrawText(TextFormat("SYS  r %.2f AU   h %+.2f AU", r / AU_U, h / AU_U), x, y, 16, HUD_DIM);        y += 24;
     } else {
         const StarSystem &s = systems[eye.anchor];
         DrawText("INTERSTELLAR SPACE", x, y, 20, HUD);                                                      y += 26;
-        DrawText(TextFormat("GAL  %.2f  %.2f  %.2f ly", galPos.x, galPos.y, galPos.z), x, y, 16, HUD_DIM); y += 20;
+        DrawText(TextFormat("GAL  %.1f  %.1f  %.1f ly", galPos.x, galPos.y, galPos.z), x, y, 16, HUD_DIM); y += 20;
         DrawText(TextFormat("NEAREST STAR  %s  %s", s.name.c_str(), FormatStarDist(Len(eye.pos)).c_str()), x, y, 16, HUD_DIM); y += 24;
     }
     if (drive.inField) {
@@ -321,7 +322,7 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
     // Interaction prompt
     if (!tradeOpen && f.nearBody >= 0 && f.nearBody < (int)g.loaded.bodies.size()) {
         const Body &b = g.loaded.bodies[f.nearBody];
-        std::string pr = b.population > 0 ? "[F] Trade at " + b.name + "  -  " + b.settlement
+        std::string pr = b.population > 0 ? "[F] Trade at " + b.name + "  -  " + SettlementName(b.settlement)
                                           : b.name + "  -  uninhabited";
         int w = MeasureText(pr.c_str(), 20);
         DrawRectangle(sw / 2 - w / 2 - 10, sh - 104, w + 20, 30, Fade(BLACK, 0.7f));

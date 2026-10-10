@@ -41,8 +41,7 @@ const double INTERACT_RADII = 2.0;          // F works within this many radii of
 const double INTERACT_MIN   = 500.0 * KM_U; // ...or this far above its surface, whichever is larger
 const double STATION_RANGE  = 20.0 * KM_U;  // F works within this of a station
 const double SKIM_RATE      = 0.25;         // tonnes of helium-3 per second while skimming a gas giant...
-const double SKIM_DEPTH     = 1.25;         // ...within this many of its radii of its center
-const double SKIM_MIN_RADIUS = 20000.0 * KM_U;   // gas giants only
+const double SKIM_DEPTH     = 1.25;         // ...within this many of its radii of its center (gas and ice giants only)
 const double START_CREDITS  = 200.0;
 const double SHIP_RADIUS    = 2.5;          // units; for targeting other ships
 
@@ -140,7 +139,7 @@ struct Traffic {
 // ---------------------------------------------------------------------------
 struct World {
     unsigned                seed = DEFAULT_GALAXY_SEED;
-    std::vector<StarSystem> systems;     // generated
+    Galaxy                  systems;     // generated (on demand, around whoever is looking)
     WorldDeltas             deltas;      // saved
     double                  clock = 0.0; // saved: game seconds since the start
     std::vector<Traffic>    traffic;     // other captains' ships (never includes your own)

@@ -7,7 +7,7 @@
 // ---------------------------------------------------------------------------
 // Systems loading in and out
 // ---------------------------------------------------------------------------
-static void LoadSystem(World &w, Captain &c, int i)
+static void LoadSystem(World &w, Captain &c, SysId i)
 {
     GenerateSystemContents(w.systems[i], c.loaded);
     c.loaded.index = i;
@@ -17,7 +17,7 @@ static void LoadSystem(World &w, Captain &c, int i)
 
 static void UnloadSystem(World &w, Captain &c)
 {
-    int i = c.loaded.index;
+    SysId i = c.loaded.index;
     TraceLog(LOG_INFO, "SYSTEM: unloaded %s", w.systems[i].name.c_str());
     c.loaded = LoadedSystem();
     c.flight.nearBody = -1;
@@ -27,6 +27,7 @@ static void UnloadSystem(World &w, Captain &c)
 void UpdateLoadedSystem(World &w, Captain &c)
 {
     Ship &ship = c.player.ship;
+    w.systems.Trim();
     Rebase(ship, w.systems);
     double anchorDist = Len(ship.pos);                   // ship is stored relative to its anchor star
     if (c.loaded.index >= 0 && (c.loaded.index != ship.anchor || anchorDist > UNLOAD_DISTANCE_LY * LY_U)) UnloadSystem(w, c);
@@ -37,7 +38,7 @@ void NewWorld(World &w, unsigned seed)
 {
     w = World();
     w.seed    = seed;
-    w.systems = GenerateGalaxy(seed);
+    w.systems.Init(seed);
 }
 
 void NewCaptain(World &w, Captain &c, int id, const std::string &name)
@@ -46,8 +47,9 @@ void NewCaptain(World &w, Captain &c, int id, const std::string &name)
     c.id   = id;
     c.name = name;
     Ship &ship = c.player.ship;
-    ship.anchor = 0;
-    LoadSystem(w, c, 0);
+    const SysId home = w.systems.home;
+    ship.anchor = home;
+    LoadSystem(w, c, home);
 
     // Start beside a station in the home system (the belt refinery if there is
     // one), or else its second planet: along its orbit, so the routes in and out
@@ -64,9 +66,10 @@ void NewCaptain(World &w, Captain &c, int id, const std::string &name)
         for (const Body &b : c.loaded.bodies)
             if (b.kind == Kind::Planet && planets++ == 1) { start = &b; break; }
     }
+    if (!start) start = &c.loaded.bodies[0];                 // (a home with nothing but its star)
     double away = start->kind == Kind::Station ? fmax(start->radius * 3.0, 4.0 * KM_U) : start->radius * 3.0;
-    DVec3 out     = Norm(start->local);
-    DVec3 n       = w.systems[0].n;
+    DVec3 n       = w.systems[home].n;
+    DVec3 out     = Len(start->local) > 0.0 ? Norm(start->local) : w.systems[home].u;
     DVec3 tangent = Cross(n, out);
     ship.pos = start->local + tangent * away + n * (away * 0.2);
     Vector3 look = ToF(Norm(start->local - ship.pos));
@@ -119,7 +122,7 @@ bool FindTarget(const World &w, const Captain &c, TargetId t, DVec3 &rel, double
     case TargetId::None:
         return false;
     case TargetId::Star:
-        if (t.system < 0 || t.system >= (int)w.systems.size()) return false;
+        if (!w.systems.Exists(t.system)) return false;
         rel = FromShip(w.systems, ship, t.system);
         r   = w.systems[t.system].starRadius;
         break;
@@ -159,7 +162,7 @@ std::string TargetName(const World &w, const Captain &c, TargetId t)
     t = CanonicalTarget(c, t);
     switch (t.type) {
     case TargetId::Star:
-        return t.system >= 0 && t.system < (int)w.systems.size() ? w.systems[t.system].name : "";
+        return w.systems.Exists(t.system) ? w.systems[t.system].name : "";
     case TargetId::Body:
         if (const Body *b = TargetBody(c, t)) return b->name;
         return "";
@@ -343,7 +346,7 @@ void StepCaptain(World &w, Captain &c, const Controls &input, const Aim &aim, fl
     f.skimming = f.skimFull = false;
     if (c.loaded.index >= 0 && !in.hyper)
         for (const Body &b : c.loaded.bodies)
-            if (b.kind == Kind::Planet && b.radius >= SKIM_MIN_RADIUS &&
+            if (b.kind == Kind::Planet && b.giant && b.massEarth >= GIANT_MASS &&
                 Len(FromShip(w.systems, ship, c.loaded.index, b.local)) < b.radius * SKIM_DEPTH) {
                 double room = CARGO_CAPACITY - p.CargoTotal();
                 f.skimming = room > 1e-6;

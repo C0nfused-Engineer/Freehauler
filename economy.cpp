@@ -70,7 +70,7 @@ static const EconTemplate &TemplateFor(Econ e)
 
 Market MakeMarket(const Body &b)
 {
-    uint64_t h = NameHash(b.name);
+    uint64_t h = Mix64(b.id ^ 0xEC0ull);                   // the body's own number: stable, and never shared
     auto vary = [&](uint64_t k) { return (double)(Mix64(h + k) >> 11) * (1.0 / 9007199254740992.0); };   // [0, 1)
     Market m;
     m.econ = b.econ;

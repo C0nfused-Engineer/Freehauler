@@ -339,6 +339,70 @@ void Dust::UpdateAndDraw(Vector3 moved, Vector3 vel, Vector3 camRight, float hyp
 }
 
 // ---------------------------------------------------------------------------
+// The sky
+// ---------------------------------------------------------------------------
+// Starlight arriving from a direction: the density of stars added up along the line of
+// sight, less what the dust in the disk soaks up on the way. 'bulge' gets the share that
+// comes from the galaxy's old yellow middle.
+static double Starlight(DVec3 from, DVec3 dir, double &bulge)
+{
+    double light = 0.0, dust = 0.0, s = 20.0;
+    bulge = 0.0;
+    for (int k = 0; k < 36 && dust < 6.0; k++) {
+        double next = s * 1.25, ds = next - s;
+        DVec3  p = from + dir * sqrt(s * next);
+        double R = sqrt(p.x * p.x + p.z * p.z);
+        double rho = GalaxyDensity(p);
+        dust += ds / 5000.0 * exp(-fabs(p.y) / 250.0) * fmin(4.0, exp(-(R - HOME_RADIUS_LY) / DISK_SCALE_LY));
+        double got = rho * ds * exp(-dust);
+        light += got;
+        if (R < 6000.0) bulge += got;
+        s = next;
+    }
+    return light;
+}
+
+void Sky::Update(DVec3 here)
+{
+    if (!specks.empty() && Len(here - madeAt) < SKY_REBUILD_LY) return;
+    madeAt = here;
+    specks.clear();
+
+    // Look in many directions; keep each with a chance in proportion to its light
+    const int LOOKS = 16000;
+    struct Look { DVec3 dir; double light, bulge; };
+    std::vector<Look> looks(LOOKS);
+    Rng64 rng{ 0x534B59ull };
+    double total = 0.0;
+    for (Look &l : looks) {
+        double y = 2.0 * rng.uni() - 1.0, a = 2.0 * PI * rng.uni(), r = sqrt(1.0 - y * y);
+        l.dir = { r * cos(a), y, r * sin(a) };
+        l.light = Starlight(here, l.dir, l.bulge);
+        total += l.light;
+    }
+    if (total <= 0.0) return;                                   // (outside the galaxy looking away: nothing)
+    for (const Look &l : looks) {
+        double keep = rng.uni(), shade = rng.uni(), tint = rng.uni();
+        if (keep >= SKY_SPECKS * l.light / total) continue;
+        float  k = (float)(0.28 + 0.6 * shade * shade * shade);       // mostly faint, a few bright
+        double warm = l.light > 0.0 ? l.bulge / l.light : 0.0;         // the core glows yellow; the disk is blue-white
+        Color  c = tint < 0.15 + 0.7 * warm ? Color{ 255, 225, 170, 255 } : tint < 0.75 ? Color{ 235, 240, 255, 255 }
+                                                                          : Color{ 185, 205, 255, 255 };
+        specks.push_back({ ToF(l.dir), Dim(c, k), shade > 0.9 });
+    }
+}
+
+void Sky::Draw(Vector3 camRight) const
+{
+    const float m = SKY_DISTANCE * 0.0006f;                     // about a pixel
+    for (const Speck &s : specks) {
+        Vector3 p = Vector3Scale(s.dir, SKY_DISTANCE);
+        Vector3 w = Vector3Scale(camRight, s.big ? 1.8f * m : m);
+        DrawLine3D(Vector3Subtract(p, w), Vector3Add(p, w), s.color);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Assets, camera
 // ---------------------------------------------------------------------------
 void RenderAssets::Load()
@@ -402,7 +466,7 @@ void UpdateView(ViewState &v, const Ship &eye, float frameDt)
 void DrawScene(const GameState &g, const Ship &eye, ViewState &v, const RenderAssets &assets,
                float frameDt, SceneInfo &out)
 {
-    const std::vector<StarSystem> &systems = g.systems;
+    const Galaxy &systems = g.systems;
     const LoadedSystem &loaded = g.loaded;
     std::vector<NavBody>  &nav = out.nav;
     std::vector<Occluder> &occluders = out.occluders;
@@ -412,23 +476,31 @@ void DrawScene(const GameState &g, const Ship &eye, ViewState &v, const RenderAs
 
     BeginMode3D(v.camera);
 
+    v.sky.Update(systems.PositionLy(eye.anchor, eye.pos));
+    v.sky.Draw(v.camRight);
+
     struct SphereDraw { DVec3 rel; double radius; Color lines, fill; const VectorModel *model;
                         const Zone *ring = nullptr; bool body = true;
                         Vector3 axis = { 0, 1, 0 }; float angle = 0.0f; };
     std::vector<SphereDraw> spheres;
 
-    // Stars of every system (the loaded one is handled with its planets)
-    for (int j = 0; j < (int)systems.size(); j++) {
-        if (j == loaded.index) continue;
-        DVec3 rel = FromShip(systems, eye, j);
-        bool  big = SphereVisible(rel, systems[j].starRadius);
-        const StarInfo &st = systems[j].stars[0];
-        if (big) spheres.push_back({ rel, systems[j].starRadius, Whiten(st.color), st.color, &assets.star, nullptr, true });
-        occluders.push_back({ rel, systems[j].starRadius });
+    // The stars on the scope: every system within nav range (the loaded one is handled with its planets)
+    std::vector<const StarSystem *> near;
+    systems.Nearby(eye.anchor, eye.pos, NAV_RANGE_LY * LY_U, near);
+    for (const StarSystem *s : near) {
+        if (s->id == loaded.index) continue;
+        DVec3 rel = FromShip(systems, eye, s->id);
+        bool  big = SphereVisible(rel, s->starRadius);
+        const StarInfo &st = s->stars[0];
+        if (big) spheres.push_back({ rel, s->starRadius, Whiten(st.color), st.color, &assets.star, nullptr, true });
+        occluders.push_back({ rel, s->starRadius });
+        double lum = 0.0, ly = fmax(Len(rel) / LY_U, 1e-6);
+        for (const StarInfo &o : s->stars) lum += o.lum;
         NavBody nb;
-        nb.id = TargetId::MakeStar(j); nb.name = systems[j].name; nb.rel = rel; nb.radius = systems[j].starRadius;
+        nb.id = TargetId::MakeStar(s->id); nb.name = s->name; nb.rel = rel; nb.radius = s->starRadius;
         nb.color = st.color; nb.star = true; nb.dot = !big; nb.occ = (int)occluders.size() - 1;
-        nb.info = StarSummary(systems[j]);
+        nb.bright = Clamp((float)((log10(lum / (ly * ly)) + 5.0) / 4.0), 0.12f, 1.0f);   // the Sun from 10 ly: 0.75
+        nb.info = StarSummary(*s);
         nav.push_back(nb);
     }
 

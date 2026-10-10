@@ -30,7 +30,7 @@
 #include <vector>
 
 const uint32_t PROTOCOL_MAGIC   = 0x31504D53;   // "SMP1"
-const uint16_t PROTOCOL_VERSION = 2;            // bump when anything below changes (2: goods, buying)
+const uint16_t PROTOCOL_VERSION = 3;            // bump when anything below changes (3: the full-size galaxy)
 const uint16_t DEFAULT_PORT     = 23500;
 const int      MAX_PACKET       = 1400;         // stays under a typical 1500-byte MTU
 const int      MAX_MESSAGE      = 1100;         // biggest reliable message
@@ -51,6 +51,7 @@ struct Writer {
     void U64(uint64_t v) { for (int i = 0; i < 8; i++) buf.push_back((uint8_t)(v >> (8 * i))); }
     void I16(int16_t v)  { U16((uint16_t)v); }
     void I32(int32_t v)  { U32((uint32_t)v); }
+    void I64(int64_t v)  { U64((uint64_t)v); }
     void F32(float v)    { uint32_t u; memcpy(&u, &v, 4); U32(u); }
     void F64(double v)   { uint64_t u; memcpy(&u, &v, 8); U64(u); }
     void Str(const std::string &s, size_t max = 1000)
@@ -76,6 +77,7 @@ struct Reader {
     uint64_t U64() { if (!Need(8)) return 0; uint64_t v = 0; for (int i = 0; i < 8; i++) v |= (uint64_t)p[i] << (8 * i); p += 8; return v; }
     int16_t  I16() { return (int16_t)U16(); }
     int32_t  I32() { return (int32_t)U32(); }
+    int64_t  I64() { return (int64_t)U64(); }
     float    F32() { uint32_t u = U32(); float v; memcpy(&v, &u, 4); return v; }
     double   F64() { uint64_t u = U64(); double v; memcpy(&v, &u, 8); return v; }
     std::string Str() { uint16_t n = U16(); if (!Need(n)) return ""; std::string s((const char *)p, n); p += n; return s; }

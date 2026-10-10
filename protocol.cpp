@@ -10,7 +10,7 @@ void WriteTarget(Writer &w, const TargetId &t)
 {
     w.U8(t.type);
     if (t.type == TargetId::None) return;
-    w.I32(t.system);
+    w.I64(t.system);
     w.I32(t.index);
     if (t.type == TargetId::Asteroid) w.U64(t.rock);
 }
@@ -21,7 +21,7 @@ TargetId ReadTarget(Reader &r)
     uint8_t type = r.U8();
     if (type == TargetId::None || type > TargetId::Ship) return t;
     t.type   = (TargetId::Type)type;
-    t.system = r.I32();
+    t.system = r.I64();
     t.index  = r.I32();
     if (t.type == TargetId::Asteroid) t.rock = r.U64();
     return t;
@@ -29,7 +29,7 @@ TargetId ReadTarget(Reader &r)
 
 void WriteShip(Writer &w, const Ship &s)
 {
-    w.I16((int16_t)s.anchor);
+    w.I64(s.anchor);
     w.F64(s.pos.x); w.F64(s.pos.y); w.F64(s.pos.z);
     w.F32(s.vel.x); w.F32(s.vel.y); w.F32(s.vel.z);
     w.F32(s.rot.x); w.F32(s.rot.y); w.F32(s.rot.z); w.F32(s.rot.w);
@@ -40,7 +40,7 @@ void WriteShip(Writer &w, const Ship &s)
 Ship ReadShip(Reader &r)
 {
     Ship s;
-    s.anchor = r.I16();
+    s.anchor = r.I64();
     s.pos.x = r.F64(); s.pos.y = r.F64(); s.pos.z = r.F64();
     s.vel.x = r.F32(); s.vel.y = r.F32(); s.vel.z = r.F32();
     s.rot.x = r.F32(); s.rot.y = r.F32(); s.rot.z = r.F32(); s.rot.w = r.F32();

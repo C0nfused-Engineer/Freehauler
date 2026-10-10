@@ -6,7 +6,7 @@
 //   imports   what it needs: bought dear (130-160%)
 //   trades    what passes through: around base price
 //   ores      every market buys raw ore (refineries and industry pay best)
-// Each market nudges its prices a little (a hash of its name, so they're
+// Each market nudges its prices a little (a hash of the body's id, so they're
 // stable), and you buy a little above and sell a little below its mid price.
 // Profit is in carrying exports to where they're imports.
 //

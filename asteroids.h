@@ -32,7 +32,7 @@ using MinedMap = std::unordered_map<uint64_t, float>;   // rock id -> ore left
 
 using CellKey = std::array<long long, 3>;
 struct AsteroidField {
-    int system = -1;                                   // loaded system the cells belong to
+    SysId system = NO_SYSTEM;                          // loaded system the cells belong to
     std::map<CellKey, std::vector<Asteroid>> cells;    // generated cells around the ship
 };
 

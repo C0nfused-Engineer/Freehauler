@@ -12,7 +12,7 @@
 //                                be a dedicated server in this console (what Multiplayer >
 //                                Host starts in a window of its own; options: server_console.cpp)
 //   freehauler --test [name]    run the headless tests (fuel, trade, stations, hz, skimming, comms,
-//                                targeting, mining, save, protocol, net, host)
+//                                galaxy, systems, targeting, mining, save, protocol, net, host)
 //   freehauler --script tour    scripted run in the window that saves screenshots
 //   freehauler --bot HOST[:PORT] [--name N] [--seconds S] [--idle]
 //                                a headless test pilot that flies loops on a server
@@ -21,7 +21,8 @@
 //   core.h          units, DVec3, hashing / random numbers
 //   format          numbers -> HUD text
 //   goods.h         ores (later: the commodity table)
-//   galaxy          stars, systems, worlds, belts, rings - generated from the seed
+//   galaxy          the galaxy (full size, made a sector at a time), its stars, systems, worlds,
+//                   belts and rings - all generated from the seed
 //   asteroids       rocks streamed in around the ship
 //   ship            flight model and drives (Ship + Controls: shared with future NPCs)
 //   targets.h       TargetId: stable references to things

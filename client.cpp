@@ -135,7 +135,7 @@ void NetClient::HandleMessage(GameState &g, const std::vector<uint8_t> &msg)
         GameState fresh;
         NewWorld(fresh, seed);
         NewCaptain(fresh, fresh, id, myName);
-        if (p.ship.anchor >= 0 && p.ship.anchor < (int)fresh.systems.size()) {
+        if (fresh.systems.Exists(p.ship.anchor)) {
             fresh.player = p;
             fresh.loaded = LoadedSystem();
             fresh.field  = AsteroidField();
@@ -345,10 +345,10 @@ void NetClient::Flush(double now)
 // ---------------------------------------------------------------------------
 // Other ships, smoothed
 // ---------------------------------------------------------------------------
-static Ship InterpolateShip(const std::vector<StarSystem> &sys, const Ship &a, const Ship &b, double t)
+static Ship InterpolateShip(const Galaxy &sys, const Ship &a, const Ship &b, double t)
 {
     Ship s = b;
-    DVec3 aPos = a.pos + (sys[a.anchor].gal - sys[b.anchor].gal);   // a in b's frame (exact: star positions are snapped)
+    DVec3 aPos = a.pos + sys.Between(b.anchor, a.anchor);           // a in b's frame (exact: star positions are on a grid)
     s.pos = aPos + (b.pos - aPos) * t;
     s.vel = Vector3Lerp(a.vel, b.vel, (float)t);
     s.rot = QuaternionSlerp(a.rot, b.rot, (float)t);

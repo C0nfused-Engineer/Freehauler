@@ -7,7 +7,9 @@
 #include "save.h"
 #include "server.h"
 #include "settings.h"
+#include "format.h"
 #include "targetinfo.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -21,6 +23,14 @@ static int BodyIndex(const Captain &c, const std::string &name)
 {
     for (int i = 0; i < (int)c.loaded.bodies.size(); i++) if (c.loaded.bodies[i].name == name) return i;
     return -1;
+}
+
+// Every system within 'ly' of home (home included)
+static std::vector<const StarSystem *> Neighbours(const World &w, double ly)
+{
+    std::vector<const StarSystem *> out;
+    w.systems.Nearby(w.systems.home, {}, ly * LY_U, out);
+    return out;
 }
 
 // The first inhabited planet in the loaded system (a world you can trade with)
@@ -78,7 +88,8 @@ static int g_fail = 0, g_checks = 0;
 static void TestFuel()
 {
     GameState g; NewGame(g);
-    const StarSystem &home = g.systems[0];
+    const SysId H = g.systems.home;
+    const StarSystem &home = g.systems[H];
     int c = BodyIndex(g, home.name + " c"), d = BodyIndex(g, home.name + " d");
 
     Park(g, c, 0.5); Face(g, home.u);
@@ -100,22 +111,22 @@ static void TestFuel()
     Face(g, bd.local - bc.local);
     f0 = g.player.fuel;
     Controls hyper; hyper.hyper = true;
-    Aim toward; toward.hovered = TargetId::MakeBody(0, d);     // locked on, so we stop there
+    Aim toward; toward.hovered = TargetId::MakeBody(H, d);     // locked on, so we stop there
     Run(g, 25.0, hyper, toward);
-    double toD = Len(FromShip(g.systems, g.player.ship, 0, bd.local)) - bd.radius;
+    double toD = Len(FromShip(g.systems, g.player.ship, H, bd.local)) - bd.radius;
     CHECK(f0 - g.player.fuel > 0.2 && f0 - g.player.fuel < 1.5, "hyper c -> d (%.2f AU, locked on) burns %.3f t", Len(bd.local - bc.local) / AU_U, f0 - g.player.fuel);
     CHECK(toD < 0.001 * AU_U, "hyper arrives at d (%.0f km from its surface)", toD / KM_U);
 
     // Warp, out of the field
-    g.player.ship.anchor = 0; g.player.ship.pos = home.n * (1.0 * LY_U); g.player.ship.vel = { 0, 0, 0 };
-    Face(g, home.u);
+    g.player.ship.anchor = H; g.player.ship.pos = home.n * (0.7 * LY_U); g.player.ship.vel = { 0, 0, 0 };
+    Face(g, home.n);
     g.player.fuel = 50; f0 = 50;
     Run(g, 10.0, hyper);
     CHECK(!g.flight.drive.inField && f0 - g.player.fuel > 1.9 && f0 - g.player.fuel < 2.5,
           "10 s of warp burns %.3f t (speed %.3f ly/s)", f0 - g.player.fuel, Vector3Length(g.player.ship.vel) / LY_U);
 
     // Empty tank: limp
-    g.player.ship.pos = home.n * (1.0 * LY_U); g.player.ship.vel = { 0, 0, 0 };
+    g.player.ship.anchor = H; g.player.ship.pos = home.n * (0.7 * LY_U); g.player.ship.vel = { 0, 0, 0 };
     g.player.fuel = 0;
     Run(g, 5.0, hyper);
     CHECK(g.flight.drive.noFuel && fabs(Vector3Length(g.player.ship.vel) - LIMP_SPEED) < LIMP_SPEED * 0.01,
@@ -177,17 +188,18 @@ static void TestStations()
     const Body *b = TradePartner(g);
     CHECK(b && b->kind == Kind::Station, "a new game starts in trading range of %s", b ? b->name.c_str() : "(nothing)");
     int stations = 0, inOrbit = 0, free = 0;
-    for (int si = 0; si < (int)g.systems.size(); si++) {
+    std::vector<const StarSystem *> near = Neighbours(g, 20.0);
+    for (const StarSystem *s : near) {
         LoadedSystem L;
-        GenerateSystemContents(g.systems[si], L);
+        GenerateSystemContents(*s, L);
         for (const Body &o : L.bodies)
             if (o.kind == Kind::Station) {
                 stations++;
                 (L.bodies[o.parent].kind == Kind::Star ? free : inOrbit)++;
             }
     }
-    CHECK(stations >= (int)g.systems.size() && inOrbit > 0 && free > 0,
-          "%d stations across %d systems (%d orbiting worlds, %d on their own)", stations, (int)g.systems.size(), inOrbit, free);
+    CHECK(stations >= (int)near.size() / 4 && inOrbit > 0 && free > 0,
+          "%d stations across the %d systems within 20 ly (%d orbiting worlds, %d on their own)", stations, (int)near.size(), inOrbit, free);
     if (!b) return;
     Market mk = MakeMarket(*b);
     int ex = -1;
@@ -203,9 +215,9 @@ static void TestHabitableZone()
 {
     GameState g; NewGame(g);
     int liquidIn = 0, liquidOut = 0, lifeOut = 0;
-    for (int si = 0; si < (int)g.systems.size(); si++) {
+    for (const StarSystem *s : Neighbours(g, 40.0)) {
         LoadedSystem L;
-        GenerateSystemContents(g.systems[si], L);
+        GenerateSystemContents(*s, L);
         for (const Body &o : L.bodies) {
             if (o.kind == Kind::Star || o.kind == Kind::Station) continue;
             bool liquid = o.water.rfind("Oceans", 0) == 0 || o.water == "Global ocean";
@@ -222,11 +234,13 @@ static void TestSkimming()
 {
     GameState g; NewGame(g);
     int giant = -1;
-    for (int si = 0; si < (int)g.systems.size() && giant < 0; si++) {
-        g.player.ship.anchor = si; g.player.ship.pos = {};          // fly to its star: that system loads
+    for (const StarSystem *s : Neighbours(g, 15.0)) {
+        if (giant >= 0) break;
+        if (s->id == g.systems.home) continue;                      // (somewhere else: flying there loads it)
+        g.player.ship.anchor = s->id; g.player.ship.pos = {};       // at its star: that system loads
         UpdateLoadedSystem(g);
         for (int i = 0; i < (int)g.loaded.bodies.size(); i++)
-            if (g.loaded.bodies[i].kind == Kind::Planet && g.loaded.bodies[i].radius >= SKIM_MIN_RADIUS) { giant = i; break; }
+            if (g.loaded.bodies[i].kind == Kind::Planet && g.loaded.bodies[i].massEarth >= GAS_GIANT_MASS) { giant = i; break; }
     }
     CHECK(giant >= 0, "found a gas giant to skim (%s)", giant >= 0 ? g.loaded.bodies[giant].name.c_str() : "none");
     if (giant < 0) return;
@@ -244,7 +258,8 @@ static void TestSkimming()
 static void TestComms()
 {
     GameState g; NewGame(g);
-    const StarSystem &home = g.systems[0];
+    const SysId H = g.systems.home;
+    const StarSystem &home = g.systems[H];
     int c = TradeWorld(g);
     if (c < 0) { CHECK(false, "no inhabited planet to hail"); return; }
     const Body &b = g.loaded.bodies[c];
@@ -252,12 +267,12 @@ static void TestComms()
     g.player.ship.vel = { 0, 0, 0 };
     Run(g, 0.05);
     auto list = CommsInRange(g);
-    const CommsContact *cc = FindContact(list, TargetId::MakeBody(0, c));
+    const CommsContact *cc = FindContact(list, TargetId::MakeBody(H, c));
     CHECK(cc, "%s is in comms range (%.2f ls)", b.name.c_str(), cc ? cc->dist / LIGHT_SEC_U : 0.0);
     if (!cc) return;
     double rt = 2.0 * cc->dist / LIGHT_SEC_U;
     Hail(g, c);
-    CHECK(g.comms.with == TargetId::MakeBody(0, c) && CommsWaiting(g), "hailing: reply on its way");
+    CHECK(g.comms.with == TargetId::MakeBody(H, c) && CommsWaiting(g), "hailing: reply on its way");
     Run(g, rt + 0.5);
     CHECK(CommsWaiting(g), "no reply before the round trip (%.2f s) + 0.6 s", rt);
     Run(g, 0.2);
@@ -277,10 +292,11 @@ static void TestComms()
 static void TestTargeting()
 {
     GameState g; NewGame(g);
-    const StarSystem &home = g.systems[0];
+    const SysId H = g.systems.home;
+    const StarSystem &home = g.systems[H];
     int c = BodyIndex(g, home.name + " c"), d = BodyIndex(g, home.name + " d");
     Park(g, c, 2.0);
-    Aim aim; aim.hovered = TargetId::MakeBody(0, d);
+    Aim aim; aim.hovered = TargetId::MakeBody(H, d);
     Run(g, 0.05, {}, aim);
     CHECK(g.flight.selected == aim.hovered, "selection follows the reticle");
     Run(g, 0.05, {}, Aim{});
@@ -300,11 +316,199 @@ static void TestTargeting()
     CHECK(!g.flight.lock.valid() && !g.flight.lockSuppressed, "releasing Shift resets");
 
     // Stars: the loaded system's star is a Body; far away it's a Star again
-    TargetId star = CanonicalTarget(g, TargetId::MakeStar(0));
-    CHECK(star == TargetId::MakeBody(0, 0), "a loaded system's star is its first body");
+    TargetId star = CanonicalTarget(g, TargetId::MakeStar(H));
+    CHECK(star == TargetId::MakeBody(H, 0), "a loaded system's star is its first body");
     DVec3 rel; double r;
-    CHECK(FindTarget(g, TargetId::MakeStar(3), rel, &r) && TargetName(g, TargetId::MakeStar(3)) == g.systems[3].name,
-          "distant star %s found at %.2f ly", g.systems[3].name.c_str(), Len(rel) / LY_U);
+    const StarSystem *far = nullptr;
+    for (const StarSystem *s : Neighbours(g, 12.0)) if (s->id != H) far = s;
+    CHECK(far && FindTarget(g, TargetId::MakeStar(far->id), rel, &r) && TargetName(g, TargetId::MakeStar(far->id)) == far->name,
+          "distant star %s found at %.2f ly", far ? far->name.c_str() : "?", Len(rel) / LY_U);
+    CHECK(!FindTarget(g, TargetId::MakeStar(CellId(0, 2000, 0)), rel) && !FindTarget(g, TargetId::MakeStar(-5), rel),
+          "a system that doesn't exist can't be targeted");
+}
+
+// The galaxy: the size of a real one, the same every time, and exact where it matters
+static void TestGalaxy()
+{
+    GameState g; NewGame(g);
+    const Galaxy &gal = g.systems;
+    const SysId H = gal.home;
+    DVec3 hp = gal.PositionLy(H);
+    CHECK(gal.Exists(H) && fabs(sqrt(hp.x * hp.x + hp.z * hp.z) - HOME_RADIUS_LY) < 1000.0 && fabs(hp.y) < 300.0,
+          "home (%s) is %.0f ly from the galactic center, %.0f ly above the disk", gal[H].name.c_str(), sqrt(hp.x * hp.x + hp.z * hp.z), hp.y);
+
+    // The same seed is the same galaxy; another seed is another
+    Galaxy again, other;
+    again.Init(g.seed);
+    other.Init(g.seed + 1);
+    std::vector<const StarSystem *> a = Neighbours(g, 30.0), b;
+    again.Nearby(again.home, {}, 30.0 * LY_U, b);
+    bool same = again.home == H && a.size() == b.size();
+    for (size_t i = 0; same && i < a.size(); i++)
+        same = a[i]->id == b[i]->id && a[i]->name == b[i]->name && a[i]->seed == b[i]->seed && a[i]->stars.size() == b[i]->stars.size() &&
+               a[i]->stars[0].mass == b[i]->stars[0].mass && Len(a[i]->off - b[i]->off) == 0.0 && a[i]->fieldR == b[i]->fieldR;
+    CHECK(same && other.home != H, "the same seed rebuilds the same %d systems within 30 ly; another seed doesn't", (int)a.size());
+
+    // As crowded as the Sun's neighbourhood, and in the real proportions
+    std::vector<const StarSystem *> near = Neighbours(g, 60.0);
+    double density = near.size() / (4.0 / 3.0 * PI * 60.0 * 60.0 * 60.0);
+    int red = 0, sunlike = 0, dead = 0, brown = 0, multi = 0;
+    double closest = 1e30;
+    std::vector<std::string> names;
+    for (const StarSystem *s : near) {
+        const StarInfo &st = s->stars[0];
+        if (st.kind == StarKind::MainSequence && st.cls == 'M') red++;
+        if (st.kind == StarKind::MainSequence && st.cls == 'G') sunlike++;
+        if (st.kind == StarKind::WhiteDwarf || st.kind == StarKind::NeutronStar) dead++;
+        if (st.kind == StarKind::BrownDwarf) brown++;
+        if (s->stars.size() > 1) multi++;
+        names.push_back(s->name);
+    }
+    for (size_t i = 0; i < near.size() && i < 600; i++)
+        for (size_t j = i + 1; j < near.size(); j++)
+            closest = fmin(closest, Len(gal.Between(near[i]->id, near[j]->id)));
+    std::sort(names.begin(), names.end());
+    bool unique = std::adjacent_find(names.begin(), names.end()) == names.end();
+    double n = (double)near.size();
+    CHECK(density > 0.0015 && density < 0.006, "%d systems within 60 ly: %.4f per cubic light year (the Sun's neighbourhood: ~0.003)", (int)near.size(), density);
+    CHECK(red / n > 0.55 && red / n < 0.75 && sunlike / n > 0.03 && sunlike / n < 0.12 && dead > 0 && brown > 0,
+          "the stars: %.0f%% red dwarfs, %.0f%% Sun-like, %.0f%% white dwarfs and neutron stars, %.0f%% brown dwarfs; %.0f%% multiple",
+          100 * red / n, 100 * sunlike / n, 100 * dead / n, 100 * brown / n, 100 * multi / n);
+    CHECK(unique && closest >= 0.99 * LY_U, "no two share a name; the closest pair is %.2f ly apart", closest / LY_U);
+
+    // Exact arithmetic between neighbours: going round a triangle of stars gets you back exactly
+    const StarSystem *p = near[near.size() / 3], *q = near[2 * near.size() / 3];
+    DVec3 round = gal.Between(H, p->id) + gal.Between(p->id, q->id) + gal.Between(q->id, H);
+    CHECK(Len(round) == 0.0 && Len(gal.Between(H, p->id) + gal.Between(p->id, H)) == 0.0,
+          "star-to-star vectors are exact (%s -> %s -> %s -> home: off by %.1e units)", gal[H].name.c_str(), p->name.c_str(), q->name.c_str(), Len(round));
+
+    // Human space: one bubble around home, and nobody beyond it
+    double inside = 0, outside = 0, farthest = 0;
+    int inhabited = 0, core = 0, named = 0;
+    for (const StarSystem *s : Neighbours(g, 100.0)) {
+        double d = Len(gal.Between(H, s->id)) / LY_U;
+        LoadedSystem L;
+        GenerateSystemContents(*s, L);
+        double pop = 0;
+        for (const Body &o : L.bodies) { pop += o.population; if (o.settlement == Settlement::CoreWorld) core++; }
+        if (pop > 0) { inhabited++; farthest = fmax(farthest, d); }
+        (s->develop > 0.0f ? inside : outside) += pop;
+        if (s->named) named++;
+    }
+    CHECK(inside > 1e9 && outside == 0.0 && farthest < FRONTIER_RADIUS_LY * 1.2 && farthest > CORE_RADIUS_LY && core >= 1 && gal[H].develop == 1.0f,
+          "human space: %s people in %d systems (%d core worlds), the farthest %.0f ly from home; none beyond",
+          FormatPopulation(inside).c_str(), inhabited, core, farthest);
+
+    // The far side of the galaxy is there too: find a system 50,000 ly away and build it
+    const StarSystem *farSys = nullptr;
+    int fx = (int)(-HOME_RADIUS_LY * 0.92 / CELL_LY), fz = (int)(0.3 * HOME_RADIUS_LY / CELL_LY);
+    for (int i = 0; i < 4000 && !farSys; i++) farSys = gal.Find(CellId(fx + i % 20, i / 400, fz + (i / 20) % 20));
+    LoadedSystem L;
+    if (farSys) GenerateSystemContents(*farSys, L);
+    double across = farSys ? Len(gal.Between(H, farSys->id)) / LY_U : 0.0;
+    CHECK(farSys && across > 45000.0 && farSys->develop == 0.0f && !farSys->named && !L.bodies.empty() &&
+          GalaxyDensity({ 0, 0, 0 }) > 10.0 * GalaxyDensity(hp) && GalaxyDensity({ 70000, 0, 0 }) == 0.0,
+          "across the galaxy: %s, %.0f ly from home, %d bodies, uncharted", farSys ? farSys->name.c_str() : "nothing", across, (int)L.bodies.size());
+
+    // Flying to the next star: the ship re-anchors on it without moving, and its system loads
+    const StarSystem *next = nullptr;
+    for (const StarSystem *s : Neighbours(g, 12.0))
+        if (s->id != H && (!next || Len(gal.Between(H, s->id)) < Len(gal.Between(H, next->id)))) next = s;
+    CHECK(next != nullptr, "home has a neighbour within 12 ly");
+    if (!next) return;
+    DVec3 way = gal.Between(H, next->id);
+    g.player.ship.anchor = H; g.player.ship.pos = way * 0.7; g.player.ship.vel = { 0, 0, 0 };
+    UpdateLoadedSystem(g);
+    double moved = Len(FromShip(gal, g.player.ship, H) + way * 0.7);
+    CHECK(g.player.ship.anchor == next->id && moved < 1e-3 && g.loaded.index < 0,
+          "70%% of the way to %s (%.1f ly): anchored on it, moved %.1e units, nothing loaded", next->name.c_str(), Len(way) / LY_U, moved);
+    g.player.ship.pos = next->n * (0.2 * LY_U);
+    UpdateLoadedSystem(g);
+    CHECK(g.loaded.index == next->id && !g.loaded.bodies.empty() && g.loaded.bodies[0].name.rfind(next->name, 0) == 0,
+          "0.2 ly from %s: its system loads (%d bodies)", next->name.c_str(), (int)g.loaded.bodies.size());
+
+    // Sectors are forgotten once nobody is near them
+    Galaxy tour;
+    tour.Init(g.seed);
+    for (int i = 0; i < 400; i++) {
+        std::vector<const StarSystem *> seen;
+        tour.Nearby(tour.home, { i * 60.0 * LY_U, 0, 0 }, 30.0 * LY_U, seen);
+        for (int k = 0; k < 300; k++) tour.Trim();
+    }
+    CHECK(tour.CachedSectors() < 12000 && tour.Exists(tour.home), "a 24,000 ly flight leaves %d sectors in memory", tour.CachedSectors());
+}
+
+// Planetary systems: built the way real ones are
+static void TestSystems()
+{
+    GameState g; NewGame(g);
+    int systems = 0, planets = 0, giants = 0, giantsInside = 0, moons = 0, moonsOutside = 0, crowded = 0, dwarfs = 0, belts = 0;
+    int youngLife = 0, redGiants = 0, planetsAtHot = 0, hotStars = 0, planetsAtCool = 0, coolStars = 0, badBodies = 0;
+    std::vector<uint64_t> ids;
+    for (const StarSystem *s : Neighbours(g, 60.0)) {
+        LoadedSystem L;
+        GenerateSystemContents(*s, L);
+        systems++;
+        const StarInfo &st = s->stars[0];
+        double frost = 2.7 * sqrt(s->lumInner) * AU_U, innerMass = 0.0;
+        for (size_t i = 0; i < s->stars.size(); i++) if (i == 0 || s->stars[i].close) innerMass += s->stars[i].mass;
+        bool plain = st.kind == StarKind::MainSequence;            // (dead stars' planets have moved)
+        double last = 0.0;
+        int count = 0;
+        for (const Body &b : L.bodies) {
+            ids.push_back(b.id);
+            if (b.kind == Kind::Star || b.kind == Kind::Station) continue;
+            if (!(b.massEarth > 0.0) || !(b.radius > 0.0) || !(b.gravity > 0.0) || b.type.empty() || !(b.tempK > 0.0) ||
+                Len(b.local) > s->fieldR) badBodies++;
+            if (s->age < 0.6 && b.lifeLevel > 0) youngLife++;
+            if (b.kind == Kind::Moon) {
+                const Body &host = L.bodies[b.parent];
+                moons++;
+                if (b.orbit > 0.5 * host.orbit * cbrt(host.massEarth * 3.003e-6 / (3.0 * innerMass)) || b.orbit < host.radius * 2.0) moonsOutside++;
+                continue;
+            }
+            if (b.dwarf) { dwarfs++; continue; }
+            planets++; count++;
+            if (last > 0.0 && b.orbit < last * 1.3) crowded++;
+            last = b.orbit;
+            if (b.giant && b.massEarth >= GIANT_MASS) { giants++; if (plain && b.orbit < frost && count > 1) giantsInside++; }   // (a hot Jupiter is always innermost)
+        }
+        for (const Zone &z : L.zones) if (!z.ring) belts++;
+        if (st.kind == StarKind::Giant) redGiants++;
+        if (plain && st.mass > 1.4) { hotStars++; planetsAtHot += count; }
+        if (plain && st.mass < 0.45) { coolStars++; planetsAtCool += count; }
+    }
+    std::sort(ids.begin(), ids.end());
+    bool uniqueIds = std::adjacent_find(ids.begin(), ids.end()) == ids.end();
+    CHECK(badBodies == 0 && crowded == 0 && uniqueIds, "%d planets, %d dwarf planets, %d moons and %d belts around %d stars: all sound, "
+          "none crowding the next, every body id unique", planets, dwarfs, moons, belts, systems);
+    CHECK(giants > systems / 20 && giantsInside == 0, "%d giants, all beyond their star's frost line (bar the few that migrated right in)", giants);
+    CHECK(moons > 0 && moonsOutside == 0, "every moon orbits inside its planet's Hill sphere");
+    CHECK(youngLife == 0, "nothing lives in systems under 600 million years old");
+    CHECK(coolStars > 0 && planets > 2 * systems, "%.1f planets per system (red dwarfs %.1f, stars over 1.4 Suns %.1f)", (double)planets / systems,
+          (double)planetsAtCool / coolStars, hotStars ? (double)planetsAtHot / hotStars : 0.0);
+
+    // Home is somewhere worth starting
+    const StarSystem &home = g.systems[g.systems.home];
+    bool core = false, refinery = false, giant = false;
+    for (const Body &b : g.loaded.bodies) {
+        if (b.settlement == Settlement::CoreWorld) core = true;
+        if (b.settlement == Settlement::OreRefinery) refinery = true;
+        if (b.giant && b.massEarth >= GIANT_MASS) giant = true;
+    }
+    CHECK(core && refinery && giant && home.stars[0].kind == StarKind::MainSequence && home.age > 3.0,
+          "home: a %s, %.1f billion years old, with a core world, a refinery and a giant to skim", StarDescription(home.stars[0]), home.age);
+
+    // Markets belong to bodies, not names: the same body always has the same market
+    int tw = TradeWorld(g);
+    if (tw >= 0) {
+        Body copy = g.loaded.bodies[tw];
+        copy.name = "Renamed";
+        Market m1 = MakeMarket(g.loaded.bodies[tw]), m2 = MakeMarket(copy);
+        copy.id ^= 1;
+        Market m3 = MakeMarket(copy);
+        CHECK(m1.fuelPrice == m2.fuelPrice && m1.fuelPrice != m3.fuelPrice, "a market's prices follow the body's id, not its name");
+    }
 }
 
 static void TestMining()
@@ -329,7 +533,7 @@ static void TestMining()
     float r = AsteroidRadius(*best);
     g.player.ship.pos = rockPos + Norm(here - rockPos) * (r + 100.0);
     Face(g, rockPos - g.player.ship.pos);
-    Aim aim; aim.hovered = TargetId::MakeRock(0, id);
+    Aim aim; aim.hovered = TargetId::MakeRock(g.systems.home, id);
     Controls fire; fire.fire = true;
     Run(g, 2.0, fire, aim);
     double got = g.player.CargoTotal();
@@ -340,7 +544,7 @@ static void TestMining()
 static void TestSaveLoad()
 {
     GameState g; NewGame(g);
-    int c = BodyIndex(g, g.systems[0].name + " c");
+    int c = TradeWorld(g);
     Park(g, c, 0.9);
     Run(g, 1.0);
     g.player.credits = 1234.5; g.player.fuel = 17.25; g.player.cargo[ORE_PLATINUM] = 3.5;
@@ -354,7 +558,7 @@ static void TestSaveLoad()
     CHECK(Len(h.player.ship.pos - g.player.ship.pos) < 1e-6 && h.player.ship.anchor == g.player.ship.anchor,
           "ship position round-trips exactly");
     CHECK(h.deltas.mined.count(0xDEADBEEFull) && h.deltas.mined[0xDEADBEEFull] == 12.5f, "mined rocks round-trip");
-    CHECK(h.loaded.index == 0 && h.clock == g.clock, "system reloaded around the ship, clock restored");
+    CHECK(h.loaded.index == g.systems.home && h.clock == g.clock, "system reloaded around the ship, clock restored");
     Run(h, 0.05);
     CHECK(h.flight.nearBody == c, "still in trading range after loading");
     CHECK(!LoadGame(h, "no_such_file.txt") && h.player.credits == 1234.5, "a missing save leaves the game alone");
@@ -366,9 +570,16 @@ static void TestSaveLoad()
     std::string path = SavePathFor("unit test save");
     CHECK(SaveGame(g, path.c_str(), "unit test save"), "named save written to %s", path.c_str());
     SaveSummary sum = ReadSaveSummary(path.c_str());
-    CHECK(sum.valid && sum.name == "unit test save" && sum.location == g.systems[0].name && sum.credits == 1234.5 &&
+    CHECK(sum.valid && sum.name == "unit test save" && sum.location == g.systems[g.systems.home].name && sum.credits == 1234.5 &&
           fabs(sum.cargo - 3.5) < 1e-9 && sum.seed == g.seed, "summary: \"%s\" at %s, %.0f cr", sum.name.c_str(), sum.location.c_str(), sum.credits);
     CHECK(!ReadSaveSummary(SettingsPathForTests().c_str()).valid, "a file that isn't a save is recognized");
+    {
+        FILE *old = fopen("old_save.txt", "w");                 // from the twelve-star galaxy: system 3 no longer means anything
+        if (old) { fputs("SPACEFLIGHT_SAVE 1\nseed 1977\nclock 5\nship 3 0 0 0 0 0 0 0 0 0 1 1\nfuel 10\ncredits 99\nend\n", old); fclose(old); }
+        CHECK(!LoadGame(h, "old_save.txt") && !ReadSaveSummary("old_save.txt").valid && h.player.credits == 1234.5,
+              "a save from the old small galaxy is turned away, not misplaced");
+        remove("old_save.txt");
+    }
     remove(path.c_str());
     remove("not_a_save.txt");
 }
@@ -383,7 +594,7 @@ static void TestProtocol()
     g.player.cargo[ORE_PLATINUM] = 7.25; g.player.credits = 987.5; g.player.ship.vel = { 1.5f, -2.0f, 3.25f };
     InputStep in; in.seq = 77;
     in.controls.forward = 1; in.controls.yaw = -0.37f; in.controls.hyper = true; in.controls.toggleDampeners = true;
-    in.aim.hovered = TargetId::MakeRock(0, 0xFEEDFACECAFEull); in.aim.retarget = TargetId::MakeShip(5);
+    in.aim.hovered = TargetId::MakeRock(g.systems.home, 0xFEEDFACECAFEull); in.aim.retarget = TargetId::MakeShip(5);
     Writer w;
     WritePlayer(w, g.player);
     WriteInput(w, in);
@@ -391,7 +602,8 @@ static void TestProtocol()
     Player p = ReadPlayer(r);
     InputStep back = ReadInput(r, 77);
     CHECK(r.ok && r.Left() == 0 && Len(p.ship.pos - g.player.ship.pos) == 0.0 && p.cargo[ORE_PLATINUM] == 7.25 &&
-          p.credits == 987.5 && p.ship.vel.z == 3.25f && p.ship.rot.w == g.player.ship.rot.w, "player state round-trips exactly");
+          p.credits == 987.5 && p.ship.vel.z == 3.25f && p.ship.rot.w == g.player.ship.rot.w && p.ship.anchor == g.player.ship.anchor,
+          "player state round-trips exactly");
     CHECK(back.controls.yaw == -0.37f && back.controls.hyper && back.controls.toggleDampeners && !back.controls.fire &&
           back.aim.hovered == in.aim.hovered && back.aim.retarget == in.aim.retarget, "an input step round-trips exactly");
     Reader shortR(w.buf.data(), 10);
@@ -546,7 +758,7 @@ static void TestNetwork()
           !TargetInfo(bob.g, bob.aim.hovered).empty(), "Bob can target Alice's ship (info panel: %d rows)", (int)TargetInfo(bob.g, bob.aim.hovered).size());
     // The server moves Alice 0.4 AU away: her client gets corrected to match
     sa = OnServer(srv, "Alice");
-    sa->player.ship.pos = sa->player.ship.pos + srv.world.systems[0].n * (0.4 * AU_U);
+    sa->player.ship.pos = sa->player.ship.pos + srv.world.systems[srv.world.systems.home].n * (0.4 * AU_U);
     sa->player.ship.vel = { 0, 0, 0 };
     int before = alice.net.corrections;
     Pump(srv, { &alice, &bob }, 0.3);
@@ -583,7 +795,7 @@ static void TestNetwork()
     // --- Comms: the log comes back from the server, replies after the light-speed delay ---
     alice.net.SendCommand({ Command::Hail, c });
     Pump(srv, { &alice, &bob }, 3.0);
-    CHECK(alice.g.comms.with == TargetId::MakeBody(0, c) && alice.g.comms.log.size() >= 2 && !CommsWaiting(alice.g),
+    CHECK(alice.g.comms.with == TargetId::MakeBody(srv.world.systems.home, c) && alice.g.comms.log.size() >= 2 && !CommsWaiting(alice.g),
           "hailed %s: \"%s\"", alice.g.comms.withName.c_str(), alice.g.comms.log.empty() ? "" : alice.g.comms.log.back().text.c_str());
 
     // --- Mining: everyone hears which rocks are gone ---
@@ -603,7 +815,7 @@ static void TestNetwork()
     sa->player.ship.pos = rock->local + Norm(here - rock->local) * (AsteroidRadius(*rock) + 100.0);
     Face(srv.world, *sa, rock->local - sa->player.ship.pos);
     Pump(srv, { &alice, &bob }, 0.3);
-    alice.aim.hovered = TargetId::MakeRock(0, rockId);
+    alice.aim.hovered = TargetId::MakeRock(srv.world.systems.home, rockId);
     alice.c.fire = true;
     Pump(srv, { &alice, &bob }, 0.5);
     seen = Sees(bob, "Alice");
@@ -688,7 +900,7 @@ int RunHeadlessTests(const char *only)
     struct T { const char *name; void (*fn)(); };
     const T tests[] = {
         { "fuel", TestFuel }, { "trade", TestTrade }, { "stations", TestStations }, { "hz", TestHabitableZone },
-        { "skimming", TestSkimming }, { "comms", TestComms },
+        { "skimming", TestSkimming }, { "comms", TestComms }, { "galaxy", TestGalaxy }, { "systems", TestSystems },
         { "targeting", TestTargeting }, { "mining", TestMining }, { "save", TestSaveLoad },
         { "protocol", TestProtocol }, { "net", TestNetwork }, { "host", TestHosting },
     };
@@ -818,7 +1030,7 @@ std::unique_ptr<ScriptedInput> MakeScript(const std::string &name)
     if (name == "tour") {
         s->body = [](ScriptedInput &s, InputFrame &in) {
             GameState &g = *s.game;
-            const StarSystem &home = g.systems[0];
+            const StarSystem &home = g.systems[g.systems.home];
             int f = s.frame;
             int c = TradeWorld(g);
             (void)home;
@@ -841,7 +1053,7 @@ std::unique_ptr<ScriptedInput> MakeScript(const std::string &name)
                 s.snap = true;
             }
             if (f == 520) s.screenshot = "tour_belt.png";
-            if (f == 530) { g.player.ship.pos = home.n * (1.0 * LY_U); g.player.ship.vel = { 0, 0, 0 }; s.snap = true; }
+            if (f == 530) { g.player.ship.pos = home.n * (0.7 * LY_U); g.player.ship.vel = { 0, 0, 0 }; s.snap = true; }
             if (f > 535 && f < 700) in.Hold(KEY_LEFT_SHIFT);                 // warp
             if (f == 690) s.screenshot = "tour_warp.png";
             if (f == 720) in.Press(KEY_F9);                                   // back to the save

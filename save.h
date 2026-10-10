@@ -7,7 +7,8 @@
 
 #include <string>
 
-const int SAVE_VERSION = 1;
+const int SAVE_VERSION = 2;           // 2: the galaxy at full size (systems are numbered by where they are)
+const int SAVE_OLDEST  = 2;           // saves from the old twelve-star galaxy can't be placed in this one
 
 // Saves live in a "saves" folder beside the executable
 std::string SaveDirectory();                       // ends with a path separator; created if missing

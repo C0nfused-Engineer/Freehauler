@@ -121,7 +121,7 @@ public:
         DrawRectangle(px, py, pw, ph, Fade(BLACK, 0.9f));
         DrawRectangleLines(px, py, pw, ph, HUD);
         DrawText(TextFormat("MARKET  -  %s", b->name.c_str()), px + 18, py + 14, 24, WHITE);
-        DrawText(TextFormat("%s  -  %s economy  -  population %s", b->settlement.c_str(), EconName(b->econ),
+        DrawText(TextFormat("%s  -  %s economy  -  population %s", SettlementName(b->settlement), EconName(b->econ),
                             FormatPopulation(b->population).c_str()), px + 18, py + 44, 16, LIGHTGRAY);
         std::string ex = ExportsLine(mk, 4), im = ImportsLine(mk, 4);
         DrawText(TextFormat("Makes: %s", ex.empty() ? "-" : ex.c_str()), px + 18, py + 64, 14, Color{ 140, 220, 140, 255 });
@@ -230,7 +230,7 @@ public:
                     DrawText(b.name.c_str(), x, y, 18, WHITE);
                     const char *d = TextFormat("%.2f ls   delay %.1f s", list[r].dist / LIGHT_SEC_U, 2.0 * list[r].dist / LIGHT_SEC_U);
                     DrawText(d, right - MeasureText(d, 16), y + 2, 16, LIGHTGRAY);
-                    DrawText(TextFormat("%s  -  pop %s", b.settlement.c_str(), FormatPopulation(b.population).c_str()), x, y + 20, 14, HUD_LABEL);
+                    DrawText(TextFormat("%s  -  pop %s", SettlementName(b.settlement), FormatPopulation(b.population).c_str()), x, y + 20, 14, HUD_LABEL);
                     y += 46;
                 }
             }
