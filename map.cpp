@@ -50,9 +50,9 @@ std::vector<MapRow> SystemMapRows(const GameState &g)
         r.name   = b.name;
         r.inhabited = r.known && b.population > 0;
         if (b.kind == Kind::Star)          r.what = b.type;
-        else if (!r.known)                 r.what = std::string(b.dwarf ? "Dwarf planet" : b.giant ? "Giant planet" : "Rocky planet") + " - unscanned";
-        else if (b.kind == Kind::Station)  r.what = std::string(SettlementName(b.settlement)) + "  pop " + FormatPopulation(b.population);
-        else                               r.what = b.type + (b.population > 0 ? "  pop " + FormatPopulation(b.population) : "");
+        else if (!r.known)                 r.what = std::string(BasicKind(b)) + " - unscanned";
+        else if (b.kind == Kind::Station)  r.what = std::string(SettlementName(b.settlement)) + "  -  " + g.systems.factions.Name(b.owner);
+        else                               r.what = b.type + (b.population > 0 ? "  -  " + g.systems.factions.Name(b.owner) : "");
         rows.push_back(r);
     };
     auto stationsOf = [&](int bi, int indent) {
@@ -168,7 +168,8 @@ public:
         DrawRectangleRec(L.panel, Fade(BLACK, 0.92f));
         DrawRectangleLinesEx(L.panel, 1.0f, HUD);
         DrawText(TextFormat("SYSTEM MAP  -  %s", sys.name.c_str()), (int)L.panel.x + 20, (int)L.panel.y + 14, 24, WHITE);
-        std::string sub = StarSummary(sys) + (charted ? "  -  charts on file"
+        std::string sub = StarSummary(sys) + "  -  " + g.systems.factions.Name(sys.ruler, sys.develop > 0.0f ? "unclaimed" : "uncharted") +
+                          (charted ? "  -  charts on file"
                                                       : "  -  no charts: hail someone who lives here, or fly close to a world to scan it");
         DrawText(sub.c_str(), (int)L.panel.x + 20, (int)L.panel.y + 44, 16, charted ? HUD_LABEL : YELLOW);
 
@@ -383,6 +384,8 @@ public:
             Color stem = { 255, 140, 40, 255 };
             if (rel.y >= 0.0f) DrawLineV(foot, p, Fade(stem, 0.8f));
             else               DrawDotted(foot, p, Fade(stem, 0.9f));
+            if (const Faction *ruler = g.systems.factions.Get(s->ruler))                   // whose space it stands in
+                DrawRectangle((int)foot.x - 3, (int)foot.y - 3, 7, 7, ruler->color);
             DrawCircleV(p, size, st.color);
             if (s->id == g.systems.home) DrawCircleLinesV(p, size + 4.0f, HUD);
             if (onCourse)                DrawCircleLinesV(p, size + 7.0f, YELLOW);
@@ -408,7 +411,7 @@ public:
             std::string lines[4] = {
                 s.name, StarSummary(s),
                 FindTarget(g, TargetId::MakeStar(hover), rel) ? FormatStarDist(Len(rel)) + " from the ship" : std::string(),
-                s.develop >= 0.75f ? "Core systems" : s.develop >= 0.3f ? "Settled space" : s.develop > 0.0f ? "Frontier" : "No human presence" };
+                s.develop > 0.0f ? g.systems.factions.Name(s.ruler, "Unclaimed space") : std::string("No human presence") };
             if (g.know.charted.count(hover)) lines[3] += "  -  charts on file";
             int w = 0;
             for (const std::string &l : lines) w = std::max(w, MeasureText(l.c_str(), 16));
@@ -419,6 +422,21 @@ public:
             for (int i = 1; i < 4; i++) DrawText(lines[i].c_str(), bx, by + 6 + 20 * i, 16, i == 3 ? HUD_LABEL : LIGHTGRAY);
         }
 
+        // Whose colours those are: the states with space on the map
+        {
+            std::vector<int> seen;
+            for (const StarSystem *s : stars)
+                if (s->ruler != NO_FACTION && std::find(seen.begin(), seen.end(), s->ruler) == seen.end()) seen.push_back(s->ruler);
+            std::sort(seen.begin(), seen.end());
+            int ly = (int)(panel.y + panel.height) - 40 - 20 * (int)seen.size();
+            for (int id : seen) {
+                const Faction *f = g.systems.factions.Get(id);
+                if (!f) continue;
+                DrawRectangle((int)panel.x + 20, ly + 4, 8, 8, f->color);
+                DrawText(f->name.c_str(), (int)panel.x + 34, ly, 14, LIGHTGRAY);
+                ly += 20;
+            }
+        }
         const char *help = "click a star: set course   wheel: range   A/D, arrows or RMB drag: turn   BKSP: clear course   M / ESC: close";
         DrawText(help, (int)panel.x + 20, (int)(panel.y + panel.height) - 26, 16, HUD_DIM);
     }

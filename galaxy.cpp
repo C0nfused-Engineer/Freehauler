@@ -1054,6 +1054,8 @@ static uint64_t CellHash(unsigned seed, int cx, int cy, int cz)
     return Mix64(Mix64(Mix64(Mix64(0x9A1A5EEDull ^ seed) ^ (uint64_t)(int64_t)cx) ^ (uint64_t)(int64_t)cy) ^ (uint64_t)(int64_t)cz);
 }
 
+uint64_t CellHashOf(unsigned seed, const StarSystem &s) { return CellHash(seed, s.cx, s.cy, s.cz); }
+
 // Does this cell hold a system? (More often where the galaxy is denser.)
 static bool CellHasSystem(unsigned seed, int cx, int cy, int cz, uint64_t &hash)
 {
@@ -1128,7 +1130,7 @@ static void SizeField(StarSystem &s)
 
 // The system in a cell (which must hold one; 'hash' from CellHasSystem). 'home' is the
 // cell human space is centered on, or null before a home has been chosen.
-static StarSystem MakeSystem(unsigned seed, int cx, int cy, int cz, uint64_t hash, const int *home)
+static StarSystem MakeSystem(unsigned seed, int cx, int cy, int cz, uint64_t hash, const int *home, const FactionSet *factions = nullptr)
 {
     StarSystem s;
     Gen g(hash ^ 0x5157ull);
@@ -1157,6 +1159,7 @@ static StarSystem MakeSystem(unsigned seed, int cx, int cy, int cz, uint64_t has
         s.named = s.develop > 0.0f && dx >= -NAMED_CELLS && dx < NAMED_CELLS && dy >= -NAMED_CELLS && dy < NAMED_CELLS &&
                   dz >= -NAMED_CELLS && dz < NAMED_CELLS;
         if (s.named) s.name = ProperName(seed, dx, dy, dz);
+        if (factions) s.ruler = TerritoryRuler(*factions, { dx * CELL_LY, dy * CELL_LY, dz * CELL_LY }, s.develop, hash);
     }
     if (!s.named) s.name = CatalogueName(seed, cx, cy, cz);
 
@@ -1186,7 +1189,7 @@ const Galaxy::Sector &Galaxy::SectorOf(int cx, int cy, int cz) const
                 slot = -1;
                 if (!CellHasSystem(seed, x, y, z, hash)) continue;
                 slot = (int8_t)sec.systems.size();
-                sec.systems.push_back(MakeSystem(seed, x, y, z, hash, home >= 0 ? homeCell : nullptr));
+                sec.systems.push_back(MakeSystem(seed, x, y, z, hash, home >= 0 ? homeCell : nullptr, &factions));
             }
     return sec;
 }
@@ -1327,12 +1330,17 @@ void Galaxy::Init(unsigned newSeed)
     sectors.clear();
     tick = 0;
 
-    // (The search builds a few dozen systems in full, so its answer is remembered)
+    factions = FactionSet();
+
+    // (The search builds a few dozen systems in full, and the factions look over the whole
+    // of human space, so the answers are remembered)
     static std::map<unsigned, std::array<int, 3>> known;
+    static std::map<unsigned, FactionSet> knownFactions;
     auto it = known.find(seed);
     if (it != known.end()) {
         for (int i = 0; i < 3; i++) homeCell[i] = it->second[i];
         home = CellId(homeCell[0], homeCell[1], homeCell[2]);
+        factions = knownFactions[seed];
         return;
     }
 
@@ -1356,4 +1364,9 @@ void Galaxy::Init(unsigned newSeed)
     homeCell[0] = best[0]; homeCell[1] = best[1]; homeCell[2] = best[2];
     home = CellId(best[0], best[1], best[2]);
     known[seed] = { best[0], best[1], best[2] };
+
+    // Who holds the space around it. (Systems made so far have no rulers: start the sectors afresh.)
+    factions = GenerateFactions(*this);
+    knownFactions[seed] = factions;
+    sectors.clear();
 }

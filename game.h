@@ -37,7 +37,6 @@ const double MINING_RANGE   = 300.0;        // 1.5 km from the surface
 const double MINING_RATE    = 2.0;          // tonnes per second
 const double SCOOP_RATE     = 1.0;          // tonnes per second while skimming a star...
 const double SCOOP_RANGE    = 3.0;          // ...within this many star radii of its center
-const double COMMS_RANGE    = 3.0 * LIGHT_SEC_U;   // hail inhabited worlds within this of their surface
 const double INTERACT_RADII = 2.0;          // F works within this many radii of a body's center...
 const double INTERACT_MIN   = 500.0 * KM_U; // ...or this far above its surface, whichever is larger
 const double STATION_RANGE  = 20.0 * KM_U;  // F works within this of a station
@@ -129,11 +128,28 @@ struct FlightState {
     Controls  last;                      // controls of the latest step (for the engine flame etc.)
 };
 
-struct CommsMsg { double at; bool ours; std::string text; };   // 'at' = when it arrives (game clock)
-struct CommsState {
-    TargetId with;                       // open channel (a Body), or none
+// Comms: any number of channels open at once, each to a world or station of the
+// loaded system, each with messages on their way out and replies on their way back.
+struct CommsMsg {
+    double at;                           // when it arrives (game clock): ours, there; theirs, here
+    bool   ours;
+    std::string text;
+    double sent = 0.0;                   // replies: when the request they answer went out
+    bool   told = false;                 // replies: its arrival has been announced
+};
+struct CommsChannel {
+    TargetId with;                       // a Body
     std::string withName;                // its name (still known after its system unloads)
     std::vector<CommsMsg> log;
+};
+struct CommsState {
+    std::vector<CommsChannel> channels;
+    const CommsChannel *Find(TargetId with) const
+    {
+        for (const CommsChannel &ch : channels) if (ch.with == with) return &ch;
+        return nullptr;
+    }
+    CommsChannel *Find(TargetId with) { return const_cast<CommsChannel *>(static_cast<const CommsState *>(this)->Find(with)); }
 };
 
 // Another captain's ship, as this machine sees it. On the server these are
@@ -181,6 +197,8 @@ struct Captain {
     FlightState   flight;
     CommsState    comms;
     Knowledge     know;                  // saved
+    std::vector<float> standing;         // saved: with each faction (by id), -100 .. +100; missing = 0
+    float Standing(int faction) const { return faction >= 0 && faction < (int)standing.size() ? standing[faction] : 0.0f; }
     LoadedSystem  loaded;                // generated around this ship
     AsteroidField field;                 // generated around this ship
 };

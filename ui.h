@@ -20,7 +20,7 @@
 #include <string>
 #include <vector>
 
-enum class WindowKind { Info, Market, Comms, SystemMap, SectorMap, Pause, SaveMenu, LoadMenu, SettingsMenu, ConfirmExit,
+enum class WindowKind { Info, Market, Comms, SystemMap, SectorMap, Factions, Pause, SaveMenu, LoadMenu, SettingsMenu, ConfirmExit,
                         MainMenu, SinglePlayerMenu, MultiplayerMenu, JoinMenu, HostMenu };
 
 // What the main menu decided
@@ -100,6 +100,9 @@ Controls ReadFlightControls(const InputFrame &in, float frameDt, const Settings 
 // outside one; M again goes from the system map to the sector map
 std::unique_ptr<Window> MakeSystemMap();
 std::unique_ptr<Window> MakeSectorMap();
+
+// The factions window (factionui.cpp): R
+std::unique_ptr<Window> MakeFactionsWindow();
 
 // One line of the system map's list: a star, world, belt, moon or station (indented under its world)
 struct MapRow {

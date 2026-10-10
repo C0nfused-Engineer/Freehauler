@@ -40,7 +40,8 @@ public:
         double                inputTokens = 30.0;   // steps it may simulate (refills at SIM_HZ): no speed hacks
         std::vector<Command>  commands;      // waiting for the input step they were issued after
         std::vector<double>   commandsSince; // when each arrived (applied anyway after a second)
-        std::vector<uint8_t>  commsSent;     // the last MSG_COMMS sent (resent when it changes)
+        std::vector<float>    standingSent;  // the standings last sent (sent again when they change)
+        std::vector<std::pair<TargetId, std::vector<uint8_t>>> commsSent;   // the last MSG_COMMS sent for each open channel
         uint32_t              echoTimeMs = 0;
     };
 
@@ -74,7 +75,7 @@ private:
     bool SaveWorld();
     bool LoadWorld();
     bool SavePlayer(const Captain &c);
-    bool LoadPlayer(const std::string &name, Player &out);
+    bool LoadPlayer(const std::string &name, Player &out, std::vector<float> &standing);
     std::string PlayerPath(const std::string &name) const;
 
     ServerConfig cfg;

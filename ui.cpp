@@ -188,30 +188,50 @@ private:
 };
 
 // ===========================================================================
-// Comms: hail inhabited worlds within 3 light seconds. You keep flying.
+// Comms: hail anyone in the system; ask for prices and news; open trade when
+// you're in docking range. Any number of channels can be open at once: the
+// list shows who's on a channel and whose reply is on its way, and a channel
+// carries on while you look at another (or shut the window: the HUD keeps
+// track of what's in flight). You keep flying.
 // ===========================================================================
 class CommsWindow : public Window {
 public:
+    explicit CommsWindow(TargetId focus = {}) : focus(focus) {}
     WindowKind Kind() const override { return WindowKind::Comms; }
+    TargetId Focus() const { return focus; }
 
     void HandleInput(InputFrame &in, GameState &g, Ui &ui) override
     {
-        if (!g.comms.with.valid()) {
-            auto list = CommsInRange(g);
+        auto list = CommsInRange(g);
+        if (focus.valid() && (focus.system != g.loaded.index || !FindContact(list, focus))) focus = {};    // they're gone
+        if (!focus.valid()) {
             int n = (int)list.size();
             if (n > 0) {
                 if (in.Pressed(KEY_UP))   row = (row + n - 1) % n;
                 if (in.Pressed(KEY_DOWN)) row = (row + 1) % n;
                 row = std::max(0, std::min(n - 1, row + in.WheelStep()));
-                row = std::min(row, n - 1);
-                if (in.Pressed(KEY_ENTER) || in.Pressed(KEY_KP_ENTER)) ui.Do(g, { Command::Hail, list[row].body });
+                top = std::max(std::min(top, row), row - LIST_ROWS + 1);
+                top = std::max(0, std::min(top, n - LIST_ROWS));
+                if (in.Pressed(KEY_ENTER) || in.Pressed(KEY_KP_ENTER) || in.Pressed(KEY_RIGHT)) {
+                    focus = TargetId::MakeBody(g.loaded.index, list[row].body);
+                    if (!g.comms.Find(focus)) ui.Do(g, { Command::Hail, list[row].body });
+                }
             }
         } else {
-            if (in.Pressed(KEY_ONE) || in.Pressed(KEY_KP_1)) ui.Do(g, { Command::MarketReport });
-            if (in.Pressed(KEY_TWO) || in.Pressed(KEY_KP_2)) ui.Do(g, { Command::LocalInfo });
-            if (in.Pressed(KEY_BACKSPACE)) ui.Do(g, { Command::HangUp });
+            bool open = g.comms.Find(focus) != nullptr;
+            if (in.Pressed(KEY_ONE) || in.Pressed(KEY_KP_1)) ui.Do(g, { Command::MarketReport, focus.index });
+            if (in.Pressed(KEY_TWO) || in.Pressed(KEY_KP_2)) ui.Do(g, { Command::LocalInfo, focus.index });
+            if (in.Pressed(KEY_THREE) || in.Pressed(KEY_KP_3)) {
+                const std::string &who = g.loaded.bodies[focus.index].name;
+                if (CanTradeOverComms(g) && focus.index == g.flight.nearBody) { closed = true; ui.Open(std::make_unique<MarketWindow>(focus)); }
+                else if (!CommsAnswered(g, g, focus))                         ui.Say("Wait for " + who + " to answer");
+                else                                                          ui.Say("Get into docking range of " + who + " to trade");
+            }
+            if (in.Pressed(KEY_BACKSPACE)) { if (open) ui.Do(g, { Command::HangUp, focus.index }); focus = {}; }
+            if (in.Pressed(KEY_LEFT) || in.Pressed(KEY_TAB)) focus = {};       // back to the list; the channel stays open
         }
-        for (int k : { KEY_UP, KEY_DOWN, KEY_ENTER, KEY_KP_ENTER, KEY_ONE, KEY_KP_1, KEY_TWO, KEY_KP_2, KEY_BACKSPACE })
+        for (int k : { KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_TAB, KEY_ENTER, KEY_KP_ENTER, KEY_ONE, KEY_KP_1, KEY_TWO, KEY_KP_2,
+                       KEY_THREE, KEY_KP_3, KEY_BACKSPACE })
             in.Consume(k);
     }
 
@@ -222,69 +242,100 @@ public:
         DrawRectangle(px, py, pw, ph, Fade(BLACK, 0.85f));
         DrawRectangleLines(px, py, pw, ph, HUD);
         int x = px + 16, y = py + 12, right = px + pw - 16;
-        if (!g.comms.with.valid()) {
+        const CommsContact *contact = focus.valid() && focus.system == g.loaded.index ? FindContact(list, focus) : nullptr;
+        if (!contact) {
             DrawText("COMMUNICATIONS", x, y, 22, WHITE);
-            DrawText("range 3 light seconds", right - MeasureText("range 3 light seconds", 14), y + 6, 14, HUD_DIM);
+            const char *note = "the whole system  -  replies take light-time";
+            DrawText(note, right - MeasureText(note, 14), y + 6, 14, HUD_DIM);
             y += 32; DrawLine(x, y, right, y, HUD_DIM); y += 10;
             if (list.empty()) {
-                DrawText("No inhabited worlds in range.", x, y, 18, LIGHTGRAY); y += 24;
-                DrawText("Get within 3 light seconds (~900,000 km) of one.", x, y, 16, HUD_DIM);
+                DrawText(g.loaded.index >= 0 ? "Nobody lives in this system." : "No one in range.", x, y, 18, LIGHTGRAY); y += 24;
+                DrawText(g.loaded.index >= 0 ? "No one to hail here." : "Comms reach the system you're in; this is open space.", x, y, 16, HUD_DIM);
             } else {
                 int shown = std::min(row, (int)list.size() - 1);
-                for (int r = 0; r < (int)list.size() && r < 9; r++) {
+                if (top > 0) DrawText("...", right - 20, y - 14, 16, HUD_DIM);
+                if (top + LIST_ROWS < (int)list.size()) DrawText("...", right - 20, py + ph - 44, 16, HUD_DIM);
+                for (int r = top; r < (int)list.size() && r < top + LIST_ROWS; r++) {
                     const Body &b = g.loaded.bodies[list[r].body];
+                    TargetId who = TargetId::MakeBody(g.loaded.index, list[r].body);
+                    const CommsChannel *ch = g.comms.Find(who);
                     if (r == shown) DrawRectangle(x - 6, y - 3, pw - 20, 42, Fade(HUD, 0.18f));
-                    DrawText(b.name.c_str(), x, y, 18, WHITE);
-                    const char *d = TextFormat("%.2f ls   delay %.1f s", list[r].dist / LIGHT_SEC_U, 2.0 * list[r].dist / LIGHT_SEC_U);
-                    DrawText(d, right - MeasureText(d, 16), y + 2, 16, LIGHTGRAY);
-                    DrawText(TextFormat("%s  -  pop %s", SettlementName(b.settlement), FormatPopulation(b.population).c_str()), x, y + 20, 14, HUD_LABEL);
+                    DrawText(b.name.c_str(), x, y, 18, ch ? HUD : WHITE);
+                    std::string away = FormatPlanetDist(list[r].dist) + "   reply in " + FormatETA(2.0 * list[r].dist / LIGHT_SEC_U + 0.6);
+                    DrawText(away.c_str(), right - MeasureText(away.c_str(), 16), y + 2, 16, LIGHTGRAY);
+                    // Who they are is on the charts, or it's just a signal until they answer
+                    std::string what = Known(g, list[r].body)
+                                     ? std::string(SettlementName(b.settlement)) + "  -  pop " + FormatPopulation(b.population)
+                                     : std::string("Transponder signal  -  unscanned");
+                    DrawText(what.c_str(), x, y + 20, 14, Known(g, list[r].body) ? HUD_LABEL : HUD_DIM);
+                    if (ch) {
+                        double soonest = 0.0;
+                        for (const CommsMsg &m : ch->log) if (!m.ours && m.at > g.clock && (soonest == 0.0 || m.at < soonest)) soonest = m.at;
+                        std::string st = soonest > 0.0 ? "CHANNEL OPEN  -  reply in " + FormatETA(soonest - g.clock) : std::string("CHANNEL OPEN");
+                        DrawText(st.c_str(), right - MeasureText(st.c_str(), 14), y + 21, 14, soonest > 0.0 ? YELLOW : HUD);
+                    }
                     y += 46;
                 }
             }
-            DrawText("UP/DOWN select   ENTER hail   C / ESC close", x, py + ph - 24, 16, HUD_DIM);
+            DrawText("UP/DOWN or wheel: select   ENTER: hail / open channel   F / ESC close", x, py + ph - 24, 16, HUD_DIM);
             return;
         }
 
-        DrawText(TextFormat("CHANNEL  -  %s", g.comms.withName.c_str()), x, y, 22, WHITE);
-        if (const CommsContact *c = FindContact(list, g.comms.with)) {
-            const char *d = TextFormat("%.2f ls  -  round trip %.1f s", c->dist / LIGHT_SEC_U, 2.0 * c->dist / LIGHT_SEC_U);
-            DrawText(d, x, y + 26, 14, HUD_DIM);
-        }
+        const CommsChannel *ch = g.comms.Find(focus);
+        const Body &who = g.loaded.bodies[focus.index];
+        DrawText(TextFormat("CHANNEL  -  %s", who.name.c_str()), x, y, 22, WHITE);
+        std::string d = FormatPlanetDist(contact->dist) + " away  -  a reply takes " + FormatETA(2.0 * contact->dist / LIGHT_SEC_U + 0.6);
+        DrawText(d.c_str(), x, y + 26, 14, HUD_DIM);
         y += 46; DrawLine(x, y, right, y, HUD_DIM); y += 10;
 
-        // Word-wrap the arrived messages, then show the last lines that fit
+        // Word-wrap what's been said, then show the last lines that fit. Our own messages show
+        // at once; theirs when they arrive.
         std::vector<std::pair<std::string, Color>> lines;
-        int wrapW = pw - 32 - 20;
-        for (const CommsMsg &m : g.comms.log) {
-            if (m.at > g.clock) continue;
-            Color c = m.ours ? HUD_LABEL : WHITE;
-            std::string line = m.ours ? "> " : "", word;
-            bool empty = true;
-            for (size_t i = 0; i <= m.text.size(); i++) {
-                if (i < m.text.size() && m.text[i] != ' ') { word += m.text[i]; continue; }
-                if (word.empty()) { if (i < m.text.size() && !empty) line += ' '; continue; }   // keep runs of spaces (price columns)
-                std::string cand = line + word;
-                if (!empty && MeasureText(cand.c_str(), 16) > wrapW) { lines.push_back({ line, c }); cand = (m.ours ? "  " : "") + word; }
-                line = cand; empty = false; word.clear();
-                if (i < m.text.size()) line += ' ';
+        int wrapW = pw - 32 - 20, inFlight = 0;
+        double soonest = 0.0, counted = 0.0;
+        if (ch)
+            for (const CommsMsg &m : ch->log) {
+                if (!m.ours && m.at > g.clock) {
+                    if (soonest == 0.0 || m.at < soonest) soonest = m.at;
+                    if (m.at != counted) { inFlight++; counted = m.at; }       // (count replies, not their lines)
+                    continue;
+                }
+                Color c = m.ours ? HUD_LABEL : WHITE;
+                std::string line = m.ours ? "> " : "", word;
+                bool empty = true;
+                for (size_t i = 0; i <= m.text.size(); i++) {
+                    if (i < m.text.size() && m.text[i] != ' ') { word += m.text[i]; continue; }
+                    if (word.empty()) { if (i < m.text.size() && !empty) line += ' '; continue; }   // keep runs of spaces (price columns)
+                    std::string cand = line + word;
+                    if (!empty && MeasureText(cand.c_str(), 16) > wrapW) { lines.push_back({ line, c }); cand = (m.ours ? "  " : "") + word; }
+                    line = cand; empty = false; word.clear();
+                    if (i < m.text.size()) line += ' ';
+                }
+                lines.push_back({ line, c });
             }
-            lines.push_back({ line, c });
-        }
-        bool waiting = CommsWaiting(g);
-        if (waiting) {
+        if (!ch) lines.push_back({ "  opening channel...", HUD_DIM });
+        if (inFlight > 0) {
             int dots = 1 + (int)(g.clock * 3.0) % 3;
-            lines.push_back({ std::string("  awaiting reply") + std::string(dots, '.'), HUD_DIM });
+            std::string wait = inFlight == 1 ? "  awaiting reply" : TextFormat("  awaiting %d replies", inFlight);
+            lines.push_back({ wait + "  (" + FormatETA(soonest - g.clock) + ")" + std::string(dots, '.'), HUD_DIM });
         }
         int maxLines = (ph - 54 - 34) / 20;
         int first = std::max(0, (int)lines.size() - maxLines);
         for (int i = first; i < (int)lines.size(); i++, y += 20) DrawText(lines[i].first.c_str(), x, y, 16, lines[i].second);
-        DrawText(waiting ? "BACKSPACE hang up   C / ESC close"
-                         : "1 market report   2 local info   BKSP hang up   C close",
-                 x, py + ph - 24, 16, HUD_DIM);
+
+        const char *asks = "1 prices   2 local info   ";
+        bool trade = CanTradeOverComms(g) && focus.index == g.flight.nearBody;
+        DrawText(asks, x, py + ph - 24, 16, HUD_DIM);
+        int tx = x + MeasureText(asks, 16);
+        const char *t = trade ? "3 TRADE   " : "3 trade (dock first)   ";
+        DrawText(t, tx, py + ph - 24, 16, trade ? HUD : Fade(HUD_DIM, 0.6f));
+        DrawText("LEFT: others   BKSP hang up", tx + MeasureText(t, 16), py + ph - 24, 16, HUD_DIM);
     }
 
 private:
-    int row = 0;
+    static const int LIST_ROWS = 5;
+    TargetId focus;              // the channel on show, or none: the list of everyone
+    int row = 0, top = 0;
 };
 
 // ===========================================================================
@@ -377,9 +428,29 @@ void Ui::HandleInput(InputFrame &in, GameState &g)
         else     Open(MakePauseMenu(online));
     }
     if (in.Pressed(KEY_O)) { settings.showOrbits = !settings.showOrbits; SaveSettings(settings); }
+    if (in.Pressed(KEY_R)) Open(MakeFactionsWindow());     // (and takes R itself to close)
     if (in.Pressed(KEY_M)) {                               // (an open map takes M itself)
         if (g.loaded.index >= 0 && g.flight.drive.inField) Open(MakeSystemMap());
         else                                               Open(MakeSectorMap());
+    }
+    // F: comms. It hails whoever the nose is on (or whoever you're docked beside); with
+    // nobody to hail it opens the list of everyone in the system. C is the list alone.
+    if (in.Pressed(KEY_F)) {
+        int who = HailTarget(g);
+        const TargetId &sel = g.flight.selected;
+        TargetId with = who >= 0 ? TargetId::MakeBody(g.loaded.index, who) : TargetId{};
+        CommsWindow *shown = static_cast<CommsWindow *>(Find(WindowKind::Comms));
+        if (who >= 0 && !(shown && shown->Focus() == with)) {
+            if (!g.comms.Find(with)) Do(g, { Command::Hail, who });      // (already talking: just bring the channel up)
+            Open(std::make_unique<CommsWindow>(with));
+        } else if (shown) {
+            Close(WindowKind::Comms);
+        } else {
+            if (who < 0 && sel.type == TargetId::Body && sel.system == g.loaded.index && sel.index >= 0 &&
+                sel.index < (int)g.loaded.bodies.size() && g.loaded.bodies[sel.index].kind != Kind::Star)
+                Say("Nobody at " + g.loaded.bodies[sel.index].name + " to hail");
+            Open(std::make_unique<CommsWindow>());
+        }
     }
     if (in.Pressed(KEY_C)) {
         if (Has(WindowKind::Comms)) Close(WindowKind::Comms);
@@ -388,15 +459,6 @@ void Ui::HandleInput(InputFrame &in, GameState &g)
     if (in.Pressed(KEY_I) || in.MousePressed(MOUSE_BUTTON_MIDDLE)) {
         if (Has(WindowKind::Info))           Close(WindowKind::Info);
         else if (g.flight.selected.valid())  Open(std::make_unique<InfoWindow>());
-    }
-    if (in.Pressed(KEY_F) && g.flight.nearBody >= 0 && g.flight.nearBody < (int)g.loaded.bodies.size()) {
-        const Body &b = g.loaded.bodies[g.flight.nearBody];
-        if (b.population > 0) {
-            Close(WindowKind::Comms);
-            Open(std::make_unique<MarketWindow>(TargetId::MakeBody(g.loaded.index, g.flight.nearBody)));
-        } else {
-            Say(b.name + " is uninhabited - nothing to trade here");
-        }
     }
     if (online && (in.Pressed(KEY_F5) || in.Pressed(KEY_F9))) {
         Say("Online, the server saves your progress for you");

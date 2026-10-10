@@ -686,7 +686,7 @@ void DrawScene(const GameState &g, const Ship &eye, ViewState &v, const RenderAs
                 occluders.push_back({ rel, b.radius * 0.5 });
                 NavBody nb;
                 nb.id = TargetId::MakeBody(loaded.index, bi); nb.name = b.name; nb.rel = rel; nb.radius = b.radius;
-                nb.color = b.lines; nb.dot = !big; nb.occ = (int)occluders.size() - 1; nb.info = WorldSummary(b);
+                nb.color = b.lines; nb.dot = !big; nb.occ = (int)occluders.size() - 1; nb.info = WorldSummary(b, Known(g, bi));
                 nb.parent = navOf[b.parent];
                 navOf[bi] = (int)nav.size();
                 nav.push_back(nb);
@@ -702,7 +702,7 @@ void DrawScene(const GameState &g, const Ship &eye, ViewState &v, const RenderAs
             NavBody nb;
             nb.id = TargetId::MakeBody(loaded.index, bi); nb.name = b.name; nb.rel = rel; nb.radius = b.radius;
             nb.color = b.kind == Kind::Star ? b.fill : b.lines; nb.star = b.kind == Kind::Star; nb.dot = !big;
-            nb.occ = (int)occluders.size() - 1; nb.info = WorldSummary(b);
+            nb.occ = (int)occluders.size() - 1; nb.info = WorldSummary(b, Known(g, bi));
             nb.parent = b.parent >= 0 ? navOf[b.parent] : -1;
             navOf[bi] = (int)nav.size();
             nav.push_back(nb);

@@ -138,13 +138,13 @@ std::vector<uint8_t> MsgEvent(const GameEvent &e)
     return w.buf;
 }
 
-std::vector<uint8_t> MsgComms(const CommsState &c)
+std::vector<uint8_t> MsgComms(const CommsChannel &c, bool open)
 {
     // Newest messages first, as many as fit (the window only shows the last dozen lines anyway)
     size_t budget = MAX_MESSAGE - 64 - c.withName.size();
     size_t first = c.log.size();
-    while (first > 0) {
-        size_t need = 8 + 1 + 2 + std::min<size_t>(c.log[first - 1].text.size(), 400);
+    while (open && first > 0) {
+        size_t need = 16 + 1 + 2 + std::min<size_t>(c.log[first - 1].text.size(), 400);
         if (need > budget || c.log.size() - first >= 255) break;
         budget -= need;
         first--;
@@ -152,9 +152,11 @@ std::vector<uint8_t> MsgComms(const CommsState &c)
     Writer w;
     w.U8(MSG_COMMS);
     WriteTarget(w, c.with);
+    w.U8(open ? 1 : 0);
     w.Str(c.withName, 64);
     w.U8((uint8_t)(c.log.size() - first));
     for (size_t i = first; i < c.log.size(); i++) {
+        w.F64(c.log[i].sent);
         w.F64(c.log[i].at);
         w.U8(c.log[i].ours ? 1 : 0);
         w.Str(c.log[i].text, 400);

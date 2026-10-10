@@ -106,7 +106,7 @@ std::vector<CommsContact> CommsInRange(const World &w, const Captain &c)
         const Body &b = c.loaded.bodies[bi];
         if (b.population <= 0) continue;
         double d = fmax(0.0, Len(FromShip(w.systems, c.player.ship, c.loaded.index, b.local)) - b.radius);
-        if (d <= COMMS_RANGE) out.push_back({ bi, d });
+        out.push_back({ bi, d });
     }
     std::sort(out.begin(), out.end(), [](const CommsContact &a, const CommsContact &b) { return a.dist < b.dist; });
     return out;
@@ -119,62 +119,127 @@ const CommsContact *FindContact(const std::vector<CommsContact> &list, TargetId 
     return nullptr;
 }
 
-bool CommsWaiting(const World &w, const Captain &c)
+int HailTarget(const Captain &c)
 {
-    return !c.comms.log.empty() && c.comms.log.back().at > w.clock;
+    auto lives = [&](int bi) { return bi >= 0 && bi < (int)c.loaded.bodies.size() && c.loaded.bodies[bi].population > 0; };
+    const TargetId &sel = c.flight.selected;
+    if (sel.type == TargetId::Body && sel.system == c.loaded.index && lives(sel.index)) return sel.index;
+    return lives(c.flight.nearBody) ? c.flight.nearBody : -1;
+}
+
+bool CommsAnswered(const World &w, const Captain &c, TargetId with)
+{
+    const CommsChannel *ch = c.comms.Find(with);
+    if (!ch) return false;
+    for (const CommsMsg &m : ch->log) if (!m.ours && m.at <= w.clock) return true;
+    return false;
+}
+
+bool CommsWaiting(const World &w, const Captain &c, TargetId with)
+{
+    const CommsChannel *ch = c.comms.Find(with);
+    if (!ch) return false;
+    for (const CommsMsg &m : ch->log) if (!m.ours && m.at > w.clock) return true;
+    return false;
+}
+
+bool CanTradeOverComms(const World &w, const Captain &c)
+{
+    int near = c.flight.nearBody;
+    return near >= 0 && near < (int)c.loaded.bodies.size() && c.loaded.bodies[near].population > 0 &&
+           CommsAnswered(w, c, TargetId::MakeBody(c.loaded.index, near));
+}
+
+std::vector<CommsFlight> CommsInFlight(const World &w, const Captain &c)
+{
+    std::vector<CommsFlight> out;
+    for (const CommsChannel &ch : c.comms.channels)
+        for (const CommsMsg &m : ch.log) {
+            if (m.ours || m.at <= w.clock) continue;
+            bool listed = false;                                  // (a report's lines all travel together)
+            for (const CommsFlight &f : out) if (f.with == ch.with && f.at == m.at) listed = true;
+            if (!listed) out.push_back({ ch.with, ch.withName, m.sent, m.at });
+        }
+    std::sort(out.begin(), out.end(), [](const CommsFlight &a, const CommsFlight &b) { return a.at < b.at; });
+    return out;
 }
 
 static double RoundTrip(double dist) { return 2.0 * dist / LIGHT_SEC_U; }
 
+// Sends 'ask' to a body with an open channel, and queues the lines of its reply (which
+// arrive after the round trip plus 'think' seconds)
+static void Ask(World &w, Captain &c, int body, const std::string &ask, const std::vector<std::string> &reply, double think)
+{
+    auto list = CommsInRange(w, c);
+    TargetId with = TargetId::MakeBody(c.loaded.index, body);
+    const CommsContact *cc = FindContact(list, with);
+    CommsChannel *ch = c.comms.Find(with);
+    if (!cc || !ch) return;
+    ch->log.push_back({ w.clock + cc->dist / LIGHT_SEC_U, true, ask });
+    double at = w.clock + RoundTrip(cc->dist) + think;
+    for (const std::string &l : reply) {
+        CommsMsg m = { at, false, l };
+        m.sent = w.clock;
+        ch->log.push_back(m);
+    }
+    if (ch->log.size() > 40) ch->log.erase(ch->log.begin(), ch->log.end() - 40);
+}
+
 void Hail(World &w, Captain &c, int body)
 {
     auto list = CommsInRange(w, c);
-    const CommsContact *cc = FindContact(list, TargetId::MakeBody(c.loaded.index, body));
-    if (!cc) return;
+    TargetId with = TargetId::MakeBody(c.loaded.index, body);
+    if (!FindContact(list, with) || c.comms.Find(with)) return;
     const Body &b = c.loaded.bodies[body];
-    c.comms.with = TargetId::MakeBody(c.loaded.index, body);
-    c.comms.withName = b.name;
-    c.comms.log.clear();
-    c.comms.log.push_back({ w.clock, true, "Hailing " + b.name + "..." });
-    c.comms.log.push_back({ w.clock + RoundTrip(cc->dist) + 0.6, false, Greeting(b) });
-    w.Emit(EventType::CommsOpened, "", c.comms.with, -1, 0.0, 0.0, c.id);
+    c.comms.channels.push_back({ with, b.name, {} });
+    Ask(w, c, body, "Hailing " + b.name + "...", { Greeting(b) }, 0.6);
+    w.Emit(EventType::CommsOpened, "", with, -1, 0.0, 0.0, c.id);
 }
 
-void RequestMarketReport(World &w, Captain &c)
+void RequestMarketReport(World &w, Captain &c, int body)
 {
-    auto list = CommsInRange(w, c);
-    const CommsContact *cc = FindContact(list, c.comms.with);
-    if (!cc || CommsWaiting(w, c)) return;
-    c.comms.log.push_back({ w.clock, true, "Requesting a market report." });
-    double at = w.clock + RoundTrip(cc->dist) + 0.8;
-    for (const std::string &l : MarketReport(c.loaded.bodies[cc->body])) c.comms.log.push_back({ at, false, l });
+    if (body < 0 || body >= (int)c.loaded.bodies.size()) return;
+    Ask(w, c, body, "Requesting a market report.", MarketReport(c.loaded.bodies[body]), 0.8);
 }
 
-void RequestLocalInfo(World &w, Captain &c)
+void RequestLocalInfo(World &w, Captain &c, int body)
 {
-    auto list = CommsInRange(w, c);
-    const CommsContact *cc = FindContact(list, c.comms.with);
-    if (!cc || CommsWaiting(w, c)) return;
-    const Body &b = c.loaded.bodies[cc->body];
-    c.comms.log.push_back({ w.clock, true, "What can you tell me about " + b.name + "?" });
-    c.comms.log.push_back({ w.clock + RoundTrip(cc->dist) + 0.8, false, LocalInfo(b) });
+    if (body < 0 || body >= (int)c.loaded.bodies.size()) return;
+    const Body &b = c.loaded.bodies[body];
+    Ask(w, c, body, "What can you tell me about " + b.name + "?", { LocalInfo(b) }, 1.0);   // (a different pause from a market
+                                                                                          // report's: replies are told apart by when they land)
 }
 
-void HangUp(World &w, Captain &c)
+void HangUp(World &w, Captain &c, int body)
 {
-    if (!c.comms.with.valid()) return;
-    w.Emit(EventType::CommsClosed, "Channel to " + c.comms.withName + " closed", c.comms.with, -1, 0.0, 0.0, c.id);
-    c.comms.with = {};
+    TargetId with = TargetId::MakeBody(c.loaded.index, body);
+    for (size_t i = 0; i < c.comms.channels.size(); i++)
+        if (c.comms.channels[i].with == with) {
+            w.Emit(EventType::CommsClosed, "Channel to " + c.comms.channels[i].withName + " closed", with, -1, 0.0, 0.0, c.id);
+            c.comms.channels.erase(c.comms.channels.begin() + i);
+            return;
+        }
 }
 
 void UpdateComms(World &w, Captain &c)
 {
     CommsState &cs = c.comms;
-    if (cs.log.size() > 40) cs.log.erase(cs.log.begin(), cs.log.end() - 40);
-    if (!cs.with.valid()) return;
-    auto list = CommsInRange(w, c);
-    if (cs.with.system == c.loaded.index && FindContact(list, cs.with)) return;
-    // Out of range, or the system unloaded under us
-    w.Emit(EventType::CommsLost, "Lost signal with " + cs.withName, cs.with, -1, 0.0, 0.0, c.id);
-    cs.with = {};
+    if (cs.channels.empty()) return;
+    // The system unloaded under us: out of range of everyone in it
+    if (cs.channels[0].with.system != c.loaded.index) {
+        std::string who = cs.channels.size() == 1 ? cs.channels[0].withName : TextFormat("%d channels", (int)cs.channels.size());
+        w.Emit(EventType::CommsLost, "Lost signal with " + who, cs.channels[0].with, -1, 0.0, 0.0, c.id);
+        cs.channels.clear();
+        return;
+    }
+    // Replies that have just come in. Ones that took a while are worth a word: the comms window may be shut.
+    for (CommsChannel &ch : cs.channels) {
+        bool tell = false;
+        for (CommsMsg &m : ch.log) {
+            if (m.ours || m.told || m.at > w.clock) continue;
+            m.told = true;
+            if (m.at - m.sent > 5.0) tell = true;
+        }
+        if (tell) w.Emit(EventType::Notice, ch.withName + " has replied  -  F for comms", ch.with, -1, 0.0, 0.0, c.id);
+    }
 }

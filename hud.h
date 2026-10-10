@@ -14,4 +14,4 @@ Aim  DrawNavOverlay(const GameState &g, const Ship &eye, const ViewState &v, con
                     HudState &hud, bool infoOpen, float frameDt);
 
 // Ship status (left), navigation (right), reticle, interaction prompt, key help
-void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool tradeOpen, bool showHelp, bool online = false);
+void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool tradeOpen, bool commsOpen, bool showHelp, bool online = false);

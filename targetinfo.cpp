@@ -43,9 +43,20 @@ static void AddListRows(std::vector<InfoRow> &rows, const char *label, const std
 }
 
 // One line for the hover panel: what kind of world, and who lives there
-std::string WorldSummary(const Body &b)
+const char *BasicKind(const Body &b)
+{
+    switch (b.kind) {
+    case Kind::Star:    return "Star";
+    case Kind::Station: return "Station";
+    case Kind::Moon:    return "Moon";
+    default:            return b.dwarf ? "Dwarf planet" : b.giant ? "Giant planet" : "Rocky planet";
+    }
+}
+
+std::string WorldSummary(const Body &b, bool known)
 {
     if (b.kind == Kind::Star) return b.type;
+    if (!known) return std::string(BasicKind(b)) + "  -  unscanned";
     std::string s = b.type;
     if (b.population > 0)      s += "  -  pop " + FormatPopulation(b.population);
     else if (b.lifeLevel > 0)  s += "  -  native life";
@@ -69,7 +80,8 @@ static std::string SystemKind(const StarSystem &s)
 }
 
 // Rows for a star, from its StarInfo; 'L' adds what's only known once the system is loaded
-static std::vector<InfoRow> StarRows(const StarSystem &s, const StarInfo &st, const LoadedSystem *L)
+static std::vector<InfoRow> StarRows(const StarSystem &s, const StarInfo &st, const LoadedSystem *L, bool charted = false,
+                                     const FactionSet *factions = nullptr)
 {
     std::vector<InfoRow> rows = {
         { "Type",        StarDescription(st) },
@@ -84,6 +96,7 @@ static std::vector<InfoRow> StarRows(const StarSystem &s, const StarInfo &st, co
         { "Habitable zone", s.hzOut < 0.01 * AU_U ? TextFormat("%s - %s km", Thousands(s.hzIn / KM_U).c_str(), Thousands(s.hzOut / KM_U).c_str())
                                                   : TextFormat("%.2f - %.2f AU", s.hzIn / AU_U, s.hzOut / AU_U) },
         { "Human presence", s.develop >= 0.75f ? "Core systems" : s.develop >= 0.3f ? "Settled space" : s.develop > 0.0f ? "Frontier" : "None - uncharted" } };
+    if (factions && s.develop > 0.0f) rows.push_back({ "Ruled by", factions->Name(s.ruler, "Nobody - unclaimed space") });
     if (L) {
         int planets = 0, dwarfs = 0, belts = 0, life = 0, stations = 0; double pop = 0;
         for (const Body &o : L->bodies) {
@@ -93,9 +106,15 @@ static std::vector<InfoRow> StarRows(const StarSystem &s, const StarInfo &st, co
         }
         for (const Zone &z : L->zones) if (!z.ring) belts++;
         rows.push_back({ "Planets", TextFormat("%d   (%d dwarf, %d belt%s)", planets, dwarfs, belts, belts == 1 ? "" : "s") });
-        rows.push_back({ "Stations", TextFormat("%d", stations) });
-        rows.push_back({ "Worlds with life", TextFormat("%d", life) });
-        rows.push_back({ "Population", pop > 0 ? FormatPopulation(pop) : "None" });
+        if (charted) {
+            rows.push_back({ "Stations", TextFormat("%d", stations) });
+            rows.push_back({ "Worlds with life", TextFormat("%d", life) });
+            rows.push_back({ "Population", pop > 0 ? FormatPopulation(pop) : "None" });
+        } else {
+            rows.push_back({ "Survey", "No charts of this system" });
+            rows.push_back({ "", "Hail someone who lives here," });
+            rows.push_back({ "", "or scan its worlds yourself" });
+        }
     } else {
         rows.push_back({ "Planets", "Unknown - not yet in range" });
     }
@@ -103,9 +122,11 @@ static std::vector<InfoRow> StarRows(const StarSystem &s, const StarInfo &st, co
 }
 
 // Economy, exports and imports of an inhabited world or station
-static void AddEconomyRows(std::vector<InfoRow> &rows, const Body &b)
+static void AddEconomyRows(std::vector<InfoRow> &rows, const Body &b, const FactionSet &factions)
 {
-    if (b.population <= 0 || b.econ == Econ::None) return;
+    if (b.population <= 0) return;
+    rows.push_back({ "Run by", factions.Name(b.owner, b.kind == Kind::Station ? "Itself - an independent station" : "Its own people") });
+    if (b.econ == Econ::None) return;
     Market m = MakeMarket(b);
     rows.push_back({ "Economy", EconName(b.econ) });
     std::string ex = ExportsLine(m, 99), im = ImportsLine(m, 99);
@@ -114,17 +135,27 @@ static void AddEconomyRows(std::vector<InfoRow> &rows, const Body &b)
     rows.push_back({ "Fuel", TextFormat("%.0f cr/t", m.fuelPrice) });
 }
 
-static std::vector<InfoRow> StationRows(const LoadedSystem &L, const Body &b)
+// How to get the rest: shown in place of what an unscanned body's rows would say
+static void AddUnscannedRows(std::vector<InfoRow> &rows, const Body &b)
+{
+    double range = fmax(SCAN_RADII * b.radius, SCAN_MIN);
+    rows.push_back({ "Survey", "Not scanned" });
+    rows.push_back({ "", "Fly within " + FormatPlanetDist(range) + " to scan it," });
+    rows.push_back({ "", "or get charts from someone here" });
+}
+
+static std::vector<InfoRow> StationRows(const LoadedSystem &L, const Body &b, bool known, const FactionSet &factions)
 {
     const Body &host = L.bodies[b.parent];
     std::vector<InfoRow> rows = {
-        { "Type", b.type },
+        { "Type", known ? b.type : std::string(BasicKind(b)) },
         { "Orbit", host.kind == Kind::Star ? TextFormat("%.2f AU from %s", b.orbit / AU_U, host.name.c_str())
                                            : TextFormat("%s km from %s", Thousands(b.orbit / KM_U).c_str(), host.name.c_str()) },
-        { "Size", TextFormat("%.1f km across", 2.0 * b.radius / KM_U) },
-        { "Spin gravity", TextFormat("%.2f g", b.gravity) },
-        { "Population", FormatPopulation(b.population) } };
-    AddEconomyRows(rows, b);
+        { "Size", TextFormat("%.1f km across", 2.0 * b.radius / KM_U) } };
+    if (!known) { AddUnscannedRows(rows, b); return rows; }
+    rows.push_back({ "Spin gravity", TextFormat("%.2f g", b.gravity) });
+    rows.push_back({ "Population", FormatPopulation(b.population) });
+    AddEconomyRows(rows, b, factions);
     return rows;
 }
 
@@ -135,11 +166,12 @@ static std::vector<InfoRow> BodyRows(const World &w, const Captain &c, int bi)
     const Body &b = L.bodies[bi];
     std::vector<InfoRow> rows;
     if (b.kind == Kind::Star) {
-        rows = StarRows(S, S.stars[bi], &L);                     // stars come first, in StarSystem order
+        rows = StarRows(S, S.stars[bi], &L, c.know.charted.count(L.index) > 0, &w.systems.factions);   // stars come first, in StarSystem order
         if (bi > 0) rows.insert(rows.begin() + 1, { "Orbit", TextFormat("%.2f AU from %s", b.orbit / AU_U, L.bodies[0].name.c_str()) });
         return rows;
     }
-    if (b.kind == Kind::Station) return StationRows(L, b);
+    const bool known = Known(c, bi);
+    if (b.kind == Kind::Station) return StationRows(L, b, known, w.systems.factions);
     const Body &host = b.kind == Kind::Moon ? L.bodies[b.parent] : L.bodies[0];
     double period;
     if (b.kind == Kind::Planet) {
@@ -149,6 +181,16 @@ static std::vector<InfoRow> BodyRows(const World &w, const Captain &c, int bi)
     } else {
         double a = b.orbit * METERS_PER_UNIT;
         period = 2.0 * PI * sqrt(a * a * a / (G_SI * BodyMassKg(host)));
+    }
+    if (!known) {
+        // From afar: what it is, how big it looks, and where it goes
+        rows = { { "Type", b.kind == Kind::Moon ? std::string("Moon of ") + host.name : std::string(BasicKind(b)) },
+                 { "Radius", TextFormat("%s km  (%.2f Earth)", Thousands(b.radius / KM_U).c_str(), b.radius / KM_U / REARTH_KM) },
+                 { "Orbit", b.kind == Kind::Planet ? TextFormat("%.2f AU%s", b.orbit / AU_U, b.inHZ ? "  (habitable zone)" : "")
+                                                   : TextFormat("%s km", Thousands(b.orbit / KM_U).c_str()) },
+                 { "Orbital period", FormatPeriod(period) } };
+        AddUnscannedRows(rows, b);
+        return rows;
     }
     rows = { { "Type", b.kind == Kind::Moon ? b.type + " of " + host.name : b.type },
              { "Mass", b.massEarth >= 0.01 ? TextFormat("%.2f Earth", b.massEarth) : TextFormat("%.5f Earth", b.massEarth) },
@@ -181,7 +223,7 @@ static std::vector<InfoRow> BodyRows(const World &w, const Captain &c, int bi)
         rows.push_back({ "Stations", TextFormat("%d", (int)stations.size()) });
         for (const std::string &sn : stations) rows.push_back({ "", "  " + sn });
     }
-    AddEconomyRows(rows, b);
+    AddEconomyRows(rows, b, w.systems.factions);
     return rows;
 }
 
@@ -229,7 +271,7 @@ std::vector<InfoRow> TargetInfo(const World &w, const Captain &c, TargetId t)
     switch (t.type) {
     case TargetId::Star:
         if (!w.systems.Exists(t.system)) return {};
-        return StarRows(w.systems[t.system], w.systems[t.system].stars[0], nullptr);
+        return StarRows(w.systems[t.system], w.systems[t.system].stars[0], nullptr, false, &w.systems.factions);
     case TargetId::Body:
         if (!TargetBody(c, t)) return {};
         return BodyRows(w, c, t.index);

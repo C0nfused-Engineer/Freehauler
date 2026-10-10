@@ -183,8 +183,28 @@ void Server::Tick()
     if (tick % SNAPSHOT_EVERY == 0)
         for (auto &p : peers) {
             if (!p->joined || p->remove) continue;
-            std::vector<uint8_t> comms = MsgComms(p->cap.comms);
-            if (comms != p->commsSent) { p->conn.Send(comms); p->commsSent = std::move(comms); }
+            if (p->cap.standing != p->standingSent) {
+                Writer w;
+                w.U8(MSG_STANDING);
+                w.U8((uint8_t)std::min<size_t>(p->cap.standing.size(), 255));
+                for (size_t i = 0; i < p->cap.standing.size() && i < 255; i++) w.F32(p->cap.standing[i]);
+                p->conn.Send(w.buf);
+                p->standingSent = p->cap.standing;
+            }
+            // Each channel that has changed since it was last sent, and word of the ones that have closed
+            std::vector<std::pair<TargetId, std::vector<uint8_t>>> now;
+            for (const CommsChannel &ch : p->cap.comms.channels) now.push_back({ ch.with, MsgComms(ch) });
+            for (const auto &was : p->commsSent) {
+                bool still = false;
+                for (const auto &is : now) if (is.first == was.first) still = true;
+                if (!still) { CommsChannel gone; gone.with = was.first; p->conn.Send(MsgComms(gone, false)); }
+            }
+            for (const auto &is : now) {
+                bool same = false;
+                for (const auto &was : p->commsSent) if (was.first == is.first && was.second == is.second) same = true;
+                if (!same) p->conn.Send(is.second);
+            }
+            p->commsSent = std::move(now);
         }
 
     for (auto &p : peers)
@@ -328,7 +348,7 @@ void Server::Join(Peer &p, const std::string &name)
     p.joined = true;
     NewCaptain(world, p.cap, nextId++, name);
     Player saved;
-    bool returning = LoadPlayer(name, saved);
+    bool returning = LoadPlayer(name, saved, p.cap.standing);
     if (returning) {
         p.cap.player = saved;
         p.cap.loaded = LoadedSystem();
@@ -502,11 +522,13 @@ bool Server::SavePlayer(const Captain &c)
     text += TextFormat("fuel %.17g\ncredits %.17g\n", p.fuel, p.credits);
     for (int o = 0; o < GOOD_COUNT; o++)
         if (p.cargo[o] > 0.0) text += TextFormat("cargo %d %.17g\n", o, p.cargo[o]);
+    for (size_t i = 0; i < c.standing.size(); i++)
+        if (c.standing[i] != 0.0f) text += TextFormat("standing %d %.9g\n", (int)i, c.standing[i]);
     text += "end\n";
     return WriteFileSafely(PlayerPath(c.name), text);
 }
 
-bool Server::LoadPlayer(const std::string &name, Player &out)
+bool Server::LoadPlayer(const std::string &name, Player &out, std::vector<float> &standing)
 {
     FILE *f = fopen(PlayerPath(name).c_str(), "r");
     if (!f) return false;
@@ -528,6 +550,7 @@ bool Server::LoadPlayer(const std::string &name, Player &out)
             else if (sscanf(line, "fuel %lf", &p.fuel) == 1) {}
             else if (sscanf(line, "credits %lf", &p.credits) == 1) {}
             else if (sscanf(line, "cargo %d %lf", &ore, &t) == 2) { if (ore >= 0 && ore < GOOD_COUNT) p.cargo[ore] = t; }
+            else if (sscanf(line, "standing %d %lf", &ore, &t) == 2) { if (ore >= 0 && ore < (int)standing.size()) standing[ore] = (float)t; }
             else if (!strncmp(line, "end", 3)) { ended = true; break; }
         }
     fclose(f);

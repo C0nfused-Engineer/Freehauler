@@ -15,6 +15,7 @@
 // outposts, and beyond that nobody at all.
 #pragma once
 #include "core.h"
+#include "factions.h"
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -122,6 +123,7 @@ struct Body {
     int    parent = -1;      // body it belongs to: planets -> star, moons -> planet
     double orbit  = 0.0;     // orbital radius around the parent
     uint64_t id   = 0;       // the same for this body in every session: markets and missions key on it
+    int    owner  = NO_FACTION;   // the faction that runs it (inhabited places; set when the system loads). NO_FACTION: its own.
 
     // Description (filled in by the world / star generators)
     double massSolar  = 0.0; // stars: mass in Suns
@@ -190,6 +192,7 @@ struct StarSystem {
     double   age = 4.5;              // billions of years
     double   metal = 0.0;            // heavy elements, [Fe/H]: 0 = the Sun's, -1 = a tenth of it
     float    develop = 0.0f;         // human presence: 1 at home, 0 outside the bubble
+    int      ruler = NO_FACTION;     // the government whose space this is (NO_FACTION: unclaimed)
     bool     named = false;          // has a proper name (otherwise a catalogue number)
 };
 
@@ -209,8 +212,9 @@ class Galaxy {
 public:
     unsigned seed = DEFAULT_GALAXY_SEED;
     SysId    home = NO_SYSTEM;       // where new captains start, and the middle of human space
+    FactionSet factions;             // the states, companies, guilds and clans of human space (factions.h)
 
-    void Init(unsigned seed);        // a new galaxy: finds the home system
+    void Init(unsigned seed);        // a new galaxy: finds the home system, and who holds the space around it
 
     bool              Exists(SysId id) const { return Find(id) != nullptr; }
     const StarSystem *Find(SysId id) const;
@@ -239,6 +243,7 @@ private:
 };
 
 SysId CellId(int cx, int cy, int cz);                        // NO_SYSTEM if outside the grid
+uint64_t CellHashOf(unsigned seed, const StarSystem &s);     // the hash its cell was made from (the one TerritoryRuler takes)
 void  IdCell(SysId id, int &cx, int &cy, int &cz);
 
 // Systems per cubic light year at a galactic position (light years from the center; y is up out of the disk)

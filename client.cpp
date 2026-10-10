@@ -175,19 +175,31 @@ void NetClient::HandleMessage(GameState &g, const std::vector<uint8_t> &msg)
         if (r.ok) g.events.push_back(e);
         return;
     }
+    case MSG_STANDING: {
+        uint8_t n = r.U8();
+        std::vector<float> s;
+        for (int i = 0; i < n && r.ok; i++) s.push_back(r.F32());
+        if (r.ok) g.standing = s;
+        return;
+    }
     case MSG_COMMS: {
-        CommsState c;
+        CommsChannel c;
         c.with = ReadTarget(r);
+        bool open = r.U8() != 0;
         c.withName = r.Str();
         uint8_t n = r.U8();
         for (int i = 0; i < n && r.ok; i++) {
             CommsMsg m;
+            m.sent = r.F64();
             m.at   = r.F64();
             m.ours = r.U8() != 0;
             m.text = r.Str();
             c.log.push_back(m);
         }
-        if (r.ok) g.comms = c;
+        if (!r.ok) return;
+        std::vector<CommsChannel> &all = g.comms.channels;
+        all.erase(std::remove_if(all.begin(), all.end(), [&](const CommsChannel &o) { return o.with == c.with; }), all.end());
+        if (open) all.push_back(c);
         return;
     }
     case MSG_JOINED: {

@@ -10,6 +10,7 @@
 static void LoadSystem(World &w, Captain &c, SysId i)
 {
     GenerateSystemContents(w.systems[i], c.loaded);
+    AssignOwners(w.systems.factions, w.systems[i], c.loaded);
     c.loaded.index = i;
     TraceLog(LOG_INFO, "SYSTEM: loaded %s (%d bodies)", w.systems[i].name.c_str(), (int)c.loaded.bodies.size());
     w.Emit(EventType::SystemLoaded, "", TargetId::MakeStar(i), -1, 0.0, 0.0, c.id);
@@ -49,6 +50,7 @@ void NewCaptain(World &w, Captain &c, int id, const std::string &name)
     Ship &ship = c.player.ship;
     const SysId home = w.systems.home;
     c.know.charted.insert(home);                             // everyone knows their own home
+    c.standing.assign(w.systems.factions.Count(), 0.0f);     // ...and starts as nobody's friend or enemy
     ship.anchor = home;
     LoadSystem(w, c, home);
 
@@ -102,14 +104,13 @@ void UpdateKnowledge(World &w, Captain &c)
 {
     if (c.loaded.index < 0 || c.know.charted.count(c.loaded.index)) return;
     // Anyone who has answered a hail sends their charts along
-    if (c.comms.with.valid() && c.comms.with.system == c.loaded.index)
-        for (const CommsMsg &m : c.comms.log)
-            if (!m.ours && m.at <= w.clock) {
-                c.know.charted.insert(c.loaded.index);
-                w.Emit(EventType::Notice, c.comms.withName + " sent charts of the " + w.systems[c.loaded.index].name + " system",
-                       {}, -1, 0.0, 0.0, c.id);
-                return;
-            }
+    for (const CommsChannel &ch : c.comms.channels)
+        if (ch.with.system == c.loaded.index && CommsAnswered(w, c, ch.with)) {
+            c.know.charted.insert(c.loaded.index);
+            w.Emit(EventType::Notice, ch.withName + " sent charts of the " + w.systems[c.loaded.index].name + " system",
+                   {}, -1, 0.0, 0.0, c.id);
+            return;
+        }
     // Otherwise it's what the ship's own sensors pick up in passing
     for (int bi = 0; bi < (int)c.loaded.bodies.size(); bi++) {
         const Body &b = c.loaded.bodies[bi];

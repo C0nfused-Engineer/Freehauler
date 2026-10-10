@@ -13,6 +13,7 @@
 //   mined <rock id> <ore left>       (one line per rock you've mined)
 //   charted <system>                 (one line per system you have charts of)
 //   scanned <body id>                (one line per world you've scanned yourself)
+//   standing <faction> <-100..100>   (one line per faction you have any standing with)
 //   end
 // Unknown keys are ignored, so newer saves still partly load in older builds.
 #include "save.h"
@@ -61,6 +62,7 @@ bool SaveGame(const GameState &g, const char *path, const std::string &name)
         fprintf(f, "mined %llu %.9g\n", (unsigned long long)m.first, m.second);
     for (int64_t sys : g.know.charted) fprintf(f, "charted %lld\n", (long long)sys);
     for (uint64_t id : g.know.scanned) fprintf(f, "scanned %llu\n", (unsigned long long)id);
+    for (size_t i = 0; i < g.standing.size(); i++) if (g.standing[i] != 0.0f) fprintf(f, "standing %d %.9g\n", (int)i, g.standing[i]);
     fprintf(f, "end\n");
     bool ok = !ferror(f);
     fclose(f);
@@ -85,6 +87,7 @@ bool LoadGame(GameState &g, const char *path)
     Player   p;
     MinedMap mined;
     Knowledge know;
+    std::vector<std::pair<int, float>> standing;
     bool     haveShip = false, ended = false;
     while (fgets(line, sizeof line, f)) {
         char key[32] = "";
@@ -111,6 +114,9 @@ bool LoadGame(GameState &g, const char *path)
         } else if (!strcmp(key, "charted")) {
             long long sys;
             if (sscanf(rest, "%lld", &sys) == 1) know.charted.insert(sys);
+        } else if (!strcmp(key, "standing")) {
+            int id; float v;
+            if (sscanf(rest, "%d %f", &id, &v) == 2) standing.push_back({ id, v });
         } else if (!strcmp(key, "scanned")) {
             unsigned long long id;
             if (sscanf(rest, "%llu", &id) == 1) know.scanned.insert((uint64_t)id);
@@ -127,6 +133,7 @@ bool LoadGame(GameState &g, const char *path)
     fresh.deltas.mined  = std::move(mined);
     fresh.know.charted.insert(know.charted.begin(), know.charted.end());   // (on top of home, which a new game already has)
     fresh.know.scanned  = std::move(know.scanned);
+    for (const auto &s : standing) if (s.first >= 0 && s.first < (int)fresh.standing.size()) fresh.standing[s.first] = s.second;
     fresh.loaded        = LoadedSystem();          // reload around the saved position
     fresh.field         = AsteroidField();
     UpdateLoadedSystem(fresh);

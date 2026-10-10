@@ -1,5 +1,6 @@
 // hud.cpp - the 2D overlay
 #include "hud.h"
+#include "comms.h"
 #include "economy.h"
 #include "format.h"
 #include "theme.h"
@@ -200,7 +201,7 @@ Aim DrawNavOverlay(const GameState &g, const Ship &eye, const ViewState &v, cons
 // ---------------------------------------------------------------------------
 // HUD readouts
 // ---------------------------------------------------------------------------
-void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool tradeOpen, bool showHelp, bool online)
+void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool tradeOpen, bool commsOpen, bool showHelp, bool online)
 {
     const FlightState &f = g.flight;
     const Player &p = g.player;
@@ -289,7 +290,11 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
         const StarSystem &s = systems[g.loaded.index];
         DVec3  sp = FromShip(systems, eye, g.loaded.index) * -1.0;
         double h = Dot(sp, s.n), r = Len(sp - s.n * h);
-        DrawText(TextFormat("SYSTEM  %s", s.name.c_str()), x, y, 20, HUD);                              y += 26;
+        DrawText(TextFormat("SYSTEM  %s", s.name.c_str()), x, y, 20, HUD);                              y += 24;
+        if (const Faction *ruler = systems.factions.Get(s.ruler)) DrawText(ruler->name.c_str(), x, y, 16, ruler->color);
+        else if (s.develop > 0.0f)                                DrawText("Unclaimed space", x, y, 16, HUD_DIM);
+        else                                                      DrawText("Uncharted", x, y, 16, HUD_DIM);
+        y += 20;
         DrawText(TextFormat("GAL  %.1f  %.1f  %.1f ly", galPos.x, galPos.y, galPos.z), x, y, 16, HUD_DIM); y += 20;
         DrawText(TextFormat("SYS  r %.2f AU   h %+.2f AU", r / AU_U, h / AU_U), x, y, 16, HUD_DIM);        y += 24;
     } else {
@@ -320,6 +325,37 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
                          x, y, 18, z.color.r > 150 ? z.color : Color{ 200, 185, 160, 255 });
                 y += 22;
             }
+    }
+
+    // Comms in flight: one line per reply on its way, with a blip that goes out to them and comes back
+    // (on the left, under the ship's readouts, where the comms window goes when it's open: it shows the same itself)
+    if (!commsOpen) {
+        std::vector<CommsFlight> flights = CommsInFlight(g, g);
+        if (!flights.empty()) {
+            const int SHOWN = 4, BAR = 110;
+            int x = 20, y = 250;
+            DrawRectangle(x - 6, y - 6, 400, 30 + 20 * std::min((int)flights.size(), SHOWN) + ((int)flights.size() > SHOWN ? 18 : 0), Fade(BLACK, 0.6f));
+            DrawText(TextFormat("COMMS  -  %d in flight", (int)flights.size()), x, y, 16, HUD_LABEL);
+            y += 22;
+            for (int i = 0; i < (int)flights.size() && i < SHOWN; i++, y += 20) {
+                const CommsFlight &fl = flights[i];
+                float p = Clamp((float)fl.Progress(g.clock), 0.0f, 1.0f);
+                bool  out = p < 0.5f;                                 // our request is still on its way there
+                std::string name = fl.name;
+                while (name.size() > 4 && MeasureText(name.c_str(), 16) > 170) name = name.substr(0, name.size() - 4) + "...";
+                DrawText(name.c_str(), x, y, 16, out ? HUD_LABEL : HUD);
+                int bx = x + 180, by = y + 8;
+                DrawLine(bx, by, bx + BAR, by, HUD_DIM);
+                DrawRectangle(bx - 2, by - 4, 3, 9, HUD);                                  // us
+                DrawRectangle(bx + BAR, by - 4, 3, 9, HUD_DIM);                            // them
+                float at = out ? p * 2.0f : 2.0f - p * 2.0f;                               // 0 here .. 1 there
+                int   mx = bx + (int)(at * BAR);
+                if (out) DrawTriangle({ mx + 5.0f, (float)by }, { mx - 3.0f, by - 4.0f }, { mx - 3.0f, by + 4.0f }, HUD_LABEL);
+                else     DrawTriangle({ mx - 5.0f, (float)by }, { mx + 3.0f, by + 4.0f }, { mx + 3.0f, by - 4.0f }, HUD);
+                DrawText(FormatETA(fl.at - g.clock).c_str(), bx + BAR + 12, y, 16, out ? LIGHTGRAY : HUD);
+            }
+            if ((int)flights.size() > SHOWN) { DrawText(TextFormat("+ %d more", (int)flights.size() - SHOWN), x, y, 14, HUD_DIM); y += 18; }
+        }
     }
 
     // Attitude: an artificial horizon against the system's ecliptic, or the galactic plane between the stars
@@ -357,18 +393,19 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
     // Interaction prompt
     if (!tradeOpen && f.nearBody >= 0 && f.nearBody < (int)g.loaded.bodies.size()) {
         const Body &b = g.loaded.bodies[f.nearBody];
-        std::string pr = b.population > 0 ? "[F] Trade at " + b.name + "  -  " + SettlementName(b.settlement)
-                                          : b.name + "  -  uninhabited";
+        std::string pr = b.population <= 0 ? b.name + "  -  uninhabited"
+                       : CanTradeOverComms(g)  ? "[F] Comms with " + b.name + "  -  3 to trade"
+                                               : "[F] Hail " + b.name + " to trade  -  " + SettlementName(b.settlement);
         int w = MeasureText(pr.c_str(), 20);
         DrawRectangle(sw / 2 - w / 2 - 10, sh - 104, w + 20, 30, Fade(BLACK, 0.7f));
         DrawText(pr.c_str(), sw / 2 - w / 2, sh - 99, 20, b.population > 0 ? HUD : GRAY);
     }
 
     if (showHelp) {
-        const char *help = online ? "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  C comms  M map  O orbits  "
-                                    "MMB info  F trade  LMB mine  ESC menu"
-                                  : "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  C comms  M map  O orbits  "
-                                    "MMB info  F trade  LMB mine  F5/F9 quicksave/load  ESC menu";
+        const char *help = online ? "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  M map  R factions  O orbits  "
+                                    "MMB info  F hail / comms  LMB mine  ESC menu"
+                                  : "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  M map  R factions  O orbits  "
+                                    "MMB info  F hail / comms  LMB mine  F5/F9 quicksave/load  ESC menu";
         int size = 16;
         while (size > 10 && MeasureText(help, size) > sw - 40) size--;          // shrink to fit narrow windows
         DrawText(help, 20, sh - 14 - size, size, HUD_DIM);

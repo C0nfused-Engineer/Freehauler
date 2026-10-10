@@ -12,7 +12,7 @@
 //                                be a dedicated server in this console (what Multiplayer >
 //                                Host starts in a window of its own; options: server_console.cpp)
 //   freehauler --test [name]    run the headless tests (fuel, flight, trade, stations, hz, skimming, comms,
-//                                galaxy, systems, maps, targeting, mining, save, protocol, net, host)
+//                                galaxy, systems, maps, factions, targeting, mining, save, protocol, net, host)
 //   freehauler --script tour    scripted run in the window that saves screenshots
 //                                (also: stations - a look at each kind of station; menus; mainmenu)
 //   freehauler --bot HOST[:PORT] [--name N] [--seconds S] [--idle]
@@ -22,6 +22,8 @@
 //   core.h          units, DVec3, hashing / random numbers
 //   format          numbers -> HUD text
 //   goods.h         ores (later: the commodity table)
+//   factions        the states, conglomerates, guilds and pirate clans of human space, their
+//                   characters and agendas - generated from the seed
 //   galaxy          the galaxy (full size, made a sector at a time), its stars, systems, worlds,
 //                   belts and rings - all generated from the seed
 //   asteroids       rocks streamed in around the ship
@@ -54,10 +56,12 @@
 //   W / S        throttle up / down   A / D      yaw left / right
 //   Shift (hold) hyper (in a system) / warp (between systems)
 //   W + S        all stop (throttle to zero)     Caps Lock  toggle inertial dampeners
-//   C            communications       O          toggle orbit rings
+//   F            comms: hail whoever the nose is on (or you're docked beside), else list
+//                everyone in the system (C: the list)      O   toggle orbit rings
+//   R            the factions: who they are, what they want, where you stand
 //   M            map: the system you're in (list its worlds, pick one to set course); M again,
 //                or M between the stars, for the sector map of nearby systems
-//   MMB or I     info on the target   F          trade (near an inhabited world or station)
+//   MMB or I     info on the target   3 (on a channel, in docking range)   trade
 //   LMB (hold)   mining laser         F5 / F9    quick save / quick load (single player)
 //   Esc          close the top window, or pause (save, load, settings, main menu, exit)
 //
@@ -100,11 +104,14 @@
 //   hold LMB. What a rock holds depends on its belt: metallic, stony,
 //   carbonaceous, mixed, or (rings) ices. Dip below a quarter radius above a
 //   gas giant's cloud tops (not in hyper) to skim helium-3.
-//   Within 2 radii of an inhabited world, or 20 km of a station, F opens its
-//   market: every economy exports some goods cheap and imports others dear;
-//   haul from one to the other. In the market, W/S select, D buys, A sells
-//   (Shift: as much as you can). C lists inhabited worlds and stations within
-//   3 light seconds; replies take the light-speed round trip.
+//   Everything with people starts on the comms. F hails the world or station
+//   the nose is on (or the one you're docked beside); anyone in the system can
+//   be raised, but a reply takes the light-speed round trip - seconds from
+//   close by, hours from the far side of a big system. On a channel: 1 asks
+//   for prices, 2 for local information, and within 2 radii of a world or
+//   20 km of a station, 3 opens trade. Every economy exports some goods cheap
+//   and imports others dear; haul from one to the other. In the market, W/S
+//   select, D buys, A sells (Shift: as much as you can).
 //
 // Scale: 1 world unit = 5 m. Planets, stars and distances are realistic.
 
@@ -339,7 +346,7 @@ static bool PlaySession(InputSource &input, ScriptedInput *script, const RenderA
         SceneInfo scene;
         DrawScene(g, eye, view, assets, paused ? 0.0f : frameDt, scene);
         aim = DrawNavOverlay(g, eye, view, scene, hud, ui.Has(WindowKind::Info), frameDt);
-        DrawHud(g, eye, view, ui.Has(WindowKind::Market), ui.settings.showHelp, ui.online);
+        DrawHud(g, eye, view, ui.Has(WindowKind::Market), ui.Has(WindowKind::Comms), ui.settings.showHelp, ui.online);
         ui.Draw(g);
         if (net) {
             int sw = GetScreenWidth(), sh = GetScreenHeight();

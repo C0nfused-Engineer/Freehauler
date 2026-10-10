@@ -42,6 +42,14 @@ static int TradeWorld(const Captain &c)
     return -1;
 }
 
+// Somewhere else in the loaded system with people to talk to
+static int TradeWorldOther(const Captain &c, int notThis)
+{
+    for (int i = 0; i < (int)c.loaded.bodies.size(); i++)
+        if (i != notThis && c.loaded.bodies[i].population > 0) return i;
+    return -1;
+}
+
 static void Face(const World &w, Captain &c, DVec3 dir)
 {
     const StarSystem &home = w.systems[c.player.ship.anchor];
@@ -404,25 +412,89 @@ static void TestComms()
     Run(g, 0.05);
     auto list = CommsInRange(g);
     const CommsContact *cc = FindContact(list, TargetId::MakeBody(H, c));
-    CHECK(cc, "%s is in comms range (%.2f ls)", b.name.c_str(), cc ? cc->dist / LIGHT_SEC_U : 0.0);
+    int everyone = 0;
+    for (const Body &o : g.loaded.bodies) if (o.population > 0) everyone++;
+    CHECK(cc && (int)list.size() == everyone && everyone > 3 && list.back().dist > 10.0 * LIGHT_SEC_U,
+          "comms reach all %d inhabited places in the system (%s: %.2f ls; the farthest: %.0f ls)", everyone, b.name.c_str(),
+          cc ? cc->dist / LIGHT_SEC_U : 0.0, list.back().dist / LIGHT_SEC_U);
     if (!cc) return;
     double rt = 2.0 * cc->dist / LIGHT_SEC_U;
+    const TargetId WITH = TargetId::MakeBody(H, c);
     Hail(g, c);
-    CHECK(g.comms.with == TargetId::MakeBody(H, c) && CommsWaiting(g), "hailing: reply on its way");
+    CHECK(g.comms.Find(WITH) && CommsWaiting(g, g, WITH) && CommsInFlight(g, g).size() == 1, "hailing: reply on its way");
     Run(g, rt + 0.5);
-    CHECK(CommsWaiting(g), "no reply before the round trip (%.2f s) + 0.6 s", rt);
+    CHECK(CommsWaiting(g, g, WITH), "no reply before the round trip (%.2f s) + 0.6 s", rt);
     Run(g, 0.2);
-    CHECK(!CommsWaiting(g), "reply arrived: \"%s\"", g.comms.log.back().text.c_str());
-    RequestMarketReport(g);
-    size_t n = g.comms.log.size();
-    RequestLocalInfo(g);
-    CHECK(g.comms.log.size() == n, "only one request at a time");
+    CHECK(!CommsWaiting(g, g, WITH) && CommsInFlight(g, g).empty(), "reply arrived: \"%s\"", g.comms.Find(WITH)->log.back().text.c_str());
+    Hail(g, c);
+    CHECK(g.comms.channels.size() == 1 && g.comms.channels[0].log.size() == 2, "hailing someone you're already talking to does nothing");
+
+    // Requests don't wait for each other, on one channel or across several
+    RequestMarketReport(g, c);
+    RequestLocalInfo(g, c);
+    const CommsContact far0 = CommsInRange(g).back();
+    Hail(g, far0.body);
+    std::vector<CommsFlight> flights = CommsInFlight(g, g);
+    CHECK(flights.size() == 3 && g.comms.channels.size() == 2 && flights[0].with == WITH && flights[2].with == TargetId::MakeBody(H, far0.body) &&
+          flights[2].at - g.clock > 100.0 * (flights[0].at - g.clock),
+          "three requests in flight at once on two channels: replies due in %.1f s, %.1f s and %s",
+          flights[0].at - g.clock, flights[1].at - g.clock, FormatETA(flights[2].at - g.clock).c_str());
+    double half = 0.5 * (flights[2].at - flights[2].sent);
+    CHECK(flights[2].Progress(g.clock) < 0.01 && flights[2].Progress(g.clock + half * 0.9) < 0.5 && flights[2].Progress(g.clock + half * 1.1) > 0.5,
+          "a flight's progress: outbound for the first half of the wait, inbound for the second");
+    Run(g, rt + 1.5);
+    CHECK(CommsInFlight(g, g).size() == 1 && g.comms.Find(WITH)->log.size() > 6, "the near replies are in; the far one is still out");
+    HangUp(g, far0.body);
+    CHECK(g.comms.channels.size() == 1 && CommsInFlight(g, g).empty(), "hanging up on the far one leaves the other channel alone");
+
+    // Trade is opened over the channel, once you're in docking range
+    CHECK(CommsAnswered(g, g, WITH) && !CanTradeOverComms(g), "200,000 km out: on the channel, but too far to trade");
+    Park(g, c, 0.9); Run(g, 0.05);
+    CHECK(CanTradeOverComms(g), "0.9 radii up, same channel: trade can be opened");
+    HangUp(g, c);
+    CHECK(!CanTradeOverComms(g), "no channel, no trade");
+
+    // F hails whoever the nose is on, or whoever you're docked beside
+    CHECK(HailTarget(g) == c, "docked and pointing at nothing: F hails %s", b.name.c_str());
+    int station = -1, empty = -1;
+    for (int i = 0; i < (int)g.loaded.bodies.size(); i++) {
+        const Body &o = g.loaded.bodies[i];
+        if (o.kind == Kind::Station && o.parent != c && station < 0) station = i;
+        if (o.kind == Kind::Planet && o.population <= 0 && empty < 0) empty = i;
+    }
+    Aim at; at.hovered = TargetId::MakeBody(H, station);
+    Run(g, 0.05, {}, at);
+    CHECK(HailTarget(g) == station, "pointing at %s: F hails that instead", g.loaded.bodies[station].name.c_str());
+    at.hovered = TargetId::MakeBody(H, empty);
+    Run(g, 0.05, {}, at);
+    CHECK(HailTarget(g) == c, "pointing at somewhere uninhabited: back to who you're docked beside");
+    g.player.ship.pos = b.local + Norm(home.u) * (b.radius + 200000 * KM_U);
+    Run(g, 0.05, {}, at);
+    CHECK(HailTarget(g) == -1, "...and away from everyone, F has nobody to hail (it opens the list)");
+
+    // A hail across the system takes its time
+    const CommsContact far = CommsInRange(g).back();
+    const TargetId FAR = TargetId::MakeBody(H, far.body);
+    Hail(g, far.body);
+    Run(g, 5.0);
+    CHECK(CommsWaiting(g, g, FAR) && !CommsAnswered(g, g, FAR), "hailing %s, %.0f light seconds away: still waiting after 5 s",
+          g.loaded.bodies[far.body].name.c_str(), far.dist / LIGHT_SEC_U);
+    g.clock += 2.0 * far.dist / LIGHT_SEC_U;
     g.events.clear();
-    g.player.ship.pos = b.local + Norm(home.u) * (b.radius + 1000000 * KM_U);
+    Run(g, 0.05);
+    bool said = false;
+    for (auto &e : g.events) if (e.text.find(g.loaded.bodies[far.body].name + " has replied") == 0) said = true;
+    CHECK(CommsAnswered(g, g, FAR) && said, "...and answered once light has made the round trip (%s), with a word to say so",
+          FormatETA(2.0 * far.dist / LIGHT_SEC_U).c_str());
+    Hail(g, c);
+
+    // Leaving the system drops the channel
+    g.events.clear();
+    g.player.ship.pos = home.n * (0.7 * LY_U);
     Run(g, 1.0 / SIM_HZ);
     bool lost = false;
     for (auto &e : g.events) if (e.type == EventType::CommsLost) lost = true;
-    CHECK(lost && !g.comms.with.valid(), "flying out of range drops the channel");
+    CHECK(lost && g.comms.channels.empty(), "leaving the system drops every channel");
 }
 
 static void TestTargeting()
@@ -725,6 +797,31 @@ static void TestMaps()
     CHECK(g.flight.drive.inField && planets >= 3 && known == 0 && deep == 0 && !g.know.charted.count(next->id),
           "arriving at %s: %d planets on the map, none scanned, no moons or stations shown", next->name.c_str(), planets);
 
+    // The info panel and the hover line keep an unscanned world's secrets too
+    auto has = [](const std::vector<InfoRow> &info, const char *label) {
+        for (const InfoRow &r : info) if (r.label == label) return true;
+        return false;
+    };
+    int secret = -1, base = -1;
+    for (int i = 0; i < (int)g.loaded.bodies.size(); i++) {
+        const Body &o = g.loaded.bodies[i];
+        if (o.kind == Kind::Planet && o.population > 0 && secret < 0) secret = i;
+        if (o.kind == Kind::Station && base < 0) base = i;
+    }
+    std::vector<InfoRow> info = TargetInfo(g, TargetId::MakeBody(next->id, secret));
+    std::vector<InfoRow> star = TargetInfo(g, TargetId::MakeBody(next->id, 0));
+    std::string hoverLine = WorldSummary(g.loaded.bodies[secret], Known(g, secret));
+    bool stationHidden = base < 0;
+    if (base >= 0) {
+        std::vector<InfoRow> st = TargetInfo(g, TargetId::MakeBody(next->id, base));
+        stationHidden = has(st, "Survey") && !has(st, "Population") && !has(st, "Economy") && st[0].value == "Station";
+    }
+    CHECK(has(info, "Survey") && has(info, "Orbit") && has(info, "Radius") && !has(info, "Settlement") && !has(info, "Atmosphere") &&
+          !has(info, "Temperature") && !has(info, "Life") && !has(info, "Resources") && !has(info, "Economy") && !has(info, "Moons") &&
+          hoverLine.find("unscanned") != std::string::npos && hoverLine.find("pop") == std::string::npos && stationHidden &&
+          has(star, "Planets") && !has(star, "Population") && !has(star, "Stations"),
+          "unscanned %s: the info panel gives its size and orbit and nothing else (\"%s\")", g.loaded.bodies[secret].name.c_str(), hoverLine.c_str());
+
     // Fly close to a world: it's scanned, and its moons and stations appear
     int world = -1;
     for (int i = 0; i < (int)g.loaded.bodies.size() && world < 0; i++) {
@@ -762,6 +859,10 @@ static void TestMaps()
     for (const MapRow &r : rows) if (!r.known) unknown++;
     CHECK(!early && g.know.charted.count(next->id) && unknown == 0, "%s answered the hail: the whole system is charted (%d rows)",
           b.name.c_str(), (int)rows.size());
+    info = TargetInfo(g, TargetId::MakeBody(next->id, secret));
+    star = TargetInfo(g, TargetId::MakeBody(next->id, 0));
+    CHECK(!has(info, "Survey") && has(info, "Settlement") && has(info, "Atmosphere") && has(info, "Resources") && has(star, "Population"),
+          "...and the info panel has everything on %s now", g.loaded.bodies[secret].name.c_str());
 
     // Charts are kept with the save
     CHECK(SaveGame(g, "test_charts.txt"), "saved");
@@ -785,6 +886,154 @@ static void TestMaps()
     PlaneAttitude(g.player.ship, next->n, pitch, roll);
     CHECK(level && climbed && fabsf(roll - 40.0f) < 0.5f && fabsf(pitch) < 0.5f,
           "attitude: level on the ecliptic reads 0 / 0; nose up 30 reads pitch +30; rolled right 40 reads roll %+.0f", roll);
+}
+
+// Factions: who holds human space, generated from the seed
+static void TestFactions()
+{
+    GameState g; NewGame(g);
+    const Galaxy &gal = g.systems;
+    const FactionSet &fs = gal.factions;
+    int kinds[5] = {};
+    for (const Faction &f : fs.list) kinds[(int)f.kind]++;
+    CHECK(fs.Count() > 20 && fs.list[0].kind == FactionKind::FreePort && kinds[(int)FactionKind::Government] >= 5 &&
+          kinds[(int)FactionKind::Government] <= 7 && kinds[(int)FactionKind::Conglomerate] >= 5 && kinds[(int)FactionKind::Conglomerate] <= 6 &&
+          kinds[(int)FactionKind::Guild] == 4 && kinds[(int)FactionKind::Clan] >= 8,
+          "%d factions: the free port, %d governments, %d conglomerates, %d guilds, %d pirate clans", fs.Count(),
+          kinds[(int)FactionKind::Government], kinds[(int)FactionKind::Conglomerate], kinds[(int)FactionKind::Guild], kinds[(int)FactionKind::Clan]);
+
+    // The same seed, the same powers; another seed, others
+    Galaxy again, other;
+    again.Init(g.seed);
+    other.Init(g.seed + 1);
+    bool same = again.factions.Count() == fs.Count();
+    for (int i = 0; same && i < fs.Count(); i++)
+        same = again.factions.list[i].name == fs.list[i].name && again.factions.list[i].seat == fs.list[i].seat &&
+               again.factions.list[i].axis[0] == fs.list[i].axis[0] && again.factions.Relation(i, 1) == fs.Relation(i, 1);
+    std::string a = fs.list[1].name, b = other.factions.Count() > 1 ? other.factions.list[1].name : "";
+    CHECK(same && a != b, "the same seed rebuilds them; another seed has others (%s / %s)", a.c_str(), b.c_str());
+
+    // Governments: well mixed, with distinct names
+    double closest = 1e30;
+    std::vector<std::string> names;
+    std::string roll;
+    for (const Faction &f : fs.list) {
+        names.push_back(f.name);
+        if (f.kind != FactionKind::Government) continue;
+        roll += (roll.empty() ? "" : "; ") + f.name + " (" + IdeologyBlurb(f) + ")";
+        for (const Faction &o : fs.list) {
+            if (o.kind != FactionKind::Government || o.id <= f.id) continue;
+            double dist = 0.0;
+            for (int ax = 0; ax < AX_COUNT; ax++) dist += (f.axis[ax] - o.axis[ax]) * (f.axis[ax] - o.axis[ax]);
+            closest = fmin(closest, sqrt(dist));
+        }
+    }
+    std::sort(names.begin(), names.end());
+    CHECK(closest > 0.7 && std::adjacent_find(names.begin(), names.end()) == names.end(),
+          "no two governments think alike (closest pair %.2f apart of a possible 4), no two factions share a name", closest);
+    printf("        %s\n", roll.c_str());
+
+    // Territory: home is the free port; settled space is all somebody's; the fringe is nobody's; shares are comparable
+    std::vector<int> held(fs.Count(), 0);
+    int claimed = 0, unclaimedSettled = 0, fringe = 0, fringeClaimed = 0, outside = 0;
+    for (const StarSystem *s : Neighbours(g, 90.0)) {
+        if (s->ruler != NO_FACTION) { held[s->ruler]++; claimed++; }
+        if (s->develop >= 0.3f && s->ruler == NO_FACTION) unclaimedSettled++;
+        if (s->develop > 0.0f && s->develop < 0.1f) { fringe++; if (s->ruler != NO_FACTION) fringeClaimed++; }
+        if (s->develop <= 0.0f && s->ruler != NO_FACTION) outside++;
+    }
+    int least = 1 << 30, most = 0;
+    bool seated = true;
+    for (const Faction &f : fs.list) {
+        if (f.kind != FactionKind::Government) continue;
+        least = std::min(least, held[f.id]); most = std::max(most, held[f.id]);
+        if (gal[f.seat].ruler != f.id) seated = false;
+    }
+    CHECK(gal[gal.home].ruler == 0 && held[0] == 1 && unclaimedSettled == 0 && fringe > 50 && fringeClaimed == 0 && outside == 0 && seated,
+          "%d systems are somebody's; the free port holds only home; the fringe (%d systems) and beyond are nobody's", claimed, fringe);
+    CHECK(least > 100 && most < 4 * least, "the governments hold between %d and %d systems each", least, most);
+
+    // Ownership: everything inhabited at home is the free port's; elsewhere states, companies, guilds and nobody all own things,
+    // and a conglomerate's stations sit in more than one state's space
+    bool homeAll = true;
+    for (const Body &o : g.loaded.bodies) if (o.population > 0 && o.owner != 0) homeAll = false;
+    int byKind[5] = {}, self = 0, bad = 0, clanPorts = 0;
+    std::vector<std::vector<int>> hostsOf(fs.Count());
+    for (const StarSystem *s : Neighbours(g, 70.0)) {
+        if (s->develop <= 0.0f || s->id == gal.home) continue;
+        LoadedSystem L;
+        GenerateSystemContents(*s, L);
+        AssignOwners(fs, *s, L);
+        for (const Body &o : L.bodies) {
+            if (o.population <= 0) { if (o.owner != NO_FACTION) bad++; continue; }
+            const Faction *f = fs.Get(o.owner);
+            if (!f) { self++; continue; }
+            byKind[(int)f->kind]++;
+            if (f->kind == FactionKind::Government && f->id != s->ruler) bad++;          // a state owns nothing outside its borders
+            if (f->kind == FactionKind::Clan) { clanPorts++; if (s->ruler != NO_FACTION) bad++; }
+            if (f->kind == FactionKind::Conglomerate && s->ruler > 0 &&
+                std::find(hostsOf[f->id].begin(), hostsOf[f->id].end(), s->ruler) == hostsOf[f->id].end()) hostsOf[f->id].push_back(s->ruler);
+        }
+    }
+    int spread = 0;
+    for (const Faction &f : fs.list) if (f.kind == FactionKind::Conglomerate && hostsOf[f.id].size() >= 3) spread++;
+    CHECK(homeAll && bad == 0 && byKind[(int)FactionKind::Government] > 100 && byKind[(int)FactionKind::Conglomerate] > 100 &&
+          byKind[(int)FactionKind::Guild] > 10 && self > 50 && clanPorts > 0 && spread == kinds[(int)FactionKind::Conglomerate],
+          "who runs what: governments %d, conglomerates %d (every one in 3+ states), guilds %d, clans %d, independents %d",
+          byKind[(int)FactionKind::Government], byKind[(int)FactionKind::Conglomerate], byKind[(int)FactionKind::Guild], clanPorts, self);
+
+    // Relations: symmetric; states have rivals as well as friends; the bounty hunters and the clans are at war
+    bool symmetric = true;
+    int rivals = 0, friends = 0, hunters = NO_FACTION, patrons = 0;
+    for (const Faction &f : fs.list) {
+        if (f.kind == FactionKind::Guild && f.guild == GuildKind::BountyHunters) hunters = f.id;
+        if (f.kind == FactionKind::Clan && f.patron != NO_FACTION) patrons++;
+        for (const Faction &o : fs.list) {
+            if (fs.Relation(f.id, o.id) != fs.Relation(o.id, f.id)) symmetric = false;
+            if (f.kind == FactionKind::Government && o.kind == FactionKind::Government && o.id > f.id) {
+                if (fs.Relation(f.id, o.id) <= -20.0f) rivals++;
+                if (fs.Relation(f.id, o.id) >= 15.0f) friends++;
+            }
+        }
+    }
+    bool atWar = true;
+    for (const Faction &f : fs.list) if (f.kind == FactionKind::Clan && fs.Relation(hunters, f.id) > -50.0f) atWar = false;
+    CHECK(symmetric && rivals > 0 && friends > 0 && atWar, "between the governments: %d rivalries, %d friendships; %d clans have a paymaster; the lodge hunts them all",
+          rivals, friends, patrons);
+
+    // Character: everyone has goals, and an agenda that follows from them and their temperament
+    int aimless = 0;
+    for (const Faction &f : fs.list) if (f.goals.empty() || FactionAgenda(fs, f.id).empty()) aimless++;
+    Faction hawk = fs.list[1], dove = fs.list[1];
+    FactionSet tweak = fs;
+    int foe = NO_FACTION;
+    for (const Faction &o : fs.list) if (o.kind == FactionKind::Government && o.id != 1 && (foe == NO_FACTION || fs.Relation(1, o.id) < fs.Relation(1, foe))) foe = o.id;
+    tweak.relation[1 * fs.Count() + foe] = tweak.relation[foe * fs.Count() + 1] = -70.0f;
+    auto wants = [&](float aggression, float caution, const char *what) {
+        FactionSet t = tweak;
+        t.list[1].trait[TR_AGGRESSION] = aggression; t.list[1].trait[TR_CAUTION] = caution;
+        t.list[1].goals = { { GoalType::Humble, foe, aggression }, { GoalType::Secure, NO_FACTION, caution } };
+        std::vector<AgendaItem> agenda = FactionAgenda(t, 1, 3);
+        for (const AgendaItem &item : agenda) if (item.text.find(what) == 0) return true;
+        return false;
+    };
+    std::vector<AgendaItem> top = FactionAgenda(fs, 1, 1);
+    CHECK(aimless == 0 && wants(0.95f, 0.05f, "Press its border") && !wants(0.05f, 0.95f, "Press its border") && wants(0.05f, 0.95f, "Patrol"),
+          "every faction has goals and an agenda (%s: \"%s\"); a hawk presses its rival where a dove patrols", fs.list[1].name.c_str(),
+          top.empty() ? "" : top[0].text.c_str());
+
+    // Standing: nobody's friend to start with; kept in the save
+    bool blank = (int)g.standing.size() == fs.Count();
+    for (float s : g.standing) if (s != 0.0f) blank = false;
+    g.standing[2] = 37.5f; g.standing[fs.Count() - 1] = -80.0f;
+    SaveGame(g, "test_standing.txt");
+    GameState h; NewGame(h);
+    bool loaded = LoadGame(h, "test_standing.txt");
+    remove("test_standing.txt");
+    CHECK(blank && loaded && h.standing == g.standing && std::string(RankName(fs.list[2], 37.5f)) != RankName(fs.list[2], 0.0f) &&
+          h.Standing(fs.Count() - 1) == -80.0f && h.Standing(999) == 0.0f,
+          "standing starts at zero everywhere and round-trips through a save (%+.1f: \"%s\"; %+.0f: \"%s\")", g.standing[2],
+          RankName(fs.list[2], g.standing[2]), g.standing[fs.Count() - 1], RankName(fs.list[fs.Count() - 1], g.standing[fs.Count() - 1]));
 }
 
 static void TestMining()
@@ -1072,8 +1321,25 @@ static void TestNetwork()
     // --- Comms: the log comes back from the server, replies after the light-speed delay ---
     alice.net.SendCommand({ Command::Hail, c });
     Pump(srv, { &alice, &bob }, 3.0);
-    CHECK(alice.g.comms.with == TargetId::MakeBody(srv.world.systems.home, c) && alice.g.comms.log.size() >= 2 && !CommsWaiting(alice.g),
-          "hailed %s: \"%s\"", alice.g.comms.withName.c_str(), alice.g.comms.log.empty() ? "" : alice.g.comms.log.back().text.c_str());
+    const TargetId hailed = TargetId::MakeBody(srv.world.systems.home, c);
+    const CommsChannel *chan = alice.g.comms.Find(hailed);
+    CHECK(chan && chan->log.size() >= 2 && !CommsWaiting(alice.g, alice.g, hailed),
+          "hailed %s: \"%s\"", chan ? chan->withName.c_str() : "?", chan && !chan->log.empty() ? chan->log.back().text.c_str() : "");
+    alice.net.SendCommand({ Command::MarketReport, c });
+    alice.net.SendCommand({ Command::Hail, TradeWorldOther(*OnServer(srv, "Alice"), c) });
+    Pump(srv, { &alice, &bob }, 0.3);
+    CHECK(alice.g.comms.channels.size() == 2 && !CommsInFlight(alice.g, alice.g).empty(), "a second channel, and requests in flight, reach her client too");
+    alice.net.SendCommand({ Command::HangUp, TradeWorldOther(*OnServer(srv, "Alice"), c) });
+    Pump(srv, { &alice, &bob }, 0.5);
+    CHECK(alice.g.comms.channels.size() == 1 && alice.g.comms.Find(hailed), "...and so does hanging up on one of them");
+
+    // --- Standing with the factions is the server's to keep ---
+    OnServer(srv, "Alice")->standing[3] = 42.0f;
+    Pump(srv, { &alice, &bob }, 0.3);
+    CHECK((int)alice.g.standing.size() == srv.world.systems.factions.Count() && alice.g.Standing(3) == 42.0f && bob.g.Standing(3) == 0.0f &&
+          alice.g.systems.factions.list[3].name == srv.world.systems.factions.list[3].name,
+          "the server raised Alice's standing with %s: her client knows (%+.0f), Bob's is untouched", srv.world.systems.factions.list[3].name.c_str(),
+          alice.g.Standing(3));
 
     // --- Mining: everyone hears which rocks are gone ---
     sa = OnServer(srv, "Alice");
@@ -1119,6 +1385,7 @@ static void TestNetwork()
           fabs(alice2.g.player.CargoTotal() - mined) < 1e-9 && Len(alice2.g.player.ship.pos - where) < 1.0,
           "back with the same name: same credits (%.0f), cargo (%.2f t) and position", alice2.g.player.credits, alice2.g.player.CargoTotal());
     CHECK(alice2.g.deltas.mined.count(rockId) == 1, "a newcomer's galaxy includes rocks mined before they joined");
+    CHECK(alice2.g.Standing(3) == 42.0f, "...and her standing came back with her");
     CHECK(bob.Heard("Captain Alice joined"), "Bob was told she's back");
 
     // --- Turned away ---
@@ -1177,7 +1444,7 @@ int RunHeadlessTests(const char *only)
     struct T { const char *name; void (*fn)(); };
     const T tests[] = {
         { "fuel", TestFuel }, { "flight", TestFlight }, { "trade", TestTrade }, { "stations", TestStations }, { "hz", TestHabitableZone },
-        { "skimming", TestSkimming }, { "comms", TestComms }, { "galaxy", TestGalaxy }, { "systems", TestSystems }, { "maps", TestMaps },
+        { "skimming", TestSkimming }, { "comms", TestComms }, { "galaxy", TestGalaxy }, { "systems", TestSystems }, { "maps", TestMaps }, { "factions", TestFactions },
         { "targeting", TestTargeting }, { "mining", TestMining }, { "save", TestSaveLoad },
         { "protocol", TestProtocol }, { "net", TestNetwork }, { "host", TestHosting },
     };
@@ -1315,12 +1582,11 @@ std::unique_ptr<ScriptedInput> MakeScript(const std::string &name)
             if (f == 40)  in.mousePressed[MOUSE_BUTTON_MIDDLE] = true;        // info on what's ahead
             if (f == 50)  s.screenshot = "tour_info.png";
             if (f == 60 && c >= 0) { Park(g, c, 0.9); s.snap = true; }
-            if (f == 70)  in.Press(KEY_C);                                    // comms
-            if (f == 80)  in.Press(KEY_ENTER);                                // hail
+            if (f == 70)  in.Press(KEY_F);                                    // comms: hails the world we're parked over
             if (f == 260) s.screenshot = "tour_comms.png";
             if (f == 270) in.Press(KEY_ONE);
             if (f == 420) s.screenshot = "tour_comms_market.png";
-            if (f == 430) in.Press(KEY_F);                                    // market (closes comms)
+            if (f == 430) in.Press(KEY_THREE);                                // trade, over the channel
             if (f == 440) s.screenshot = "tour_market.png";
             if (f == 450) in.Press(KEY_ESCAPE);
             if (f == 460) in.Press(KEY_F5);
@@ -1398,6 +1664,44 @@ std::unique_ptr<ScriptedInput> MakeScript(const std::string &name)
             if (f == 110) in.Press(KEY_ESCAPE);
             if (f == 120) s.screenshot = "map_hud.png";
             if (f == 125) s.done = true;
+        };
+        return s;
+    }
+    if (name == "comms") {                                                   // several channels at once, and the HUD's markers
+        s->body = [](ScriptedInput &s, InputFrame &in) {
+            GameState &g = *s.game;
+            int f = s.frame;
+            if (f == 20) {
+                auto list = CommsInRange(g);
+                for (size_t i = 0; i < list.size(); i += std::max<size_t>(1, list.size() / 4)) Hail(g, list[i].body);
+                RequestMarketReport(g, list[0].body);
+            }
+            if (f == 30) in.Press(KEY_C);
+            if (f == 60) s.screenshot = "comms_list.png";
+            if (f == 70) in.Press(KEY_ESCAPE);
+            if (f == 80) { g.clock += 600.0; }
+            if (f == 90) s.screenshot = "comms_hud.png";
+            if (f == 95) s.done = true;
+        };
+        return s;
+    }
+    if (name == "factions") {                                                // the factions window, and whose space is whose
+        s->body = [](ScriptedInput &s, InputFrame &in) {
+            int f = s.frame;
+            if (f == 20) in.Press(KEY_R);
+            if (f == 24) in.Press(KEY_DOWN);
+            if (f == 40) s.screenshot = "factions_government.png";
+            if (f >= 44 && f < 52 && f % 2 == 0) in.Press(KEY_DOWN);
+            if (f == 54) in.Press(KEY_DOWN), in.Press(KEY_DOWN);
+            if (f == 60) s.screenshot = "factions_company.png";
+            if (f == 64) in.Press(KEY_UP);
+            if (f == 66) in.Press(KEY_ESCAPE);
+            if (f == 70) in.Press(KEY_M);
+            if (f == 74) in.Press(KEY_M);
+            if (f == 76) in.wheel = -1.0f;
+            if (f == 78) in.wheel = -1.0f;
+            if (f == 90) s.screenshot = "factions_sector.png";
+            if (f == 95) s.done = true;
         };
         return s;
     }

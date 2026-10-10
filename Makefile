@@ -17,10 +17,10 @@ INC = $(if $(RAYLIB_INC),-isystem $(RAYLIB_INC),)
 LIB = $(if $(RAYLIB_LIB),-L$(RAYLIB_LIB),)
 
 # The game rules: shared by the game and the server
-SIM = game.cpp galaxy.cpp ship.cpp asteroids.cpp economy.cpp comms.cpp commands.cpp format.cpp
+SIM = game.cpp galaxy.cpp factions.cpp ship.cpp asteroids.cpp economy.cpp comms.cpp commands.cpp format.cpp
 NET = net.cpp protocol.cpp
 GAME_SRC   = $(SIM) $(NET) main.cpp client.cpp server.cpp server_console.cpp process.cpp targetinfo.cpp save.cpp \
-             settings.cpp input.cpp render.cpp hud.cpp ui.cpp map.cpp menus.cpp tests.cpp
+             settings.cpp input.cpp render.cpp hud.cpp ui.cpp map.cpp factionui.cpp menus.cpp tests.cpp
 SERVER_SRC = $(SIM) $(NET) server.cpp server_console.cpp process.cpp server_main.cpp headless_raylib.cpp
 
 ifeq ($(OS),Windows_NT)
