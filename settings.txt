@@ -1,0 +1,5 @@
+mouse_sensitivity 0.120
+invert_mouse_y 0
+show_orbits 1
+show_key_help 1
+fullscreen 1

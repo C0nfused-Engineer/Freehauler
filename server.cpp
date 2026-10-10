@@ -1,0 +1,533 @@
+// server.cpp - the dedicated server
+#include "server.h"
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <filesystem>
+
+namespace fs = std::filesystem;
+
+static const float STEP = (float)(1.0 / SIM_HZ);
+
+bool ValidPlayerName(const std::string &name)
+{
+    if (name.empty() || (int)name.size() > MAX_PLAYER_NAME || name.front() == ' ' || name.back() == ' ') return false;
+    for (char c : name)
+        if (!(isalnum((unsigned char)c) || c == ' ' || c == '-' || c == '_')) return false;
+    return true;
+}
+
+static std::string Lower(std::string s)
+{
+    for (char &c : s) c = (char)tolower((unsigned char)c);
+    return s;
+}
+
+void Server::Log(const char *fmt, ...)
+{
+    if (!cfg.log) return;
+    time_t t = time(nullptr);
+    char stamp[16];
+    strftime(stamp, sizeof stamp, "%H:%M:%S", localtime(&t));
+    printf("[%s] ", stamp);
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+    printf("\n");
+    fflush(stdout);
+}
+
+int Server::PlayerCount() const
+{
+    int n = 0;
+    for (const auto &p : peers) if (p->joined && !p->remove) n++;
+    return n;
+}
+
+Server::Peer *Server::FindByName(const std::string &name)
+{
+    for (auto &p : peers)
+        if (p->joined && !p->remove && Lower(p->cap.name) == Lower(name)) return p.get();
+    return nullptr;
+}
+
+void Server::Broadcast(const std::vector<uint8_t> &msg, const Peer *except)
+{
+    for (auto &p : peers)
+        if (p->joined && !p->remove && p.get() != except) p->conn.Send(msg);
+}
+
+// ---------------------------------------------------------------------------
+// Starting and stopping
+// ---------------------------------------------------------------------------
+bool Server::Start(const ServerConfig &config, std::string &error)
+{
+    cfg = config;
+    std::error_code ec;
+    fs::create_directories(fs::path(cfg.dataDir) / "players", ec);
+    if (ec) { error = "Couldn't create the data folder " + cfg.dataDir + ": " + ec.message(); return false; }
+
+    if (LoadWorld()) {
+        Log("Loaded the galaxy from %s (seed %u, %d mined rocks)", (fs::path(cfg.dataDir) / "world.txt").string().c_str(),
+            world.seed, (int)world.deltas.mined.size());
+        if (world.seed != cfg.seed && cfg.seed != DEFAULT_GALAXY_SEED)
+            Log("Note: --seed %u ignored; this data folder already has a galaxy (delete world.txt for a new one)", cfg.seed);
+    } else {
+        NewWorld(world, cfg.seed);
+        Log("New galaxy, seed %u", world.seed);
+        SaveWorld();
+    }
+
+    if (!socket.Open(cfg.port)) {
+        error = "Couldn't open UDP port " + std::to_string(cfg.port) + " (" + socket.LastError() +
+                "). Is another server already running on it?";
+        return false;
+    }
+    lastAutosave = NetTime();
+    Log("Listening on UDP port %u  (max %d captains%s)", cfg.port, cfg.maxPlayers, cfg.password.empty() ? "" : ", password set");
+    return true;
+}
+
+void Server::Stop()
+{
+    if (!socket.IsOpen()) return;
+    Writer w;
+    w.U8(MSG_REJECT);
+    w.Str(stopRequested ? "The host has closed the server" : "The server is shutting down");
+    Broadcast(w.buf);
+    double now = NetTime();
+    for (int i = 0; i < 3; i++) SendPackets(now + i * RESEND_INTERVAL);   // a few tries at getting the word out
+    SaveAll();
+    socket.Close();
+    Log("Stopped");
+}
+
+void Server::Run(const volatile bool &quit)
+{
+    double next = NetTime();
+    while (!quit && !stopRequested) {
+        double now = NetTime();
+        if (now < next) { NetSleep(fmin(next - now, 0.002)); continue; }
+        Tick();
+        next += STEP;
+        if (now - next > 0.5) next = now;           // fell far behind (machine asleep?): don't try to catch up
+    }
+}
+
+// ---------------------------------------------------------------------------
+// One tick
+// ---------------------------------------------------------------------------
+void Server::Tick()
+{
+    double now = NetTime();
+    Receive(now);
+
+    // Everyone sees everyone else where they are at the start of the tick
+    world.traffic.clear();
+    for (auto &p : peers) {
+        if (!p->joined || p->remove) continue;
+        const Captain &c = p->cap;
+        Traffic t;
+        t.id = c.id; t.name = c.name; t.ship = c.player.ship;
+        t.thrusting  = c.flight.last.forward > 0.0f;
+        t.hyper      = c.flight.last.hyper;
+        t.mining     = c.flight.miningActive;
+        t.miningRock = c.flight.miningRock;
+        world.traffic.push_back(t);
+    }
+
+    // Each captain moves through the input steps its client has sent, in order. Normally
+    // that's one per tick; after a hiccup (a late packet) a few at once, to catch up.
+    for (auto &pp : peers) {
+        Peer &p = *pp;
+        if (!p.joined || p.remove) continue;
+        p.inputTokens = fmin(p.inputTokens + 1.0, 40.0);
+        int allowed = p.inputs.size() > 4 ? 3 : 1;
+        for (int k = 0; k < allowed && !p.inputs.empty() && p.inputTokens >= 1.0; k++) {
+            InputStep in = p.inputs.front();
+            p.inputs.pop_front();
+            StepCaptain(world, p.cap, in.controls, in.aim, STEP, true);
+            p.lastProcessed = in.seq;
+            p.inputTokens -= 1.0;
+            ApplyDueCommands(p, now);
+        }
+        ApplyDueCommands(p, now);                    // stragglers whose input step never arrived
+    }
+    world.clock += STEP;
+
+    // Mined rocks: every captain's copy of the field, then (every 0.1 s) every client
+    for (const auto &m : world.minedChanged) {
+        for (auto &p : peers) if (p->joined) ApplyRockChange(p->cap, m.first, m.second);
+        minedToSend[m.first] = m.second;
+    }
+    world.minedChanged.clear();
+    if (tick % 12 == 0 && !minedToSend.empty()) {
+        for (auto &msg : MsgMined(minedToSend)) Broadcast(msg);
+        minedToSend.clear();
+    }
+
+    // Events with something to say go to the captain they happened to
+    for (const GameEvent &e : world.events) {
+        if (e.text.empty()) continue;
+        std::vector<uint8_t> msg = MsgEvent(e);
+        for (auto &p : peers)
+            if (p->joined && !p->remove && (e.player < 0 || e.player == p->cap.id)) p->conn.Send(msg);
+    }
+    world.events.clear();
+
+    if (tick % SNAPSHOT_EVERY == 0)
+        for (auto &p : peers) {
+            if (!p->joined || p->remove) continue;
+            std::vector<uint8_t> comms = MsgComms(p->cap.comms);
+            if (comms != p->commsSent) { p->conn.Send(comms); p->commsSent = std::move(comms); }
+        }
+
+    for (auto &p : peers)
+        if (!p->remove && now - p->conn.lastHeard > TIMEOUT) Drop(*p, "timed out");
+
+    SendPackets(now);
+    peers.erase(std::remove_if(peers.begin(), peers.end(), [](const std::unique_ptr<Peer> &p) { return p->remove; }), peers.end());
+
+    if (now - lastAutosave > 60.0) { SaveAll(); lastAutosave = now; }
+    tick++;
+}
+
+void Server::ApplyDueCommands(Peer &p, double now)
+{
+    for (size_t i = 0; i < p.commands.size();) {
+        if (p.commands[i].step <= p.lastProcessed || now - p.commandsSince[i] > 1.0) {
+            ApplyCommand(world, p.cap, p.commands[i]);
+            p.commands.erase(p.commands.begin() + i);
+            p.commandsSince.erase(p.commandsSince.begin() + i);
+        } else {
+            i++;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Receiving
+// ---------------------------------------------------------------------------
+void Server::Receive(double now)
+{
+    uint8_t buf[2048];
+    NetAddress from;
+    for (int n = socket.RecvFrom(from, buf, sizeof buf); n > 0; n = socket.RecvFrom(from, buf, sizeof buf)) {
+        Reader r(buf, (size_t)n);
+        PacketHeader h;
+        if (!ReadHeader(r, h) || h.token == 0) continue;            // not ours, or an older version
+
+        Peer *p = nullptr;
+        for (auto &q : peers)
+            if (!q->remove && q->conn.addr == from) { p = q.get(); break; }
+        if (p && p->conn.token != h.token) {                         // same address, new game session
+            Drop(*p, "reconnected");
+            p = nullptr;
+        }
+        if (!p) {
+            if (h.flags & PACKET_FLAG_DISCONNECT) continue;
+            peers.push_back(std::make_unique<Peer>());
+            p = peers.back().get();
+            p->conn.addr = from;
+            p->conn.token = h.token;
+            p->conn.lastHeard = now;
+        }
+
+        std::vector<std::vector<uint8_t>> delivered;
+        std::vector<uint8_t> unreliable;
+        p->conn.Receive(h, r, delivered, unreliable, now);
+        for (const auto &msg : delivered) {
+            if (p->remove) break;
+            HandleMessage(*p, msg, now);
+        }
+        if (!p->joined && !p->remove && p->conn.Unacked() == 0) p->remove = true;   // never said hello
+        if (p->joined && !p->remove && !unreliable.empty()) HandleInputs(*p, unreliable);
+        if ((h.flags & PACKET_FLAG_DISCONNECT) && !p->remove) Drop(*p, "left");
+    }
+}
+
+void Server::HandleMessage(Peer &p, const std::vector<uint8_t> &msg, double now)
+{
+    Reader r(msg);
+    switch (r.U8()) {
+    case MSG_HELLO: {
+        if (p.joined) return;
+        std::string name = r.Str(), password = r.Str();
+        while (!name.empty() && name.back() == ' ') name.pop_back();
+        while (!name.empty() && name.front() == ' ') name.erase(0, 1);
+        if (!r.ok) return;
+        if (!ValidPlayerName(name)) { Reject(p, "Pick a name of 1-20 letters, digits, spaces, - or _"); return; }
+        if (!cfg.password.empty() && password != cfg.password) { Reject(p, "Wrong server password"); return; }
+        if (Peer *other = FindByName(name)) {
+            if (other->conn.addr.ip == p.conn.addr.ip) Drop(*other, "reconnected from a new session");   // you, after a crash
+            else { Reject(p, "A captain named " + name + " is already flying here"); return; }
+        }
+        if (PlayerCount() >= cfg.maxPlayers) { Reject(p, "The server is full"); return; }
+        Join(p, name);
+        return;
+    }
+    case MSG_COMMAND: {
+        if (!p.joined) return;
+        Command c;
+        uint8_t type = r.U8();
+        c.arg  = r.I32();
+        c.qty  = r.F64();
+        c.step = r.U32();
+        if (!r.ok || type >= Command::Count || !std::isfinite(c.qty)) return;
+        c.type = (Command::Type)type;
+        if (p.commands.size() < 64) { p.commands.push_back(c); p.commandsSince.push_back(now); }
+        return;
+    }
+    case MSG_BYE:
+        Drop(p, "left");
+        return;
+    case MSG_ADMIN: {
+        std::string key = r.Str();
+        uint8_t action = r.U8();
+        if (!r.ok || !p.joined || cfg.adminKey.empty() || key != cfg.adminKey) return;
+        if (action == ADMIN_STOP) {
+            Log("%s (the host) is stopping the server", p.cap.name.c_str());
+            stopRequested = true;
+        }
+        return;
+    }
+    default:
+        return;                                     // unknown: a newer client; ignore
+    }
+}
+
+void Server::HandleInputs(Peer &p, const std::vector<uint8_t> &payload)
+{
+    Reader r(payload);
+    if (r.U8() != PAYLOAD_INPUTS) return;
+    uint32_t echo  = r.U32();
+    uint32_t first = r.U32();
+    uint8_t  n     = r.U8();
+    if (!r.ok) return;
+    p.echoTimeMs = echo;
+    for (uint32_t i = 0; i < n; i++) {
+        InputStep in = ReadInput(r, first + i);
+        if (!r.ok) break;
+        if (in.seq <= p.lastReceived) continue;     // already have it (inputs are sent several times over)
+        if (p.inputs.size() >= 360) break;          // three seconds behind: something's wrong, don't hoard
+        p.inputs.push_back(in);
+        p.lastReceived = in.seq;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Joining and leaving
+// ---------------------------------------------------------------------------
+void Server::Join(Peer &p, const std::string &name)
+{
+    p.joined = true;
+    NewCaptain(world, p.cap, nextId++, name);
+    Player saved;
+    bool returning = LoadPlayer(name, saved);
+    if (returning) {
+        p.cap.player = saved;
+        p.cap.loaded = LoadedSystem();
+        p.cap.field  = AsteroidField();
+        UpdateLoadedSystem(world, p.cap);
+    }
+    world.events.erase(std::remove_if(world.events.begin(), world.events.end(),
+                                      [&](const GameEvent &e) { return e.player == p.cap.id; }), world.events.end());
+
+    Writer w;
+    w.U8(MSG_WELCOME);
+    w.I32(p.cap.id);
+    w.Str(name);
+    w.U32(world.seed);
+    w.F64(world.clock);
+    WritePlayer(w, p.cap.player);
+    p.conn.Send(w.buf);
+    for (auto &msg : MsgMined(world.deltas.mined)) p.conn.Send(msg);
+
+    for (auto &q : peers) {
+        if (!q->joined || q->remove || q.get() == &p) continue;
+        Writer j;                                   // everyone already here, to the newcomer
+        j.U8(MSG_JOINED); j.I32(q->cap.id); j.Str(q->cap.name); j.U8(0);
+        p.conn.Send(j.buf);
+    }
+    Writer j;                                       // the newcomer, to everyone already here
+    j.U8(MSG_JOINED); j.I32(p.cap.id); j.Str(name); j.U8(1);
+    Broadcast(j.buf, &p);
+
+    int others = PlayerCount() - 1;
+    GameEvent hello;
+    hello.type = EventType::Notice;
+    hello.text = others == 0 ? "Welcome aboard, captain - you're the first one here"
+                             : TextFormat("Welcome aboard - %d other captain%s flying", others, others == 1 ? "" : "s");
+    p.conn.Send(MsgEvent(hello));
+    Log("%s joined from %s (%s, id %d) - %d online", name.c_str(), p.conn.addr.ToString().c_str(),
+        returning ? "returning" : "new captain", p.cap.id, PlayerCount());
+}
+
+void Server::Reject(Peer &p, const std::string &reason)
+{
+    Writer w;
+    w.U8(MSG_REJECT);
+    w.Str(reason);
+    p.conn.Send(w.buf);
+    double now = NetTime();
+    for (int i = 0; i < 2; i++) {
+        std::vector<uint8_t> pkt = p.conn.BuildPacket({}, now + i * RESEND_INTERVAL, PACKET_FLAG_DISCONNECT, true);
+        socket.SendTo(p.conn.addr, pkt.data(), (int)pkt.size());
+    }
+    Log("Turned away %s: %s", p.conn.addr.ToString().c_str(), reason.c_str());
+    p.remove = true;
+}
+
+void Server::Drop(Peer &p, const std::string &why)
+{
+    if (p.remove) return;
+    p.remove = true;
+    if (!p.joined) return;
+    SavePlayer(p.cap);
+    Writer w;
+    w.U8(MSG_LEFT); w.I32(p.cap.id); w.Str(p.cap.name);
+    Broadcast(w.buf, &p);
+    Log("%s %s - %d online", p.cap.name.c_str(), why.c_str(), PlayerCount());
+}
+
+// ---------------------------------------------------------------------------
+// Sending
+// ---------------------------------------------------------------------------
+void Server::SendPackets(double now)
+{
+    bool snapshotTick = tick % SNAPSHOT_EVERY == 0;
+    for (auto &pp : peers) {
+        Peer &p = *pp;
+        if (p.remove) continue;
+        std::vector<uint8_t> payload;
+        if (snapshotTick && p.joined && !p.remove) {
+            const Captain &c = p.cap;
+            Snapshot s;
+            s.tick = tick; s.clock = world.clock; s.echoTimeMs = p.echoTimeMs;
+            s.lastProcessed = p.lastProcessed; s.lastReceived = p.lastReceived;
+            s.player = c.player;
+            s.selected = c.flight.selected; s.lock = c.flight.lock;
+            s.lockSuppressed = c.flight.lockSuppressed; s.lockBreak = c.flight.lockBreak;
+            s.retargetCooldown = c.flight.retargetCooldown;
+            s.miningActive = c.flight.miningActive; s.miningRock = c.flight.miningRock; s.miningStatus = c.flight.miningStatus;
+            for (const Traffic &t : world.traffic) if (t.id != c.id) s.others.push_back(t);
+            auto dist = [&](const Traffic &t) { return Len(FromShip(world.systems, c.player.ship, t.ship.anchor, t.ship.pos)); };
+            std::sort(s.others.begin(), s.others.end(), [&](const Traffic &a, const Traffic &b) { return dist(a) < dist(b); });
+            Writer w;
+            WriteSnapshot(w, s);
+            payload = std::move(w.buf);
+        }
+        std::vector<uint8_t> pkt = p.conn.BuildPacket(payload, now);
+        if (!pkt.empty()) socket.SendTo(p.conn.addr, pkt.data(), (int)pkt.size());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Keeping progress: world.txt and players/<name>.txt in the data folder
+// ---------------------------------------------------------------------------
+// Written to a temporary file first, so a crash mid-save never leaves half a file
+static bool WriteFileSafely(const fs::path &path, const std::string &text)
+{
+    fs::path tmp = path;
+    tmp += ".tmp";
+    FILE *f = fopen(tmp.string().c_str(), "wb");
+    if (!f) return false;
+    bool ok = fwrite(text.data(), 1, text.size(), f) == text.size();
+    ok = fclose(f) == 0 && ok;
+    std::error_code ec;
+    if (ok) fs::rename(tmp, path, ec);
+    return ok && !ec;
+}
+
+void Server::SaveAll()
+{
+    int n = 0;
+    for (auto &p : peers) if (p->joined && !p->remove && SavePlayer(p->cap)) n++;
+    bool ok = SaveWorld();
+    Log("Saved the galaxy%s and %d captain%s", ok ? "" : " (FAILED)", n, n == 1 ? "" : "s");
+}
+
+bool Server::SaveWorld()
+{
+    std::string s = TextFormat("SPACEFLIGHT_WORLD 1\nseed %u\nclock %.17g\n", world.seed, world.clock);
+    for (const auto &m : world.deltas.mined) s += TextFormat("mined %llu %.9g\n", (unsigned long long)m.first, m.second);
+    s += "end\n";
+    return WriteFileSafely(fs::path(cfg.dataDir) / "world.txt", s);
+}
+
+bool Server::LoadWorld()
+{
+    FILE *f = fopen((fs::path(cfg.dataDir) / "world.txt").string().c_str(), "r");
+    if (!f) return false;
+    char line[256];
+    int version = 0;
+    unsigned seed = DEFAULT_GALAXY_SEED;
+    double clock = 0.0;
+    MinedMap mined;
+    bool ended = false;
+    if (fgets(line, sizeof line, f) && sscanf(line, "SPACEFLIGHT_WORLD %d", &version) == 1)
+        while (fgets(line, sizeof line, f)) {
+            unsigned long long id; float left;
+            if (sscanf(line, "seed %u", &seed) == 1) continue;
+            if (sscanf(line, "clock %lf", &clock) == 1) continue;
+            if (sscanf(line, "mined %llu %f", &id, &left) == 2) { mined[(uint64_t)id] = left; continue; }
+            if (!strncmp(line, "end", 3)) { ended = true; break; }
+        }
+    fclose(f);
+    if (!ended) return false;
+    NewWorld(world, seed);
+    world.clock = clock;
+    world.deltas.mined = std::move(mined);
+    return true;
+}
+
+std::string Server::PlayerPath(const std::string &name) const
+{
+    return (fs::path(cfg.dataDir) / "players" / (Lower(name) + ".txt")).string();
+}
+
+bool Server::SavePlayer(const Captain &c)
+{
+    const Player &p = c.player;
+    const Ship &s = p.ship;
+    std::string text = TextFormat("SPACEFLIGHT_PLAYER 1\nname %s\n", c.name.c_str());
+    text += TextFormat("ship %d %.17g %.17g %.17g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %d\n", s.anchor,
+                       s.pos.x, s.pos.y, s.pos.z, s.vel.x, s.vel.y, s.vel.z, s.rot.x, s.rot.y, s.rot.z, s.rot.w, s.dampeners ? 1 : 0);
+    text += TextFormat("fuel %.17g\ncredits %.17g\n", p.fuel, p.credits);
+    for (int o = 0; o < GOOD_COUNT; o++)
+        if (p.cargo[o] > 0.0) text += TextFormat("cargo %d %.17g\n", o, p.cargo[o]);
+    text += "end\n";
+    return WriteFileSafely(PlayerPath(c.name), text);
+}
+
+bool Server::LoadPlayer(const std::string &name, Player &out)
+{
+    FILE *f = fopen(PlayerPath(name).c_str(), "r");
+    if (!f) return false;
+    char line[512];
+    Player p;
+    bool haveShip = false, ended = false;
+    if (fgets(line, sizeof line, f) && !strncmp(line, "SPACEFLIGHT_PLAYER", 18))
+        while (fgets(line, sizeof line, f)) {
+            Ship &s = p.ship;
+            int damp = 1, ore; double t;
+            if (sscanf(line, "ship %d %lf %lf %lf %f %f %f %f %f %f %f %d", &s.anchor, &s.pos.x, &s.pos.y, &s.pos.z,
+                       &s.vel.x, &s.vel.y, &s.vel.z, &s.rot.x, &s.rot.y, &s.rot.z, &s.rot.w, &damp) == 12) {
+                s.dampeners = damp != 0;
+                haveShip = true;
+            }
+            else if (sscanf(line, "fuel %lf", &p.fuel) == 1) {}
+            else if (sscanf(line, "credits %lf", &p.credits) == 1) {}
+            else if (sscanf(line, "cargo %d %lf", &ore, &t) == 2) { if (ore >= 0 && ore < GOOD_COUNT) p.cargo[ore] = t; }
+            else if (!strncmp(line, "end", 3)) { ended = true; break; }
+        }
+    fclose(f);
+    if (!haveShip || !ended || p.ship.anchor < 0 || p.ship.anchor >= (int)world.systems.size()) return false;
+    out = p;
+    return true;
+}
