@@ -716,7 +716,7 @@ static void GenerateZones(const StarSystem &sys, const SystemPlan &plan, LoadedS
         // Inside the frost line the rubble is rock and metal; beyond it, carbon and ice
         double u = bg.uni(0, 1);
         if (bp.ice)                  z.composition = Composition::Icy;
-        else if (c < plan.frost)     z.composition = u < 0.3 ? Composition::Metallic : u < 0.75 ? Composition::Stony : Composition::Mixed;
+        else if (c < plan.frost)     z.composition = u < 0.12 ? Composition::Metallic : u < 0.70 ? Composition::Stony : Composition::Mixed;    // (M-types are the rare ones)
         else                         z.composition = u < 0.6 ? Composition::Carbonaceous : u < 0.85 ? Composition::Mixed : Composition::Icy;
         static const Color beltColor[] = { { 150, 135, 120, 255 }, { 135, 115, 85, 255 }, { 95, 90, 85, 255 }, { 110, 100, 85, 255 },
                                            { 125, 150, 170, 255 } };

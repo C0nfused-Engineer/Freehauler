@@ -22,6 +22,7 @@
 // keyboard or draws anything, so it runs headless for tests and on the server.
 #pragma once
 #include "asteroids.h"
+#include "contract.h"
 #include "econ.h"
 #include "goods.h"
 #include "ship.h"
@@ -139,6 +140,7 @@ struct CommsMsg {
     double sent = 0.0;                   // replies: when the request they answer went out
     bool   told = false;                 // replies: its arrival has been announced
     bool   prices = false;               // replies: a market report (its arrival updates the captain's price records)
+    bool   board = false;                // replies: a station's contracts (its arrival updates the captain's record of the board)
 };
 struct CommsChannel {
     TargetId with;                       // a Body
@@ -179,6 +181,10 @@ struct World {
     Economy                 econ;        // saved: markets' stocks, and what the factions are doing to them (econ.h)
     std::vector<EconNews>   news;        // saved: the last few dozen headlines, oldest first
     uint32_t                newsSeq = 0;
+    std::vector<Contract>   contracts;   // saved: the contracts on offer, on every board that's been drawn up (contracts.h)
+    uint32_t                contractSeq = 0;
+    std::unordered_map<uint64_t, double> boardMade;   // saved: when each board (a market's, a faction's) was last drawn up
+    double                  contractsChecked = 0.0;
     double                  clock = 0.0; // saved: game seconds since the start
     std::vector<Traffic>    traffic;     // other captains' ships (never includes your own)
     MinedMap                minedChanged;// rocks mined since the last time someone looked (the server syncs these)
@@ -207,6 +213,14 @@ struct Captain {
     Knowledge     know;                  // saved
     std::vector<float> standing;         // saved: with each faction (by id), -100 .. +100; missing = 0
     float Standing(int faction) const { return faction >= 0 && faction < (int)standing.size() ? standing[faction] : 0.0f; }
+    std::vector<Contract> jobs;          // saved: the contracts this captain has taken
+    std::vector<Contract> offers;        // saved: contracts seen on boards, as of when each board was read...
+    std::unordered_map<uint64_t, double> boards;   // ...which was then (by BoardKey)
+    std::vector<uint8_t> papers;         // saved: guild memberships and licences, by faction (Papers bits)
+    uint8_t Papers(int faction) const { return faction >= 0 && faction < (int)papers.size() ? papers[faction] : 0; }
+    void    SetPaper(int faction, uint8_t bits) { if (faction < 0) return; if ((int)papers.size() <= faction) papers.resize(faction + 1, 0); papers[faction] |= bits; }
+    std::vector<uint64_t> boardsToSend;  // (the server: boards read since it last told the client)
+    uint64_t      dockedAt = 0;          // the body last seen in docking range (contracts.cpp: customs, reminders)
     LoadedSystem  loaded;                // generated around this ship
     AsteroidField field;                 // generated around this ship
 };
@@ -237,12 +251,14 @@ unsigned SeedFromText(const std::string &text, uint64_t entropy);
 void StepCaptain(World &w, Captain &c, const Controls &in, const Aim &aim, float dt, bool authoritative = true);
 
 void UpdateEconomy(World &w);                    // economy.cpp: runs the economy up to the clock (whoever owns the world calls it)
+void UpdateContracts(World &w);                  // contracts.cpp: lapses old offers (likewise)
 
 // Single player: advance the clock and the economy, step your captain
 inline void StepGame(GameState &g, const Controls &in, const Aim &aim, float dt)
 {
     g.clock += dt;
     UpdateEconomy(g);
+    UpdateContracts(g);
     StepCaptain(g, g, in, aim, dt);
 }
 

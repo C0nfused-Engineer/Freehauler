@@ -3,21 +3,31 @@
 #include "goods.h"
 #include <cmath>
 
-// What rocks of each composition hold: (ore, share) pairs, shares summing to 1
+// What rocks of each composition hold: (ore, share of the rocks) pairs, shares summing to 1.
+//
+// After what meteorites and asteroid spectra say, with the rare things made merely rare
+// rather than the parts per million they really are (or nobody would ever find one):
+//   M-type   iron-nickel metal through and through; the siderophiles (platinum group, gold)
+//            are dissolved in it at tens of grams a tonne, so a rich rock is a find
+//   S-type   mostly silicate (olivine, pyroxene) with 10-20% metal grains; the lithophiles
+//            (titanium, rare earths, uranium) are in the stone, not the metal, and thinly
+//   C-type   clays and carbon compounds, up to a fifth water bound in the rock, a little
+//            magnetite and sulphide; next to nothing precious
+//   icy      water ice with frozen CO2, ammonia and methane, and dark carbon-rich dust
 struct OreShare { int ore; double share; };
 static const std::vector<OreShare> &OreTable(Composition c)
 {
     static const std::vector<OreShare> metallic = {
-        { ORE_IRON, .45 }, { ORE_COPPER, .20 }, { ORE_TITANIUM, .15 }, { ORE_PRECIOUS, .12 }, { ORE_RARE_EARTHS, .08 } };
+        { ORE_IRON, .84 }, { ORE_COPPER, .12 }, { ORE_PRECIOUS, .02 }, { ORE_TITANIUM, .02 } };
     static const std::vector<OreShare> stony = {
-        { ORE_SILICATES, .40 }, { ORE_IRON, .20 }, { ORE_TITANIUM, .14 }, { ORE_COPPER, .10 }, { ORE_RARE_EARTHS, .08 },
-        { ORE_URANIUM, .05 }, { ORE_PRECIOUS, .03 } };
+        { ORE_SILICATES, .70 }, { ORE_IRON, .18 }, { ORE_TITANIUM, .05 }, { ORE_COPPER, .03 }, { ORE_RARE_EARTHS, .025 },
+        { ORE_URANIUM, .01 }, { ORE_PRECIOUS, .005 } };
     static const std::vector<OreShare> carbonaceous = {
-        { ORE_CARBON, .45 }, { ORE_WATER_ICE, .20 }, { ORE_SILICATES, .15 }, { ORE_VOLATILES, .10 },
-        { ORE_IRON, .05 }, { ORE_URANIUM, .03 }, { ORE_PRECIOUS, .02 } };
+        { ORE_CARBON, .50 }, { ORE_SILICATES, .22 }, { ORE_WATER_ICE, .15 }, { ORE_VOLATILES, .06 },
+        { ORE_IRON, .06 }, { ORE_RARE_EARTHS, .006 }, { ORE_PRECIOUS, .004 } };
     static const std::vector<OreShare> mixed = {
-        { ORE_IRON, .28 }, { ORE_SILICATES, .22 }, { ORE_CARBON, .15 }, { ORE_COPPER, .12 }, { ORE_TITANIUM, .10 },
-        { ORE_WATER_ICE, .07 }, { ORE_PRECIOUS, .06 } };
+        { ORE_SILICATES, .40 }, { ORE_IRON, .25 }, { ORE_CARBON, .18 }, { ORE_WATER_ICE, .07 }, { ORE_COPPER, .05 },
+        { ORE_TITANIUM, .03 }, { ORE_RARE_EARTHS, .01 }, { ORE_PRECIOUS, .01 } };
     static const std::vector<OreShare> icy = {
         { ORE_WATER_ICE, .70 }, { ORE_VOLATILES, .24 }, { ORE_CARBON, .06 } };
     switch (c) {
@@ -26,6 +36,20 @@ static const std::vector<OreShare> &OreTable(Composition c)
     case Composition::Carbonaceous: return carbonaceous;
     case Composition::Icy:          return icy;
     default:                        return mixed;
+    }
+}
+
+// How much of a rock is worth hauling away: the common ores are the rock itself, the rare ones
+// are veins and grains in it
+static float OreYield(int ore)
+{
+    switch (ore) {
+    case ORE_PRECIOUS:    return 0.06f;
+    case ORE_URANIUM:     return 0.12f;
+    case ORE_RARE_EARTHS: return 0.25f;
+    case ORE_TITANIUM:    return 0.50f;
+    case ORE_COPPER:      return 0.60f;
+    default:              return 1.0f;
     }
 }
 
@@ -89,9 +113,9 @@ static void GenerateCell(const CellKey &key, const LoadedSystem &L, const MinedM
             a.spin  = spin; a.phase = phase;
             a.ore   = PickOre(z.composition, oreU);
             float sizeFrac = (a.baseRadius - z.sizeMin) / (z.sizeMax - z.sizeMin);
-            a.oreMax  = z.ring ? 2.0f + 60.0f * sizeFrac : 10.0f + 290.0f * sizeFrac;
+            a.oreMax  = (z.ring ? 2.0f + 60.0f * sizeFrac : 10.0f + 290.0f * sizeFrac) * OreYield(a.ore);
             auto it = mined.find(a.id);
-            a.oreLeft = it != mined.end() ? it->second : a.oreMax;
+            a.oreLeft = it != mined.end() ? fminf(it->second, a.oreMax) : a.oreMax;
             if (a.oreLeft <= 0.0f) continue;                                  // mined out earlier
             a.name = TextFormat("%s %06X", GoodData(a.ore).ice ? "Ice chunk" : "Asteroid", (unsigned)(a.id & 0xFFFFFF));
             out.push_back(a);

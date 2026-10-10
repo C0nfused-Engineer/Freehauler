@@ -188,6 +188,37 @@ bool ReadPrices(Reader &r, uint64_t &body, PriceRecord &out)
     return r.ok;
 }
 
+std::vector<uint8_t> MsgContract(uint8_t type, const Contract &k)
+{
+    Writer w;
+    w.U8(type);
+    w.U32(k.id); w.U8((uint8_t)k.kind); w.U8((uint8_t)k.effect);
+    w.I32(k.issuer); w.I32(k.guild); w.I32(k.against); w.I32(k.effectOn); w.I32(k.licence);
+    w.F32(k.minStanding); w.U8(k.wide ? 1 : 0);
+    w.U64(k.fromBody); w.U64(k.toBody); w.I64(k.fromSys); w.I64(k.toSys);
+    w.Str(k.fromName, 80); w.Str(k.toName, 80);
+    w.I64(k.surveySys); w.Str(k.surveyName, 80); w.I32(k.need); w.U64(k.scanMask);
+    w.I32(k.good); w.F32(k.tonnes); w.F32(k.pay); w.F32(k.collateral);
+    w.F64(k.expires); w.F64(k.allowed); w.F64(k.deadline); w.U8(k.loaded ? 1 : 0); w.U64(k.listKey);
+    return w.buf;
+}
+
+bool ReadContract(Reader &r, Contract &k)
+{
+    k.id = r.U32();
+    uint8_t kind = r.U8(), effect = r.U8();
+    k.issuer = r.I32(); k.guild = r.I32(); k.against = r.I32(); k.effectOn = r.I32(); k.licence = r.I32();
+    k.minStanding = r.F32(); k.wide = r.U8() != 0;
+    k.fromBody = r.U64(); k.toBody = r.U64(); k.fromSys = r.I64(); k.toSys = r.I64();
+    k.fromName = r.Str(); k.toName = r.Str();
+    k.surveySys = r.I64(); k.surveyName = r.Str(); k.need = r.I32(); k.scanMask = r.U64();
+    k.good = r.I32(); k.tonnes = r.F32(); k.pay = r.F32(); k.collateral = r.F32();
+    k.expires = r.F64(); k.allowed = r.F64(); k.deadline = r.F64(); k.loaded = r.U8() != 0; k.listKey = r.U64();
+    if (!r.ok || kind >= (uint8_t)ContractKind::Count || effect >= (uint8_t)ContractEffect::Count || k.good >= GOOD_COUNT || k.good < -1) return false;
+    k.kind = (ContractKind)kind; k.effect = (ContractEffect)effect;
+    return true;
+}
+
 std::vector<uint8_t> MsgNews(const EconNews &n)
 {
     Writer w;

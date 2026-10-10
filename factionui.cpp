@@ -1,6 +1,7 @@
 // factionui.cpp - the factions window (R): who's who in human space, what they
 // want, how they get on with each other, and where you stand with them
 #include "ui.h"
+#include "contracts.h"
 #include "format.h"
 #include "theme.h"
 #include <algorithm>
@@ -29,6 +30,14 @@ public:
         }
         top = std::max(std::min(top, row), row - L.visible + 1);
         top = std::max(0, std::min(top, n - L.visible));
+        {
+            const Faction &f = fs.list[row];
+            bool state = f.kind == FactionKind::Government || f.kind == FactionKind::FreePort;
+            if (in.Pressed(KEY_C)) ui.Open(MakeContractsWindow({}, f.id));
+            if (in.Pressed(KEY_G) && f.kind == FactionKind::Guild) ui.Do(g, { Command::JoinGuild, f.id });
+            if (in.Pressed(KEY_L) && state) ui.Do(g, { Command::BuyLicence, f.id, (double)PAPER_CARRIER });
+            if (in.Pressed(KEY_P) && state) ui.Do(g, { Command::BuyLicence, f.id, (double)PAPER_PERMIT });
+        }
         if (in.Pressed(KEY_ENTER) || in.Pressed(KEY_KP_ENTER)) {
             const Faction &f = fs.list[row];
             if (g.systems.Exists(f.seat) && f.kind != FactionKind::Clan) {
@@ -87,7 +96,27 @@ public:
         // Where you stand
         float st = g.Standing(sel);
         DrawText(TextFormat("YOUR STANDING   %+.0f   %s", st, RankName(f, st)), dx, y, 18, st < -20.0f ? ORANGE : st >= 20.0f ? HUD : WHITE);
-        y += 30;
+        y += 26;
+        // Papers: what you hold from it, and what you could
+        {
+            uint8_t have = g.Papers(sel);
+            std::string papers;
+            Color pc = HUD_LABEL;
+            if (f.kind == FactionKind::Guild) {
+                if (have & PAPER_MEMBER)                          { papers = "You are a member: its contracts are yours wherever it has a chapter"; pc = HUD; }
+                else if (f.guild == GuildKind::BountyHunters)     papers = "Not taking members yet";
+                else papers = TextFormat("G: join for %s cr  -  members get its contracts at stations with a chapter", Thousands(GUILD_FEE).c_str());
+            } else if (f.kind == FactionKind::Government || f.kind == FactionKind::FreePort) {
+                papers = have & PAPER_CARRIER ? std::string("Bonded carrier: held")
+                       : TextFormat("L: bonded carrier's licence, %s cr (%s)", Thousands(CARRIER_COST).c_str(), RankName(f, CARRIER_STANDING));
+                if (!f.contraband.empty())
+                    papers += have & PAPER_PERMIT ? std::string("    Restricted goods permit: held")
+                            : TextFormat("    P: restricted goods permit, %s cr (%s)", Thousands(PERMIT_COST).c_str(), RankName(f, PERMIT_STANDING));
+                if (have) pc = HUD;
+            }
+            if (!papers.empty()) { DrawText(papers.c_str(), dx, y, 14, pc); y += 20; }
+        }
+        y += 8;
 
         // Left column: character. Right column: what it wants.
         int top0 = y, cy = y;
@@ -151,7 +180,7 @@ public:
             y += 18;
         }
 
-        DrawText("UP/DOWN, wheel or mouse: pick   ENTER: set course for its seat   R / ESC: close",
+        DrawText("UP/DOWN, wheel or mouse: pick   ENTER: set course for its seat   C: its contracts   R / ESC: close",
                  (int)L.panel.x + 20, (int)(L.panel.y + L.panel.height) - 26, 16, HUD_DIM);
     }
 

@@ -1,5 +1,6 @@
 // server.cpp - the dedicated server
 #include "server.h"
+#include "contracts.h"
 #include "economy.h"
 #include <algorithm>
 #include <cctype>
@@ -161,6 +162,7 @@ void Server::Tick()
     }
     world.clock += STEP;
     UpdateEconomy(world);
+    UpdateContracts(world);
 
     // Mined rocks: every captain's copy of the field, then (every 0.1 s) every client
     for (const auto &m : world.minedChanged) {
@@ -201,6 +203,31 @@ void Server::Tick()
                 for (size_t i = 0; i < p->cap.standing.size() && i < 255; i++) w.F32(p->cap.standing[i]);
                 p->conn.Send(w.buf);
                 p->standingSent = p->cap.standing;
+            }
+            // Boards this captain has read (or that changed under them), their own contracts, their papers
+            for (uint64_t key : p->cap.boardsToSend) {
+                Writer w;
+                w.U8(MSG_BOARD); w.U64(key); w.F64(p->cap.boards[key]);
+                p->conn.Send(w.buf);
+                for (const Contract &k : p->cap.offers) if (k.listKey == key) p->conn.Send(MsgContract(MSG_OFFER, k));
+            }
+            p->cap.boardsToSend.clear();
+            uint64_t sig = 0x1234;
+            for (const Contract &k : p->cap.jobs) sig = Mix64(sig ^ k.id ^ ((uint64_t)k.loaded << 40) ^ Mix64(k.scanMask + 1));
+            if (sig != p->jobsSent) {
+                p->jobsSent = sig;
+                Writer w;
+                w.U8(MSG_JOBS);
+                p->conn.Send(w.buf);
+                for (const Contract &k : p->cap.jobs) p->conn.Send(MsgContract(MSG_JOB, k));
+            }
+            if (p->cap.papers != p->papersSent) {
+                Writer w;
+                w.U8(MSG_PAPERS);
+                w.U8((uint8_t)std::min<size_t>(p->cap.papers.size(), 255));
+                for (size_t i = 0; i < p->cap.papers.size() && i < 255; i++) w.U8(p->cap.papers[i]);
+                p->conn.Send(w.buf);
+                p->papersSent = p->cap.papers;
             }
             // Each channel that has changed since it was last sent, and word of the ones that have closed
             std::vector<std::pair<TargetId, std::vector<uint8_t>>> now;
@@ -361,7 +388,8 @@ void Server::Join(Peer &p, const std::string &name, const std::string &ship)
     NewCaptain(world, p.cap, nextId++, name);
     p.cap.shipName = ship;
     Player saved;
-    bool returning = LoadPlayer(name, saved, p.cap.standing);
+    bool returning = LoadPlayer(name, saved, p.cap);
+    for (const auto &b : p.cap.boards) p.cap.boardsToSend.push_back(b.first);      // (what they'd read of the boards, back to their client)
     if (returning) {
         p.cap.player = saved;
         p.cap.loaded = LoadedSystem();
@@ -490,6 +518,7 @@ bool Server::SaveWorld()
     std::string s = TextFormat("SPACEFLIGHT_WORLD 2\nseed %u\nclock %.17g\n", world.seed, world.clock);
     for (const auto &m : world.deltas.mined) s += TextFormat("mined %llu %.9g\n", (unsigned long long)m.first, m.second);
     WriteEconomy(world, s);
+    WriteContracts(world, s);
     s += "end\n";
     return WriteFileSafely(fs::path(cfg.dataDir) / "world.txt", s);
 }
@@ -521,7 +550,8 @@ bool Server::LoadWorld()
     world.clock = clock;
     world.deltas.mined = std::move(mined);
     EnsureEconomy(world);
-    for (const auto &l : econ) ReadEconomyLine(world, l.first.c_str(), l.second.c_str());
+    for (const auto &l : econ)
+        if (!ReadEconomyLine(world, l.first.c_str(), l.second.c_str())) ReadContractLine(world, l.first.c_str(), l.second.c_str());
     return true;
 }
 
@@ -543,15 +573,17 @@ bool Server::SavePlayer(const Captain &c)
         if (p.cargo[o] > 0.0) text += TextFormat("cargo %d %.17g\n", o, p.cargo[o]);
     for (size_t i = 0; i < c.standing.size(); i++)
         if (c.standing[i] != 0.0f) text += TextFormat("standing %d %.9g\n", (int)i, c.standing[i]);
+    WriteCaptainContracts(c, text);
     text += "end\n";
     return WriteFileSafely(PlayerPath(c.name), text);
 }
 
-bool Server::LoadPlayer(const std::string &name, Player &out, std::vector<float> &standing)
+bool Server::LoadPlayer(const std::string &name, Player &out, Captain &cap)
 {
+    std::vector<float> &standing = cap.standing;
     FILE *f = fopen(PlayerPath(name).c_str(), "r");
     if (!f) return false;
-    char line[512];
+    static char line[2048];
     Player p;
     bool haveShip = false, ended = false;
     int version = 0;
@@ -560,6 +592,8 @@ bool Server::LoadPlayer(const std::string &name, Player &out, std::vector<float>
             Ship &s = p.ship;
             int damp = 1, ore; double t;
             long long anchor = -1;
+            char key[32] = "";
+            if (sscanf(line, "%31s", key) == 1 && ReadCaptainContractLine(cap, key, line + strlen(key))) continue;
             if (sscanf(line, "ship %lld %lf %lf %lf %f %f %f %f %f %f %f %d %f", &anchor, &s.pos.x, &s.pos.y, &s.pos.z,
                        &s.vel.x, &s.vel.y, &s.vel.z, &s.rot.x, &s.rot.y, &s.rot.z, &s.rot.w, &damp, &s.throttle) >= 12) {
                 s.anchor = anchor;

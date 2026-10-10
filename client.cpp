@@ -190,6 +190,34 @@ void NetClient::HandleMessage(GameState &g, const std::vector<uint8_t> &msg)
         if (g.news.size() > 80) g.news.erase(g.news.begin());
         return;
     }
+    case MSG_BOARD: {
+        uint64_t key = r.U64();
+        double at = r.F64();
+        if (!r.ok) return;
+        g.offers.erase(std::remove_if(g.offers.begin(), g.offers.end(), [&](const Contract &k) { return k.listKey == key; }), g.offers.end());
+        g.boards[key] = at;
+        return;
+    }
+    case MSG_OFFER: {
+        Contract k;
+        if (ReadContract(r, k)) g.offers.push_back(k);
+        return;
+    }
+    case MSG_JOBS:
+        g.jobs.clear();
+        return;
+    case MSG_JOB: {
+        Contract k;
+        if (ReadContract(r, k)) g.jobs.push_back(k);
+        return;
+    }
+    case MSG_PAPERS: {
+        uint8_t n = r.U8();
+        std::vector<uint8_t> papers;
+        for (int i = 0; i < n && r.ok; i++) papers.push_back(r.U8());
+        if (r.ok) g.papers = papers;
+        return;
+    }
     case MSG_STANDING: {
         uint8_t n = r.U8();
         std::vector<float> s;

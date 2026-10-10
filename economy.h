@@ -75,6 +75,7 @@ inline bool BuyFuel(GameState &g, double qty)             { return BuyFuel(g, g,
 void   EnsureEconomy(World &w);                 // builds it on first use
 double MarketPrice(const World &w, int market, int good);     // mid price right now; 0 if it isn't traded there
 void   StepEconomy(World &w, double days);      // (tests: run it forward without the clock)
+void   PostNews(World &w, int faction, SysId where, const std::string &text);   // a headline (NO_FACTION: local news)
 
 // Saving: the economy as lines of text, and reading them back (after EnsureEconomy)
 void   WriteEconomy(const World &w, std::string &out);

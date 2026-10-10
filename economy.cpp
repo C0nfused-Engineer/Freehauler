@@ -375,6 +375,8 @@ static void Report(World &w, int faction, SysId where, const std::string &text)
     if (w.news.size() > 80) w.news.erase(w.news.begin());
 }
 
+void PostNews(World &w, int faction, SysId where, const std::string &text) { Report(w, faction, where, text); }
+
 // ---------------------------------------------------------------------------
 // The factions act: each, every few days, does the most pressing thing on its
 // agenda that it has the means to do
@@ -630,6 +632,8 @@ static Market LiveAt(const World &w, const Captain &c, int i)
         m.price[g] = MarketPrice(w, i, g);
         m.stock[g] = s.stock[g];
         m.target[g] = d.target[g];
+        // With the government's permit, what it bans is bought from you under licence (at a good price; never sold)
+        if (d.banned[g] && (c.Papers(d.ruler) & PAPER_PERMIT)) { m.banned[g] = false; m.role[g] = Role::Import; m.price[g] = 1.4 * GoodData(g).basePrice; m.stock[g] = 0.0; }
     }
     m.owner = s.owner; m.ruler = d.ruler;
     m.tariff = d.ruler >= 0 ? w.econ.tariff[d.ruler] : 0.0;

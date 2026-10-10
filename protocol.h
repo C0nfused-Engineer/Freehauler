@@ -30,7 +30,7 @@
 #include <vector>
 
 const uint32_t PROTOCOL_MAGIC   = 0x31504D53;   // "SMP1"
-const uint16_t PROTOCOL_VERSION = 9;            // bump when anything below changes (9: what markets want)
+const uint16_t PROTOCOL_VERSION = 10;           // bump when anything below changes (10: contracts)
 const uint16_t DEFAULT_PORT     = 23500;
 const int      MAX_PACKET       = 1400;         // stays under a typical 1500-byte MTU
 const int      MAX_MESSAGE      = 1100;         // biggest reliable message
@@ -124,6 +124,11 @@ enum MsgType : uint8_t {
     MSG_STANDING,           // u8 n, n x f32: your standing with each faction, by id
     MSG_PRICES,             // one market as you now know it: see MsgPrices
     MSG_NEWS,               // u32 seq, f64 at, i32 faction, i64 where, str text
+    MSG_BOARD,              // u64 key, f64 at: your record of that board starts again (its offers follow)
+    MSG_OFFER,              // a contract on a board you've read (its listKey says which)
+    MSG_JOBS,               // your contracts start again (each follows)
+    MSG_JOB,                // a contract you hold
+    MSG_PAPERS,             // u8 n, n x u8: your memberships and licences, by faction
 };
 
 // Unreliable payload types (first byte after the reliable section)
@@ -143,6 +148,8 @@ std::vector<uint8_t> MsgComms(const CommsChannel &c, bool open = true);   // the
 std::vector<uint8_t> MsgPrices(uint64_t body, const PriceRecord &r);
 bool                 ReadPrices(Reader &r, uint64_t &body, PriceRecord &out);
 std::vector<uint8_t> MsgNews(const EconNews &n);
+std::vector<uint8_t> MsgContract(uint8_t type, const Contract &k);         // MSG_OFFER or MSG_JOB
+bool                 ReadContract(Reader &r, Contract &out);
 std::vector<std::vector<uint8_t>> MsgMined(const MinedMap &m); // split into messages that fit
 
 // ---------------------------------------------------------------------------

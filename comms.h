@@ -38,6 +38,7 @@ std::vector<CommsFlight> CommsInFlight(const World &w, const Captain &c);   // s
 void Hail(World &w, Captain &c, int body);                  // opens a channel (nothing if one is open already)
 void RequestMarketReport(World &w, Captain &c, int body);
 void RequestLocalInfo(World &w, Captain &c, int body);
+void RequestContracts(World &w, Captain &c, int body);      // the station's contracts board (contracts.h)
 void HangUp(World &w, Captain &c, int body);
 
 void UpdateComms(World &w, Captain &c);           // called by StepCaptain: announces replies, drops lost channels

@@ -34,6 +34,8 @@
 //   econ.h, economy the markets of human space: stock, production, trade, prices; what the
 //                   factions do to them; trading (actions on a Captain)
 //   comms           hailing worlds and stations (actions on a Captain)
+//   contract.h, contracts  paid work: the boards, drawn up from the economy and the factions' agendas;
+//                   taking, doing and failing it; guilds, licences and customs
 //   commands        player actions as data: applied here, or sent to the server
 //   targetinfo      info-panel facts
 //   save            save games (seed + deltas + player)
@@ -62,6 +64,7 @@
 //                everyone in the system (C: the list)      O   toggle orbit rings
 //   R            the factions: who they are, what they want, where you stand
 //   T            the trade log: prices at every market you know of      N   the news
+//   J            your contracts (a station's board: hail it, then 4; a faction's list: R, then C)
 //   M            map: the system you're in (list its worlds, pick one to set course); M again,
 //                or M between the stars, for the sector map of nearby systems
 //   MMB or I     info on the target   3 (on a channel, in docking range)   trade

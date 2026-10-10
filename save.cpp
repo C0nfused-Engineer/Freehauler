@@ -16,9 +16,12 @@
 //   standing <faction> <-100..100>   (one line per faction you have any standing with)
 //   prices ...                       (one line per market you have prices for)
 //   econ / stock / owner / faction / embargo / shock / news ...   (the economy: see WriteEconomy)
+//   papers / job / boardseen / offer                              (your contracts and licences: see WriteCaptainContracts)
+//   contractseq / boardmade / contract                            (the contracts on offer: see WriteContracts)
 //   end
 // Unknown keys are ignored, so newer saves still partly load in older builds.
 #include "save.h"
+#include "contracts.h"
 #include "economy.h"
 #include <cctype>
 #include <cstdio>
@@ -70,6 +73,8 @@ bool SaveGame(const GameState &g, const char *path, const std::string &name)
     std::string econ;
     WritePrices(g, econ);
     WriteEconomy(g, econ);
+    WriteCaptainContracts(g, econ);
+    WriteContracts(g, econ);
     fputs(econ.c_str(), f);
     fprintf(f, "end\n");
     bool ok = !ferror(f);
@@ -125,9 +130,10 @@ bool LoadGame(GameState &g, const char *path)
         } else if (!strcmp(key, "charted")) {
             long long sys;
             if (sscanf(rest, "%lld", &sys) == 1) know.charted.insert(sys);
-        } else if (ReadPriceLine(scratch, key, rest)) {
+        } else if (ReadPriceLine(scratch, key, rest) || ReadCaptainContractLine(scratch, key, rest)) {
         } else if (!strcmp(key, "econ") || !strcmp(key, "stock") || !strcmp(key, "owner") || !strcmp(key, "faction") ||
-                   !strcmp(key, "embargo") || !strcmp(key, "shock") || !strcmp(key, "news")) {
+                   !strcmp(key, "embargo") || !strcmp(key, "shock") || !strcmp(key, "news") || !strcmp(key, "contractseq") ||
+                   !strcmp(key, "boardmade") || !strcmp(key, "contract")) {
             econ.push_back({ key, rest });
         } else if (!strcmp(key, "shipname")) {
             shipName = rest + (*rest == ' ' ? 1 : 0);
@@ -149,9 +155,14 @@ bool LoadGame(GameState &g, const char *path)
     fresh.clock         = clock;
     if (!econ.empty()) {
         EnsureEconomy(fresh);
-        for (const auto &l : econ) ReadEconomyLine(fresh, l.first.c_str(), l.second.c_str());
+        for (const auto &l : econ)
+            if (!ReadEconomyLine(fresh, l.first.c_str(), l.second.c_str())) ReadContractLine(fresh, l.first.c_str(), l.second.c_str());
     }
     fresh.know.prices   = std::move(scratch.know.prices);
+    fresh.jobs          = std::move(scratch.jobs);
+    fresh.offers        = std::move(scratch.offers);
+    fresh.boards        = std::move(scratch.boards);
+    fresh.papers        = std::move(scratch.papers);
     fresh.player        = p;
     fresh.deltas.mined  = std::move(mined);
     fresh.shipName      = shipName;

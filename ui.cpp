@@ -253,11 +253,15 @@ public:
                 else if (!CommsAnswered(g, g, focus))                         ui.Say("Wait for " + who + " to answer");
                 else                                                          ui.Say("Get into docking range of " + who + " to trade");
             }
+            if (in.Pressed(KEY_FOUR) || in.Pressed(KEY_KP_4)) {                // their contracts board (the list comes back like any reply)
+                if (open) ui.Open(MakeContractsWindow(focus));
+                else      ui.Say("Wait for the channel to open");
+            }
             if (in.Pressed(KEY_BACKSPACE)) { if (open) ui.Do(g, { Command::HangUp, focus.index }); focus = {}; }
             if (in.Pressed(KEY_LEFT) || in.Pressed(KEY_TAB)) focus = {};       // back to the list; the channel stays open
         }
         for (int k : { KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_TAB, KEY_ENTER, KEY_KP_ENTER, KEY_ONE, KEY_KP_1, KEY_TWO, KEY_KP_2,
-                       KEY_THREE, KEY_KP_3, KEY_BACKSPACE })
+                       KEY_THREE, KEY_KP_3, KEY_FOUR, KEY_KP_4, KEY_BACKSPACE })
             in.Consume(k);
     }
 
@@ -349,13 +353,13 @@ public:
         int first = std::max(0, (int)lines.size() - maxLines);
         for (int i = first; i < (int)lines.size(); i++, y += 20) DrawText(lines[i].first.c_str(), x, y, 16, lines[i].second);
 
-        const char *asks = "1 prices   2 local info   ";
+        const char *asks = "1 prices  2 info  ";
         bool trade = CanTradeOverComms(g) && focus.index == g.flight.nearBody;
         DrawText(asks, x, py + ph - 24, 16, HUD_DIM);
         int tx = x + MeasureText(asks, 16);
-        const char *t = trade ? "3 TRADE   " : "3 trade (dock first)   ";
+        const char *t = trade ? "3 TRADE  " : "3 trade (dock first)  ";
         DrawText(t, tx, py + ph - 24, 16, trade ? HUD : Fade(HUD_DIM, 0.6f));
-        DrawText("LEFT: others   BKSP hang up", tx + MeasureText(t, 16), py + ph - 24, 16, HUD_DIM);
+        DrawText("4 work  LEFT: others  BKSP hang up", tx + MeasureText(t, 16), py + ph - 24, 16, HUD_DIM);
     }
 
 private:
@@ -457,6 +461,7 @@ void Ui::HandleInput(InputFrame &in, GameState &g)
     if (in.Pressed(KEY_R)) Open(MakeFactionsWindow());     // (and takes R itself to close)
     if (in.Pressed(KEY_T)) Open(MakeTradeLog());
     if (in.Pressed(KEY_N)) Open(MakeNewsWindow());
+    if (in.Pressed(KEY_J)) Open(MakeContractsWindow());    // (your contracts)
     if (in.Pressed(KEY_M)) {                               // (an open map takes M itself)
         if (g.loaded.index >= 0 && g.flight.drive.inField) Open(MakeSystemMap());
         else                                               Open(MakeSectorMap());

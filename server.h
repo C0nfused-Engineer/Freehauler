@@ -43,6 +43,8 @@ public:
         std::vector<float>    standingSent;  // the standings last sent (sent again when they change)
         std::unordered_map<uint64_t, double> pricesSent;   // price records sent, by market: the time of the snapshot
         uint32_t              newsSent = 0;  // the last headline sent
+        uint64_t              jobsSent = 0;  // a signature of the contracts last sent (sent again when it changes)
+        std::vector<uint8_t>  papersSent;
         std::vector<std::pair<TargetId, std::vector<uint8_t>>> commsSent;   // the last MSG_COMMS sent for each open channel
         uint32_t              echoTimeMs = 0;
     };
@@ -77,7 +79,7 @@ private:
     bool SaveWorld();
     bool LoadWorld();
     bool SavePlayer(const Captain &c);
-    bool LoadPlayer(const std::string &name, Player &out, std::vector<float> &standing);
+    bool LoadPlayer(const std::string &name, Player &out, Captain &cap);     // (standing, papers and contracts go straight into 'cap')
     std::string PlayerPath(const std::string &name) const;
 
     ServerConfig cfg;

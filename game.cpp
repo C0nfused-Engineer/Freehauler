@@ -1,6 +1,7 @@
 // game.cpp - new game, the simulation step, and target queries
 #include "game.h"
 #include "comms.h"
+#include "contracts.h"
 #include "economy.h"
 #include "format.h"
 #include <algorithm>
@@ -427,6 +428,7 @@ void StepCaptain(World &w, Captain &c, const Controls &input, const Aim &aim, fl
     }
 
     if (authoritative) UpdateComms(w, c);
+    if (authoritative) StepContracts(w, c);
 
     // Docked: the captain's record of this market stays current (to the second)
     if (authoritative && f.nearBody >= 0 && c.loaded.bodies[f.nearBody].population > 0 && w.econ.Built()) {

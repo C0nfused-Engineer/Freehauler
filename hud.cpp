@@ -408,9 +408,9 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
     }
 
     if (showHelp) {
-        const char *help = online ? "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  M map  R factions  T trade log  N news  "
+        const char *help = online ? "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  M map  R factions  T trade log  N news  J contracts  "
                                     "MMB info  F hail / comms  LMB mine  ESC menu"
-                                  : "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  M map  R factions  T trade log  N news  "
+                                  : "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  M map  R factions  T trade log  N news  J contracts  "
                                     "MMB info  F hail / comms  LMB mine  F5/F9 quicksave/load  ESC menu";
         int size = 16;
         while (size > 10 && MeasureText(help, size) > sw - 40) size--;          // shrink to fit narrow windows

@@ -1,5 +1,6 @@
 // comms.cpp - hailing worlds, and what they say back
 #include "comms.h"
+#include "contracts.h"
 #include "economy.h"
 #include "format.h"
 #include <algorithm>
@@ -205,6 +206,14 @@ void RequestMarketReport(World &w, Captain &c, int body)
         for (CommsMsg &m : ch->log) if (!m.ours && m.at > w.clock && m.sent == w.clock) m.prices = true;
 }
 
+void RequestContracts(World &w, Captain &c, int body)
+{
+    if (body < 0 || body >= (int)c.loaded.bodies.size() || c.loaded.bodies[body].population <= 0) return;
+    Ask(w, c, body, "What work have you got?", { "Sending you our contracts board." }, 1.2);
+    if (CommsChannel *ch = c.comms.Find(TargetId::MakeBody(c.loaded.index, body)))        // (its arrival updates the record of the board)
+        for (CommsMsg &m : ch->log) if (!m.ours && m.at > w.clock && m.sent == w.clock) m.board = true;
+}
+
 void RequestLocalInfo(World &w, Captain &c, int body)
 {
     if (body < 0 || body >= (int)c.loaded.bodies.size()) return;
@@ -243,6 +252,7 @@ void UpdateComms(World &w, Captain &c)
             m.told = true;
             if (m.at - m.sent > 5.0) tell = true;
             if (m.prices && ch.with.index >= 0 && ch.with.index < (int)c.loaded.bodies.size()) RecordPrices(w, c, c.loaded.bodies[ch.with.index]);
+            if (m.board && ch.with.index >= 0 && ch.with.index < (int)c.loaded.bodies.size()) RecordBoard(w, c, c.loaded.bodies[ch.with.index]);
         }
         if (tell) w.Emit(EventType::Notice, ch.withName + " has replied  -  F for comms", ch.with, -1, 0.0, 0.0, c.id);
     }

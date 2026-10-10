@@ -7,10 +7,12 @@
 #include "game.h"
 
 struct Command {
-    enum Type : uint8_t { SellGoods, BuyFuel, Hail, MarketReport, LocalInfo, HangUp, BuyGoods, BuyData, Count };
+    enum Type : uint8_t { SellGoods, BuyFuel, Hail, MarketReport, LocalInfo, HangUp, BuyGoods, BuyData,
+                          Contracts, FactionBoard, Accept, Advance, Abandon, JoinGuild, BuyLicence, Count };
     Type     type = SellGoods;
-    int32_t  arg  = 0;        // SellGoods / BuyGoods: which good (goods.h); the comms ones: body index in the loaded system
-    double   qty  = 0.0;      // tonnes (1e30 = all you can)
+    int32_t  arg  = 0;        // SellGoods / BuyGoods: which good (goods.h); the comms ones (and Contracts): body index in the loaded
+                              // system; Accept / Advance / Abandon: the contract's id; FactionBoard / JoinGuild / BuyLicence: the faction
+    double   qty  = 0.0;      // tonnes (1e30 = all you can); BuyLicence: which paper (contract.h)
     uint32_t step = 0;        // multiplayer: the input step it was issued after (the server applies it then)
 };
 

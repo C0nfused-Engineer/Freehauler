@@ -2,6 +2,7 @@
 #include "tests.h"
 #include "client.h"
 #include "comms.h"
+#include "contracts.h"
 #include "economy.h"
 #include "process.h"
 #include "save.h"
@@ -1442,6 +1443,325 @@ static void TestEconomy()
     }
 }
 
+// Contracts: boards drawn up from the economy, taking and doing them, what's at stake
+static Contract &Inject(World &w, ContractKind kind, SysId sys, const Body &from, const Body &to, int good, float tonnes, float pay, float deposit)
+{
+    Contract k;
+    k.id = ++w.contractSeq; k.kind = kind;
+    k.fromBody = from.id; k.fromSys = sys; k.fromName = from.name;
+    k.toBody = to.id; k.toSys = sys; k.toName = to.name;
+    k.good = good; k.tonnes = tonnes; k.pay = pay; k.collateral = deposit;
+    k.allowed = 600.0; k.expires = w.clock + 5000.0;
+    w.contracts.push_back(k);
+    return w.contracts.back();
+}
+
+static void TestContracts()
+{
+    GameState g; NewGame(g);
+    Run(g, 0.1);
+    EnsureEconomy(g);
+    const FactionSet &fs = g.systems.factions;
+    const EconBase &base = *g.econ.base;
+    const SysId H = g.systems.home;
+    int station = g.flight.nearBody, world = TradeWorld(g);
+    CHECK(station >= 0 && world >= 0 && station != world, "docked at %s, with %s to run to", g.loaded.bodies[station].name.c_str(), g.loaded.bodies[world].name.c_str());
+    if (station < 0 || world < 0) return;
+    const Body A = g.loaded.bodies[station], B = g.loaded.bodies[world];
+    int mA = g.econ.MarketOf(A.id), mB = g.econ.MarketOf(B.id);
+
+    // The board comes over the comms, after the light delay, and is a copy as of then
+    Hail(g, station); Run(g, 2.0);
+    RequestContracts(g, g, station);
+    CHECK(g.offers.empty() && !g.boards.count(A.id), "asked %s for work: nothing until the reply arrives", A.name.c_str());
+    Run(g, 3.0);
+    int here = 0;
+    for (const Contract &k : g.offers) if (k.listKey == A.id && k.fromBody == A.id) here++;
+    CHECK(g.boards.count(A.id) && here >= 3 && here == (int)g.offers.size(), "...then its board: %d contracts (\"%s\")", here,
+          g.offers.empty() ? "" : ContractTitle(g.offers[0]).c_str());
+
+    // Boards across human space: every kind of work turns up, and it all adds up
+    {
+        Captain all;                                               // (a member of every guild, to see everything)
+        for (const Faction &f : fs.list) if (f.kind == FactionKind::Guild) all.SetPaper(f.id, PAPER_MEMBER);
+        int kinds[(int)ContractKind::Count] = {}, bad = 0, guild = 0, gated = 0, relief = 0, boards = 0;
+        for (int i = 0; i < g.econ.Count(); i += 7) {
+            Body fake; fake.id = base.defs[i].bodyId;
+            RecordBoard(g, all, fake);
+            boards++;
+        }
+        for (const Contract &k : all.offers) {
+            kinds[(int)k.kind]++;
+            if (k.guild != NO_FACTION) guild++;
+            if (k.minStanding > 0.0f) gated++;
+            if (k.effect == ContractEffect::Relief) relief++;
+            bool cargo = k.kind == ContractKind::Haulage || k.kind == ContractKind::Supply || k.kind == ContractKind::Smuggling;
+            if (k.pay <= 0.0f || k.allowed < 300.0 || k.expires <= g.clock || g.econ.MarketOf(k.fromBody) < 0 || g.econ.MarketOf(k.toBody) < 0 ||
+                (cargo && (k.good < 0 || k.tonnes < 3.0f || k.tonnes > CARGO_CAPACITY)) ||
+                ((k.kind == ContractKind::Haulage || k.kind == ContractKind::Smuggling) && k.collateral <= 0.0f) ||
+                (k.kind == ContractKind::Survey && (!g.systems.Exists(k.surveySys) || g.systems[k.surveySys].develop > 0.0f || k.need < 2)) ||
+                (k.kind == ContractKind::Smuggling && (fs.Get(k.against) == nullptr || k.fromBody == k.toBody))) bad++;
+        }
+        int n = (int)all.offers.size();
+        CHECK(bad == 0 && n >= 3 * boards && kinds[0] > 0 && kinds[1] > 0 && kinds[2] > 0 && kinds[3] > 0 && kinds[4] > 0 && guild > 0 && gated > 0,
+              "%d boards: %d contracts, all sound - %d haulage, %d supply, %d smuggling, %d survey, %d courier; %d for guild members, %d wanting standing",
+              boards, n, kinds[0], kinds[1], kinds[2], kinds[3], kinds[4], guild, gated);
+        Captain nobody;
+        Body fake; fake.id = A.id;
+        RecordBoard(g, nobody, fake);
+        int open = 0, shut = 0;
+        for (const Contract &k : nobody.offers) (k.guild == NO_FACTION ? open : shut)++;
+        size_t before = g.contracts.size();
+        g.clock += BOARD_REFRESH * 0.5; RecordBoard(g, nobody, fake);
+        bool kept = g.contracts.size() == before;
+        g.clock += BOARD_REFRESH; RecordBoard(g, nobody, fake);
+        CHECK(open > 0 && shut == 0 && kept, "a captain in no guild sees only the open work (%d here); a board stands for a market day, then is drawn up afresh", open);
+        g.clock += 3.0 * MARKET_DAY; Run(g, 6.0);
+        CHECK(g.contracts.size() < before, "offers lapse (%d left of %d)", (int)g.contracts.size(), (int)before);
+    }
+
+    // Haulage: a deposit, their cargo, real stock moved, pay and standing
+    g.player.credits = 5000.0;
+    g.standing.assign(fs.Count(), 0.0f);
+    for (int k = 0; k < GOOD_COUNT; k++) g.player.cargo[k] = 0.0;
+    Park(g, station, 0.9); Run(g, 0.1);
+    {
+        Contract &k = Inject(g, ContractKind::Haulage, H, A, B, REF_FOOD, 20.0f, 1000.0f, 2000.0f);
+        k.issuer = 0;
+        uint32_t id = k.id;
+        float stockA = g.econ.state[mA].stock[REF_FOOD], stockB = g.econ.state[mB].stock[REF_FOOD];
+        bool took = AcceptContract(g, g, id);
+        CHECK(took && g.jobs.size() == 1 && g.player.credits == 3000.0 && g.contracts.end() == std::find_if(g.contracts.begin(), g.contracts.end(),
+              [&](const Contract &c) { return c.id == id; }) && !g.jobs[0].loaded, "accepted: off the board, 2,000 cr deposit down");
+        CHECK(!AcceptContract(g, g, id), "...and nobody can take it twice");
+        bool loadedOk = AdvanceContract(g, g, id);
+        CHECK(loadedOk && g.player.cargo[REF_FOOD] == 20.0 && fabs(stockA - g.econ.state[mA].stock[REF_FOOD] - 20.0f) < 0.01f && g.jobs[0].loaded,
+              "collected at the dock: 20 t of their food aboard, out of %s's stock", A.name.c_str());
+        CHECK(!AdvanceContract(g, g, id) && g.jobs.size() == 1, "can't deliver from here");
+        Park(g, world, 0.9); Run(g, 0.1);
+        stockB = g.econ.state[mB].stock[REF_FOOD];
+        bool here2 = false;
+        JobStatus(g, g, g.jobs[0], &here2);
+        bool delivered = AdvanceContract(g, g, id);
+        CHECK(here2 && delivered && g.jobs.empty() && g.player.credits == 6000.0 && g.player.cargo[REF_FOOD] == 0.0 &&
+              fabs(g.econ.state[mB].stock[REF_FOOD] - stockB - 20.0f) < 0.01f && g.standing[0] > 1.0f,
+              "delivered: paid 1,000 cr, deposit back, the food is in %s's stock, standing with %s %+.1f", B.name.c_str(), fs.Name(0).c_str(), g.standing[0]);
+
+        // Late: half pay. Very late: failed, and the deposit is gone (the cargo is yours).
+        Park(g, station, 0.9); Run(g, 0.1);
+        Contract &late = Inject(g, ContractKind::Haulage, H, A, B, REF_FOOD, 10.0f, 1000.0f, 1500.0f);
+        late.issuer = 0; id = late.id;
+        AcceptContract(g, g, id); AdvanceContract(g, g, id);
+        Park(g, world, 0.9); Run(g, 0.1);
+        g.clock += 700.0;
+        float was = g.standing[0];
+        double cr = g.player.credits;
+        AdvanceContract(g, g, id);
+        CHECK(g.player.credits - cr == 500.0 + 1500.0 && g.standing[0] == was, "ten minutes allowed, delivered after twelve: half pay and no thanks");
+        Park(g, station, 0.9); Run(g, 0.1);
+        Contract &lost = Inject(g, ContractKind::Haulage, H, A, B, REF_FOOD, 10.0f, 1000.0f, 1500.0f);
+        lost.issuer = 0; id = lost.id;
+        AcceptContract(g, g, id); AdvanceContract(g, g, id);
+        cr = g.player.credits; was = g.standing[0];
+        g.clock += 901.0; Run(g, 0.05);
+        CHECK(g.jobs.empty() && g.player.credits == cr && g.player.cargo[REF_FOOD] == 10.0 && g.standing[0] < was - 2.0f,
+              "never delivered: failed at 15 minutes, deposit forfeit, their 10 t is yours, standing %+.1f", g.standing[0] - was);
+        g.player.cargo[REF_FOOD] = 0.0;
+        // Handed back before collecting: deposit returned, back on the board
+        Contract &back = Inject(g, ContractKind::Haulage, H, A, B, REF_FOOD, 10.0f, 1000.0f, 1500.0f);
+        id = back.id;
+        cr = g.player.credits;
+        AcceptContract(g, g, id);
+        bool gave = AbandonContract(g, g, id);
+        CHECK(gave && g.jobs.empty() && g.player.credits == cr && std::any_of(g.contracts.begin(), g.contracts.end(), [&](const Contract &c) { return c.id == id; }),
+              "handed back before collecting: deposit returned, and it's on the board again");
+    }
+
+    // Supply from your own hold; five at once and no more; standing, guilds and licences open the better work
+    {
+        Park(g, station, 0.9); Run(g, 0.1);
+        std::vector<uint32_t> ids;
+        for (int i = 0; i < MAX_JOBS + 1; i++) ids.push_back(Inject(g, ContractKind::Supply, H, A, A, ORE_IRON, 5.0f, 300.0f, 0.0f).id);
+        int taken = 0;
+        for (uint32_t id : ids) if (AcceptContract(g, g, id)) taken++;
+        CHECK(taken == MAX_JOBS && (int)g.jobs.size() == MAX_JOBS, "%d contracts at once, and no more", MAX_JOBS);
+        double cr = g.player.credits;
+        bool short_ = AdvanceContract(g, g, ids[0]);
+        g.player.cargo[ORE_IRON] = 7.0;
+        bool full = AdvanceContract(g, g, ids[0]);
+        CHECK(!short_ && full && g.player.cargo[ORE_IRON] == 2.0 && g.player.credits == cr + 300.0, "a supply order takes the goods from your own hold");
+        for (uint32_t id : ids) AbandonContract(g, g, id);
+        g.contracts.clear();
+        g.standing.assign(fs.Count(), 0.0f);
+
+        int guild = NO_FACTION, state = NO_FACTION;
+        for (const Faction &f : fs.list) {
+            if (guild == NO_FACTION && f.kind == FactionKind::Guild && f.guild == GuildKind::Traders) guild = f.id;
+            if (state == NO_FACTION && f.kind == FactionKind::Government && !f.contraband.empty()) state = f.id;
+        }
+        Contract &ranked = Inject(g, ContractKind::Supply, H, A, A, ORE_IRON, 5.0f, 300.0f, 0.0f);
+        ranked.issuer = 0; ranked.minStanding = 20.0f;
+        uint32_t rid = ranked.id;
+        bool barred = !AcceptContract(g, g, rid);
+        g.standing[0] = 25.0f;
+        CHECK(barred && AcceptContract(g, g, rid), "work that wants standing: \"%s\" - refused a stranger, given to a %s", ContractTerms(fs, g.jobs.back()).c_str(), RankName(fs.list[0], 25.0f));
+        Contract &members = Inject(g, ContractKind::Supply, H, A, A, ORE_IRON, 5.0f, 300.0f, 0.0f);
+        members.guild = members.issuer = guild;
+        uint32_t mid = members.id;
+        bool shut = !AcceptContract(g, g, mid);
+        g.player.credits = 100.0;
+        bool poor = !JoinGuild(g, g, guild);
+        g.player.credits = 30000.0;
+        bool joined = JoinGuild(g, g, guild);
+        CHECK(shut && poor && joined && g.player.credits == 30000.0 - GUILD_FEE && (g.Papers(guild) & PAPER_MEMBER) && AcceptContract(g, g, mid) && !JoinGuild(g, g, guild),
+              "%s work is for members: joined for %.0f cr, then took it", fs.Name(guild).c_str(), GUILD_FEE);
+        Contract &bonded = Inject(g, ContractKind::Haulage, H, A, B, REF_FOOD, 10.0f, 900.0f, 1000.0f);
+        bonded.licence = 0;
+        uint32_t bid = bonded.id;
+        bool noBond = !AcceptContract(g, g, bid);
+        g.standing[0] = 0.0f;
+        bool noRank = !BuyLicence(g, g, 0, PAPER_CARRIER);
+        g.standing[0] = 25.0f;
+        double cr2 = g.player.credits;
+        bool bought = BuyLicence(g, g, 0, PAPER_CARRIER);
+        CHECK(noBond && noRank && bought && cr2 - g.player.credits == CARRIER_COST && AcceptContract(g, g, bid),
+              "high-value haulage wants a bonded carrier: the licence takes standing and %.0f cr", CARRIER_COST);
+        CHECK(!JoinGuild(g, g, 0) && !BuyLicence(g, g, guild, PAPER_CARRIER) && !BuyLicence(g, g, 0, PAPER_PERMIT),
+              "guilds don't sell licences, states don't take members, and the free port bans nothing to permit");
+        while (!g.jobs.empty()) AbandonContract(g, g, g.jobs[0].id);
+        g.player.cargo[REF_FOOD] = 0.0;
+
+        // Customs, and the permit that makes it lawful
+        int banned = -1, gd = -1;
+        for (int i = 0; i < g.econ.Count() && banned < 0; i++)
+            for (int k = 0; k < GOOD_COUNT; k++)
+                if (base.defs[i].banned[k] && !base.defs[i].station && base.defs[i].ruler == state) { banned = i; gd = k; break; }
+        CHECK(banned >= 0, "found a lawful port of %s (%s bans %s)", fs.Name(state).c_str(), banned >= 0 ? base.defs[banned].name.c_str() : "?", banned >= 0 ? GoodData(gd).name : "?");
+        if (banned >= 0) {
+            const MarketDef &d = base.defs[banned];
+            g.player.ship.anchor = d.sys; g.player.ship.pos = {};
+            UpdateLoadedSystem(g);
+            g.standing[state] = 0.0f;
+            int searched = 0, waved = 0;
+            double fines = 0.0;
+            for (int tries = 0; tries < 24; tries++) {
+                Park(g, d.body, 5.0); Run(g, 0.05);
+                g.player.cargo[gd] = 4.0; g.player.credits = 10000.0;
+                g.clock += 7.0;
+                Park(g, d.body, 0.9); Run(g, 0.05);
+                if (g.player.cargo[gd] == 0.0) { searched++; fines += 10000.0 - g.player.credits; } else waved++;
+            }
+            CHECK(searched > 0 && fines > 0.0 && g.standing[state] < -3.0f, "docking at %s with %s aboard, 24 times: searched %d, waved through %d; fined %.0f cr in all, standing %+.0f",
+                  d.name.c_str(), GoodData(gd).name, searched, waved, fines, g.standing[state]);
+            g.standing[state] = 60.0f; g.player.credits = 50000.0;
+            bool permit = BuyLicence(g, g, state, PAPER_PERMIT);
+            int seized = 0;
+            for (int tries = 0; tries < 12; tries++) {
+                Park(g, d.body, 5.0); Run(g, 0.05);
+                g.player.cargo[gd] = 4.0;
+                g.clock += 7.0;
+                Park(g, d.body, 0.9); Run(g, 0.05);
+                if (g.player.cargo[gd] == 0.0) seized++;
+            }
+            double cr3 = g.player.credits;
+            bool sold = SellGoods(g, gd, 4.0);
+            CHECK(permit && seized == 0 && sold && g.player.credits > cr3 + 4.0 * GoodData(gd).basePrice,
+                  "with %s's restricted goods permit: no searches, and the port buys it under licence (+%.0f cr for 4 t)", fs.Name(state).c_str(), g.player.credits - cr3);
+        }
+    }
+
+    // Surveys: scan the worlds of an empty system from close by, and bring it back
+    g.player.ship.anchor = H; g.player.ship.pos = {};
+    UpdateLoadedSystem(g);
+    Park(g, station, 0.9); Run(g, 0.1);
+    {
+        Captain all;
+        for (const Faction &f : fs.list) if (f.kind == FactionKind::Guild) all.SetPaper(f.id, PAPER_MEMBER);
+        Contract survey;
+        bool found = false;
+        for (int i = 0; i < g.econ.Count() && !found; i++) {
+            Body fake; fake.id = base.defs[i].bodyId;
+            RecordBoard(g, all, fake);
+            for (const Contract &k : all.offers) if (k.kind == ContractKind::Survey) { survey = k; found = true; break; }
+        }
+        CHECK(found, "found a survey on offer: %s", found ? ContractTitle(survey).c_str() : "none");
+        if (found) {
+            Contract &k = Inject(g, ContractKind::Survey, H, A, A, -1, 0.0f, 900.0f, 0.0f);
+            k.surveySys = survey.surveySys; k.surveyName = survey.surveyName; k.need = survey.need; k.effect = ContractEffect::Charts;
+            uint32_t id = k.id;
+            AcceptContract(g, g, id);
+            bool early = AdvanceContract(g, g, id);
+            g.player.ship.anchor = survey.surveySys; g.player.ship.pos = {};
+            UpdateLoadedSystem(g);
+            Run(g, 0.05);
+            int atStar = g.jobs[0].Scanned();
+            for (int i = 0; i < (int)g.loaded.bodies.size() && g.jobs[0].Scanned() < survey.need; i++)
+                if (g.loaded.bodies[i].kind == Kind::Planet) { Park(g, i, 0.5); Run(g, 0.05); }
+            int scanned = g.jobs[0].Scanned();
+            bool far = AdvanceContract(g, g, id);
+            g.player.ship.anchor = H; g.player.ship.pos = {};
+            UpdateLoadedSystem(g);
+            Park(g, station, 0.9); Run(g, 0.1);
+            double cr = g.player.credits;
+            size_t news = g.news.size();
+            bool done = AdvanceContract(g, g, id);
+            CHECK(!early && atStar < survey.need && scanned == survey.need && !far && done && g.player.credits == cr + 900.0 && g.news.size() == news + 1,
+                  "surveyed %d worlds of %s and brought it home: \"%s\"", scanned, survey.surveyName.c_str(), g.news.empty() ? "" : g.news.back().text.c_str());
+        }
+    }
+
+    // Contracts that push the world: relief, and arms for a faction's fight
+    {
+        int clan = NO_FACTION;
+        for (const Faction &f : fs.list) if (f.kind == FactionKind::Clan) { clan = f.id; break; }
+        g.econ.shocks.push_back({ mA, 0.2f, 1.0f, g.clock + 4.0 * MARKET_DAY });
+        double until = g.econ.shocks.back().until;
+        Contract &relief = Inject(g, ContractKind::Supply, H, A, A, REF_FOOD, 5.0f, 500.0f, 0.0f);
+        relief.effect = ContractEffect::Relief;
+        uint32_t id = relief.id;
+        g.player.cargo[REF_FOOD] = 10.0;
+        AcceptContract(g, g, id); AdvanceContract(g, g, id);
+        Contract &arms = Inject(g, ContractKind::Supply, H, A, A, REF_FOOD, 5.0f, 500.0f, 0.0f);
+        arms.effect = ContractEffect::ArmPatrols; arms.effectOn = clan; arms.against = clan; arms.issuer = 0;
+        id = arms.id;
+        float raid = g.econ.raid[clan], regard = g.Standing(clan);
+        AcceptContract(g, g, id); AdvanceContract(g, g, id);
+        CHECK(g.econ.shocks.back().until == until - MARKET_DAY && g.econ.raid[clan] < raid && g.Standing(clan) < regard && g.jobs.empty(),
+              "a relief run ends a strike a day sooner; resupplying patrols drives %s back (raiding %.2f to %.2f) and they don't forget it (%+.1f)",
+              fs.Name(clan).c_str(), raid, g.econ.raid[clan], g.Standing(clan) - regard);
+        g.econ.shocks.pop_back();
+    }
+
+    // A faction's list: its agenda's work and its worst shortages, for anyone to read
+    {
+        int lists = 0, total = 0, agenda = 0;
+        for (const Faction &f : fs.list) {
+            RequestFactionBoard(g, g, f.id);
+            int n = 0;
+            for (const Contract &k : g.offers) if (k.listKey == BoardKey(f.id)) { n++; if (k.effect == ContractEffect::ArmPatrols || k.effect == ContractEffect::ArmClan || k.against != NO_FACTION) agenda++; }
+            if (n) lists++;
+            total += n;
+        }
+        CHECK(lists > fs.Count() / 3 && agenda > 0, "%d of %d factions have work on their lists: %d contracts, %d of them from their agendas", lists, fs.Count(), total, agenda);
+    }
+
+    // Saved and loaded
+    {
+        Contract &k = Inject(g, ContractKind::Haulage, H, A, B, REF_FOOD, 10.0f, 1000.0f, 1500.0f);
+        g.player.credits = 9000.0; g.player.cargo[REF_FOOD] = 0.0;
+        uint32_t id = k.id;
+        AcceptContract(g, g, id); AdvanceContract(g, g, id);
+        CHECK(SaveGame(g, "test_contracts.txt"), "saved with contracts");
+        GameState h; NewGame(h);
+        bool loaded = LoadGame(h, "test_contracts.txt");
+        CHECK(loaded && h.jobs.size() == 1 && h.jobs[0].id == id && h.jobs[0].loaded && h.jobs[0].toName == B.name && h.jobs[0].deadline == g.jobs[0].deadline &&
+              h.jobs[0].pay == 1000.0f && h.papers == g.papers && h.offers.size() == g.offers.size() && h.boards.size() == g.boards.size() &&
+              h.contracts.size() == g.contracts.size() && h.contractSeq == g.contractSeq && h.boardMade.size() == g.boardMade.size(),
+              "your contracts, papers and what you'd read of the boards round-trip, and so do the boards themselves (%d on offer)", (int)h.contracts.size());
+        remove("test_contracts.txt");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Multiplayer: the wire format and the reliable channel, without sockets
 // ---------------------------------------------------------------------------
@@ -1673,6 +1993,42 @@ static void TestNetwork()
               "news reaches everyone");
     }
 
+    // --- Contracts: the server keeps the boards; a contract goes to whoever accepts it first ---
+    {
+        sa = OnServer(srv, "Alice");
+        Captain *sbob = OnServer(srv, "Bob");
+        Park(srv.world, *sbob, c, 0.9);
+        const Body &port = sa->loaded.bodies[c];
+        Pump(srv, { &alice, &bob }, 0.5);
+        alice.net.SendCommand({ Command::Hail, c });
+        bob.net.SendCommand({ Command::Hail, c });
+        Pump(srv, { &alice, &bob }, 2.5);
+        alice.net.SendCommand({ Command::Contracts, c });
+        Pump(srv, { &alice, &bob }, 3.0);                             // (the board is drawn up the first time someone asks)
+        uint32_t id = Inject(srv.world, ContractKind::Supply, srv.world.systems.home, port, port, sg, 5.0f, 400.0f, 0.0f).id;
+        alice.net.SendCommand({ Command::Contracts, c });
+        bob.net.SendCommand({ Command::Contracts, c });
+        Pump(srv, { &alice, &bob }, 3.0);
+        auto has = [&](const std::vector<Contract> &list) { return std::any_of(list.begin(), list.end(), [&](const Contract &o) { return o.id == id; }); };
+        CHECK(alice.g.boards.count(port.id) && has(alice.g.offers) && has(bob.g.offers) && alice.g.offers.size() >= 3 && alice.g.contracts.empty(),
+              "both asked %s for work: the board (%d contracts) reached both clients", port.name.c_str(), (int)alice.g.offers.size());
+        alice.net.SendCommand({ Command::Accept, (int32_t)id });
+        Pump(srv, { &alice, &bob }, 0.5);
+        bob.net.SendCommand({ Command::Accept, (int32_t)id });
+        Pump(srv, { &alice, &bob }, 0.5);
+        CHECK(has(alice.g.jobs) && !has(alice.g.offers) && bob.g.jobs.empty() && !has(bob.g.offers) && bob.Heard("someone else took it"),
+              "Alice accepted first and has it; Bob was told it had gone, and it's off his list");
+        OnServer(srv, "Alice")->player.cargo[sg] = 5.0;
+        double before = alice.g.player.credits;
+        alice.net.SendCommand({ Command::Advance, (int32_t)id });
+        Pump(srv, { &alice, &bob }, 0.5);
+        CHECK(alice.g.jobs.empty() && alice.g.player.credits == before + 400.0 && alice.Heard("Contract complete"), "...and delivered it through the server: +400 cr");
+        alice.net.SendCommand({ Command::HangUp, c });
+        bob.net.SendCommand({ Command::HangUp, c });
+        Pump(srv, { &alice, &bob }, 0.3);
+        alice.g.comms.channels.clear(); bob.g.comms.channels.clear();
+    }
+
     // --- Comms: the log comes back from the server, replies after the light-speed delay ---
     alice.net.SendCommand({ Command::Hail, c });
     Pump(srv, { &alice, &bob }, 3.0);
@@ -1799,7 +2155,7 @@ int RunHeadlessTests(const char *only)
     struct T { const char *name; void (*fn)(); };
     const T tests[] = {
         { "fuel", TestFuel }, { "flight", TestFlight }, { "trade", TestTrade }, { "stations", TestStations }, { "hz", TestHabitableZone },
-        { "skimming", TestSkimming }, { "comms", TestComms }, { "galaxy", TestGalaxy }, { "systems", TestSystems }, { "maps", TestMaps }, { "factions", TestFactions }, { "economy", TestEconomy },
+        { "skimming", TestSkimming }, { "comms", TestComms }, { "galaxy", TestGalaxy }, { "systems", TestSystems }, { "maps", TestMaps }, { "factions", TestFactions }, { "economy", TestEconomy }, { "contracts", TestContracts },
         { "targeting", TestTargeting }, { "mining", TestMining }, { "save", TestSaveLoad },
         { "protocol", TestProtocol }, { "net", TestNetwork }, { "host", TestHosting },
     };
@@ -2073,6 +2429,27 @@ std::unique_ptr<ScriptedInput> MakeScript(const std::string &name)
             if (f == 300) s.screenshot = "econ_news.png";
             if (f == 304) in.Press(KEY_ESCAPE);
             if (f == 310) s.done = true;
+        };
+        return s;
+    }
+    if (name == "contracts") {                                               // a station's board, your contracts, a faction's list
+        s->body = [](ScriptedInput &s, InputFrame &in) {
+            GameState &g = *s.game;
+            int f = s.frame;
+            if (f == 10)  g.player.credits = 6000;
+            if (f == 20)  in.Press(KEY_F);
+            if (f == 200) in.Press(KEY_FOUR);
+            if (f == 420) s.screenshot = "contracts_board.png";
+            if (f == 424 || f == 430 || f == 436) in.Press(KEY_ENTER), in.Press(KEY_DOWN);     // take a few
+            if (f == 444) in.Press(KEY_TAB);
+            if (f == 452) s.screenshot = "contracts_mine.png";
+            if (f == 456) in.Press(KEY_ESCAPE);
+            if (f == 460) in.Press(KEY_R);
+            if (f >= 464 && f < 470) in.Press(KEY_DOWN);
+            if (f == 474) s.screenshot = "contracts_faction.png";
+            if (f == 478) in.Press(KEY_C);
+            if (f == 490) s.screenshot = "contracts_list.png";
+            if (f == 495) s.done = true;
         };
         return s;
     }
