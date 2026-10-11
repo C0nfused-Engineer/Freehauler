@@ -34,12 +34,18 @@ const char *ContractKindName(ContractKind k)
     return names[(int)k < (int)ContractKind::Count ? (int)k : 0];
 }
 
+std::string ContractLabel(const Contract &k)
+{
+    if (k.law == NO_FACTION) return ContractKindName(k.kind);
+    return k.kind == ContractKind::Supply ? "Smuggling (supply order)" : "Smuggling";
+}
+
 std::string ContractTitle(const Contract &k)
 {
     const char *good = k.good >= 0 && k.good < GOOD_COUNT ? GoodData(k.good).name : "cargo";
     switch (k.kind) {
     case ContractKind::Haulage:   return TextFormat("Haul %.0f t %s to %s", k.tonnes, good, k.toName.c_str());
-    case ContractKind::Supply:    return TextFormat("Supply %.0f t %s to %s", k.tonnes, good, k.toName.c_str());
+    case ContractKind::Supply:    return TextFormat(k.law != NO_FACTION ? "Supply %.0f t %s to %s, quietly" : "Supply %.0f t %s to %s", k.tonnes, good, k.toName.c_str());
     case ContractKind::Smuggling: return TextFormat("Run %.0f t %s to %s, quietly", k.tonnes, good, k.toName.c_str());
     case ContractKind::Survey:    return TextFormat("Survey %d worlds of %s", k.need, k.surveyName.c_str());
     default:                      return TextFormat("Courier run to %s", k.toName.c_str());
@@ -148,13 +154,39 @@ static bool   Shady(const World &w, int market)                           // nob
 static void From(Contract &k, const MarketDef &d) { k.fromBody = d.bodyId; k.fromSys = d.sys; k.fromName = d.name; }
 static void To(Contract &k, const MarketDef &d)   { k.toBody = d.bodyId; k.toSys = d.sys; k.toName = d.name; }
 
-static void Post(World &w, Contract k)
+// The government whose contraband a contract's cargo is, if it starts or ends in its space (NO_FACTION: it's lawful
+// all the way). Lawful markets there don't deal in it, but a freeport or a clan's station in the same space will, and
+// getting it there means running that government's customs and patrols.
+static int LawBroken(const World &w, const Contract &k)
 {
+    if (k.good < 0 || k.kind == ContractKind::Survey || k.kind == ContractKind::Courier) return NO_FACTION;
+    for (uint64_t body : { k.toBody, k.fromBody }) {
+        int m = w.econ.MarketOf(body);
+        const Faction *law = m >= 0 ? w.systems.factions.Get(w.econ.base->defs[m].ruler) : nullptr;
+        if (law && std::find(law->contraband.begin(), law->contraband.end(), k.good) != law->contraband.end()) return law->id;
+    }
+    return NO_FACTION;
+}
+
+// On to the board. False if it isn't posted (a government doesn't advertise for its own contraband).
+static bool Post(World &w, Contract k)
+{
+    int law = LawBroken(w, k);
+    if (law != NO_FACTION) {
+        if (k.issuer == law || k.guild != NO_FACTION) return false;
+        // It's smuggling, whatever it was drawn up as, and is labelled and paid as such
+        if (k.law == NO_FACTION) k.pay *= 1.4f;
+        k.law = law;
+        if (k.kind == ContractKind::Haulage) k.kind = ContractKind::Smuggling;
+        if (k.against == NO_FACTION) k.against = law;
+        k.licence = NO_FACTION; k.minStanding = 0.0f;
+    }
     k.id = ++w.contractSeq;
     if (k.expires <= 0.0) k.expires = w.clock + 2.0 * MARKET_DAY;
     k.pay = floorf(k.pay / 10.0f + 0.5f) * 10.0f;
     k.collateral = floorf(k.collateral / 10.0f + 0.5f) * 10.0f;
     w.contracts.push_back(k);
+    return true;
 }
 
 // The markets a place deals with: its own system's, and those of the systems its hub has lanes to
@@ -335,7 +367,7 @@ static void MakeBoard(World &w, int m)
     for (int i : all) if (base.defs[i].hub != d.hub) abroad.push_back(i);
     Contract k;
     int posted = 0;
-    auto post = [&](Contract &c, bool gate = true) { if (gate) Gate(c, dice); Post(w, c); posted++; };
+    auto post = [&](Contract &c, bool gate = true) { if (gate) Gate(c, dice); if (Post(w, c)) posted++; };
 
     // Short of something: supply orders (and if something has gone wrong here, they're relief)
     const Shock *shock = ShockAt(w, m);
@@ -465,7 +497,7 @@ static void MakeFactionBoard(World &w, const Faction &f)
     Dice dice{ Mix64(w.seed ^ (0xFAC7ull * (uint64_t)(f.id + 1)) ^ (uint64_t)(w.clock / BOARD_REFRESH + 1.0) * 0x9E3779B97F4A7C15ull) };
     Contract k;
     int posted = 0;
-    auto post = [&](Contract &c) { c.wide = true; if (c.issuer == NO_FACTION) c.issuer = f.id; Post(w, c); posted++; };
+    auto post = [&](Contract &c) { c.wide = true; if (c.issuer == NO_FACTION) c.issuer = f.id; if (Post(w, c)) posted++; };
     auto arms = [&](int market, int good, double tonnes, ContractEffect effect, int on, int against) {
         if (market < 0 || !MakeSupply(w, market, good, tonnes, 1.6, k)) return;
         k.issuer = f.id; k.effect = effect; k.effectOn = on; k.against = against;
@@ -875,7 +907,7 @@ static std::string Line(const char *key, const Contract &k)
                       (unsigned long long)k.fromBody, (unsigned long long)k.toBody, (long long)k.fromSys, (long long)k.toSys, (long long)k.surveySys,
                       k.need, (unsigned long long)k.scanMask, k.good, k.tonnes, k.pay, k.collateral, k.expires, k.allowed, k.deadline,
                       k.loaded ? 1 : 0, (unsigned long long)k.listKey)
-           + std::string(" |") + k.fromName + "|" + k.toName + "|" + k.surveyName + "\n";
+           + std::string(" |") + k.fromName + "|" + k.toName + "|" + k.surveyName + TextFormat("|%d", k.law) + "\n";
 }
 
 static bool Parse(const char *rest, Contract &k)
@@ -899,6 +931,8 @@ static bool Parse(const char *rest, Contract &k)
     size_t b = names.find('|', a + 1), c = b == std::string::npos ? b : names.find('|', b + 1);
     if (b == std::string::npos || c == std::string::npos) return true;
     k.fromName = names.substr(a + 1, b - a - 1); k.toName = names.substr(b + 1, c - b - 1); k.surveyName = names.substr(c + 1);
+    size_t d = k.surveyName.find('|');                             // (newer saves: whose contraband it is)
+    if (d != std::string::npos) { k.law = atoi(k.surveyName.c_str() + d + 1); k.surveyName.resize(d); }
     return true;
 }
 

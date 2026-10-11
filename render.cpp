@@ -1,5 +1,6 @@
 // render.cpp - drawing the 3D scene
 #include "render.h"
+#include "sensors.h"
 #include "npcs.h"
 #include "targetinfo.h"
 #include "theme.h"
@@ -212,6 +213,33 @@ static Mesh GenSkimmerMesh()
     m.Lathe({ 0, 0, 0 }, { { 0.0f, 0.30f }, { 0.03f, 0.30f }, { 0.03f, -0.70f }, { 0.0f, -0.70f } }, 6);       // boom
     m.Box({ 0, -0.12f, 0 }, 0.08f, 0.07f, 0.08f);                                                         // pump house
     m.Lathe({ 0, 0, 0 }, { { 0.0f, -0.66f }, { 0.06f, -0.70f }, { 0.27f, -0.94f }, { 0.0f, -0.84f } }, 10);   // scoop
+    return m.Build();
+}
+
+// A sensor outpost: a military tachyon early-warning station. The detector is a volume, so most of it is one great
+// faceted tank, belted with armour; three long outriggers carry the arrays that give a burst its bearing, with a
+// gun platform at the root of each. The command block and its radar sit on top, the reactor on a spine below.
+static Mesh GenOutpostMesh()
+{
+    MeshBuilder m;
+    m.Lathe({ 0, 0, 0 }, { { 0.0f, 0.40f }, { 0.34f, 0.36f }, { 0.50f, 0.20f }, { 0.50f, -0.20f }, { 0.34f, -0.36f }, { 0.0f, -0.40f } }, 8);      // the detector tank
+    m.Lathe({ 0, 0, 0 }, { { 0.50f, 0.07f }, { 0.58f, 0.07f }, { 0.58f, -0.07f }, { 0.50f, -0.07f }, { 0.50f, 0.07f } }, 8);                      // armour belt
+    for (int k = 0; k < 3; k++) {
+        float a = 2.0f * PI * k / 3.0f;
+        Vector3 d = { cosf(a), 0, sinf(a) }, side = { -sinf(a), 0, cosf(a) };
+        m.Box(Vector3Scale(d, 0.76f), Vector3Scale(d, 0.19f), { 0, 0.018f, 0 }, Vector3Scale(side, 0.018f));                                    // outrigger
+        m.Box(Vector3Scale(d, 0.95f), Vector3Scale(d, 0.035f), { 0, 0.16f, 0 }, Vector3Scale(side, 0.10f));                                     // array panel at its tip
+        m.Box(Vector3Add(Vector3Scale(d, 0.62f), { 0, 0.05f, 0 }), Vector3Scale(d, 0.05f), { 0, 0.03f, 0 }, Vector3Scale(side, 0.05f));         // gun platform
+        m.Box(Vector3Add(Vector3Scale(d, 0.70f), { 0, 0.07f, 0 }), Vector3Scale(d, 0.06f), { 0, 0.008f, 0 }, Vector3Scale(side, 0.008f));       // ...and its barrel
+        float b = a + PI / 3.0f;                                                                                                            // between the outriggers:
+        Vector3 e = { cosf(b), 0, sinf(b) }, es = { -sinf(b), 0, cosf(b) };
+        m.Box(Vector3Add(Vector3Scale(e, 0.60f), { 0, -0.02f, 0 }), Vector3Scale(e, 0.04f), { 0, 0.05f, 0 }, Vector3Scale(es, 0.12f));         // a hangar for the pickets
+    }
+    m.Box({ 0, 0.47f, 0 }, 0.13f, 0.07f, 0.13f);                                                                                           // command block
+    m.Box({ 0, 0.62f, 0 }, 0.012f, 0.08f, 0.012f);                                                                                         // mast
+    m.Lathe({ 0, 0, 0 }, { { 0.0f, 0.70f }, { 0.12f, 0.76f }, { 0.0f, 0.72f } }, 8);                                                       // radar dish
+    m.Lathe({ 0, 0, 0 }, { { 0.0f, -0.40f }, { 0.04f, -0.40f }, { 0.04f, -0.78f }, { 0.0f, -0.78f } }, 6);                                  // spine
+    m.Box({ 0, -0.86f, 0 }, 0.11f, 0.09f, 0.11f);                                                                                          // reactor
     return m.Build();
 }
 
@@ -545,6 +573,7 @@ void RenderAssets::Load()
     collector  = LoadVectorModel(LoadModelFromMesh(GenCollectorMesh()));
     greenhouse = LoadVectorModel(LoadModelFromMesh(GenGreenhouseMesh()));
     skimmer    = LoadVectorModel(LoadModelFromMesh(GenSkimmerMesh()));
+    outpost    = LoadVectorModel(LoadModelFromMesh(GenOutpostMesh()));
     planet.model.transform = POLE_TO_Y;
     star.model.transform   = POLE_TO_Y;
     for (int i = 0; i < AST_TEMPLATES; i++) rocks.push_back(LoadVectorModel(LoadModelFromMesh(GenAsteroidMesh(1000 + i))));
@@ -555,7 +584,7 @@ void RenderAssets::Unload()
     UnloadVectorModel(ship);
     UnloadVectorModel(planet);
     UnloadVectorModel(star);
-    for (VectorModel *m : { &station, &starbase, &drydock, &collector, &greenhouse, &skimmer }) UnloadVectorModel(*m);
+    for (VectorModel *m : { &station, &starbase, &drydock, &collector, &greenhouse, &skimmer, &outpost }) UnloadVectorModel(*m);
     for (VectorModel &m : rocks) UnloadVectorModel(m);
     rocks.clear();
 }
@@ -569,6 +598,7 @@ const VectorModel &RenderAssets::StationModel(Settlement kind) const
     case Settlement::SolarCollector: return collector;
     case Settlement::Greenhouse:     return greenhouse;
     case Settlement::SkimmerStation: return skimmer;
+    case Settlement::SensorOutpost:  return outpost;
     default:                         return station;
     }
 }
@@ -581,12 +611,15 @@ float HyperFraction(float speed)
 static void PlaceCamera(ViewState &v)
 {
     float pull = 1.0f + 0.4f * v.hyperVis;
-    v.camera.position   = Vector3RotateByQuaternion({ 0.0f, 1.8f * pull, 7.0f * pull }, v.camRot);
-    v.camera.target     = Vector3RotateByQuaternion({ 0.0f, 0.9f, -6.0f }, v.camRot);
-    v.camera.up         = Vector3RotateByQuaternion({ 0.0f, 1.0f, 0.0f }, v.camRot);
+    // (looking around swings the camera about the ship: yaw about the ship's up, then pitch)
+    Quaternion look = QuaternionMultiply(QuaternionFromAxisAngle({ 0, 1, 0 }, v.lookYaw * DEG2RAD), QuaternionFromAxisAngle({ 1, 0, 0 }, v.lookPitch * DEG2RAD));
+    Quaternion rot = QuaternionMultiply(v.camRot, look);
+    v.camera.position   = Vector3RotateByQuaternion({ 0.0f, 1.8f * pull, 7.0f * pull }, rot);
+    v.camera.target     = Vector3RotateByQuaternion({ 0.0f, 0.9f, -6.0f }, rot);
+    v.camera.up         = Vector3RotateByQuaternion({ 0.0f, 1.0f, 0.0f }, rot);
     v.camera.fovy       = 60.0f + 25.0f * v.hyperVis;
     v.camera.projection = CAMERA_PERSPECTIVE;
-    v.camRight = Vector3RotateByQuaternion({ 1, 0, 0 }, v.camRot);
+    v.camRight = Vector3RotateByQuaternion({ 1, 0, 0 }, rot);
     v.camFwd   = Vector3Normalize(Vector3Subtract(v.camera.target, v.camera.position));
 }
 
@@ -628,7 +661,8 @@ void DrawScene(const GameState &g, const Ship &eye, ViewState &v, const RenderAs
     struct SphereDraw { DVec3 rel; double radius; Color lines, fill; const VectorModel *model;
                         const Zone *ring = nullptr; bool body = true;
                         Vector3 axis = { 0, 1, 0 }; float angle = 0.0f;
-                        bool station = false; const Asteroid *rock = nullptr; };
+                        bool station = false; const Asteroid *rock = nullptr;
+                        bool speck = false; float fade = 1.0f; const Traffic *ship = nullptr; };
     std::vector<SphereDraw> spheres;
 
     // The stars on the scope: every system within nav range (the loaded one is handled with its planets)
@@ -730,38 +764,112 @@ void DrawScene(const GameState &g, const Ship &eye, ViewState &v, const RenderAs
                 DVec3  rel = starRel + a.local;
                 double d   = Len(rel);
                 float  r   = AsteroidRadius(a);
-                if (d > AST_DRAW_RANGE || r / d < 0.0015) continue;              // too far / too small
+                if (d > AST_DRAW_RANGE || d < 1e-6) continue;                    // too far
                 if (Vector3DotProduct(ToF(rel), v.camFwd) < -r - 10.0f) continue; // behind the camera
+                // Far off, a rock is a speck that fades in out of the dark; as it nears it takes its shape
                 SphereDraw sd = { rel, r, GoodData(a.ore).color, BLACK, &assets.rocks[a.tmpl], nullptr, true };
                 sd.rock = &a;
+                sd.speck = r / d < AST_SHAPE_SIZE;
+                sd.fade = (float)fmin(1.0, (AST_DRAW_RANGE - d) / (0.3 * AST_DRAW_RANGE));
                 spheres.push_back(sd);
-                // Anything big enough to draw as a wireframe is targetable, unless you're
+                if (sd.speck) continue;
+                // It can hide what's behind it (a ship's dot, say)...
+                int occ = (int)occluders.size();
+                occluders.push_back({ rel, r });
+                // ...and anything big enough to draw as a wireframe is targetable, unless you're
                 // going so fast the rocks are just streaming past (a lock would chase them)
                 if (Vector3Length(eye.vel) < AST_TARGET_MAX_SPEED) {
                     NavBody nb;
                     nb.id = TargetId::MakeRock(loaded.index, a.id); nb.name = a.name; nb.rel = rel;
-                    nb.radius = r; nb.color = GoodData(a.ore).color;
+                    nb.radius = r; nb.color = GoodData(a.ore).color; nb.occ = occ;
                     nb.info = TextFormat("%s  %.0f t", GoodData(a.ore).name, a.oreLeft);
                     nav.push_back(nb);
                 }
             }
     }
 
+    // Other ships: the ones the sensors hold (sensors.h). Drawn (with the rocks, below) when they're close enough to
+    // see, a nav dot at any range. One that's been identified shows how it looks at you; one that hasn't is grey;
+    // one that's been lost is a fading mark where it was last seen.
+    auto shipColor = [](const Traffic &t) {
+        Color col = t.level < CONTACT_IDENTIFIED ? (t.level >= CONTACT_CLASSIFIED ? Color{ 150, 150, 150, 255 } : Color{ 105, 105, 105, 255 })
+                  : t.npc ? STANCE_FILL[t.stance & 3] : CaptainColor(t.id);
+        return t.ghost ? Fade(col, 0.15f + 0.6f * Clamp(1.0f - t.age / (float)GHOST_TIME, 0.0f, 1.0f)) : col;
+    };
+    for (const Traffic &t : g.traffic) {
+        DVec3  rel = FromShip(systems, eye, t.ship.anchor, t.ship.pos);
+        double d   = Len(rel);
+        Color  col = shipColor(t);
+        bool   big = !t.ghost && d > 1e-3 && SHIP_RADIUS / d > 0.0006;         // within ~20 km
+        if (big) { SphereDraw sd = { rel, SHIP_RADIUS, col, BLACK, &assets.ship, nullptr, true }; sd.ship = &t; spheres.push_back(sd); }
+        NavBody nb;
+        nb.id = TargetId::MakeShip(t.id); nb.name = t.shipName.empty() ? t.name : t.shipName + "  (" + t.name + ")";
+        nb.rel = rel; nb.radius = SHIP_RADIUS;
+        nb.color = col; nb.dot = !big;
+        nb.info = TextFormat("Captain  -  %s", t.mining ? "mining" : t.hyper ? "under drive" : "cruising");
+        if (t.npc) {
+            static const char *looks[] = { "allied", "neutral", "alerted", "HOSTILE" };
+            nb.name = t.name;
+            nb.info = std::string(NpcKindName(t.kind)) + "  -  " + g.systems.factions.Name(t.faction) + "  -  " + looks[t.stance & 3];
+        }
+        if (t.level < CONTACT_IDENTIFIED) nb.info = std::string(ContactLevelName(t.level)) + "  -  held by " + SensedBy(t.by);
+        if (t.ghost) nb.info = TextFormat("Contact lost %.0f s ago  -  last known position", t.age);
+        nav.push_back(nb);
+    }
+
+    // One other ship, in place (drawn in the pass below, among the rocks, nearest last)
+    auto drawShip = [&](const Traffic &t, DVec3 rel) {
+        double d   = Len(rel);
+        Color  col = shipColor(t);
+        double  s  = MapDist(d) / d;
+        float   sc = (float)s;
+        Vector3 at = ToF(rel * s);
+        Vector3 axis; float angle;
+        QuaternionToAxisAngle(t.ship.rot, &axis, &angle);
+        if (t.npc || t.level < CONTACT_IDENTIFIED) DrawVectorModelEx(assets.ship, at, axis, angle * RAD2DEG, { sc, sc, sc }, WHITE, col);
+        else       DrawVectorModelEx(assets.ship, at, axis, angle * RAD2DEG, { sc, sc, sc }, col);
+        if (t.thrusting || t.hyper) {
+            float hf  = HyperFraction(Vector3Length(t.ship.vel));
+            float len = (t.hyper ? 2.5f + 3.0f * hf : 1.2f) * (0.85f + 0.15f * sinf((float)GetTime() * 60.0f + t.id));
+            Vector3 tip = Vector3Add(at, Vector3Scale(Vector3RotateByQuaternion({ 0.0f, 0.05f, 1.0f + len }, t.ship.rot), sc));
+            const Vector3 base[] = { { -0.4f, 0.0f, 1.0f }, { 0.4f, 0.0f, 1.0f }, { 0.0f, 0.25f, 1.0f }, { 0.0f, -0.12f, 1.0f } };
+            for (const Vector3 &p : base)
+                DrawLine3D(Vector3Add(at, Vector3Scale(Vector3RotateByQuaternion(p, t.ship.rot), sc)), tip, FLAME_COLOR);
+        }
+        if (t.mining && loaded.index >= 0)
+            if (const Asteroid *a = FindAsteroid(g.field, t.miningRock)) {
+                DVec3  rr = FromShip(systems, eye, loaded.index, a->local);
+                double rd = Len(rr), rs = MapDist(rd) / rd;
+                Vector3 end   = ToF((rr - rr * (AsteroidRadius(*a) * 0.6 / rd)) * rs);
+                Vector3 start = Vector3Add(at, Vector3Scale(Vector3RotateByQuaternion({ 0.0f, 0.0f, -2.0f }, t.ship.rot), sc));
+                float   fl    = 0.5f + 0.5f * sinf((float)GetTime() * 47.0f + t.id);
+                DrawLine3D(start, end, ColorLerp({ 255, 120, 30, 255 }, { 255, 230, 120, 255 }, fl));
+            }
+    };
+
     // Everything back to front, so nearer things always cover farther ones. Worlds and stars
     // sort by their nearest surface; stations and rocks, which you fly among, by their
     // centers. Each body gets a fresh depth buffer (see ClearDepth); a run of rocks shares
     // one, and the nearest rocks share theirs with the ship.
-    auto nearness = [](const SphereDraw &s) { return s.rock || s.station ? Len(s.rel) : Len(s.rel) - s.radius; };
+    auto nearness = [](const SphereDraw &s) { return s.rock || s.station || s.ship ? Len(s.rel) : Len(s.rel) - s.radius; };
     std::sort(spheres.begin(), spheres.end(), [&](const SphereDraw &a, const SphereDraw &b) { return nearness(a) > nearness(b); });
     bool  rocksOpen = false;                              // the depth buffer holds only rocks
     float now = (float)g.clock;
     for (const SphereDraw &s : spheres) {
-        if (s.rock) {
+        if (s.rock || s.ship) {                           // (rocks and ships share a depth buffer: whichever is nearer covers the other)
             if (!rocksOpen) ClearDepth();
             rocksOpen = true;
+            if (s.ship) { drawShip(*s.ship, s.rel); continue; }
             double d = Len(s.rel), k = MapDist(d) / d;
             float  r = (float)(s.radius * k);
-            DrawVectorModelEx(*s.model, ToF(s.rel * k), s.rock->axis, s.rock->phase + s.rock->spin * now, { r, r, r }, s.lines, s.fill);
+            if (s.speck) {
+                // (brighter as it grows toward the size it takes its shape at)
+                float size = (float)fmin(1.0, s.radius / d / AST_SHAPE_SIZE);
+                DrawPoint3D(ToF(s.rel * k), Fade(s.lines, s.fade * (0.25f + 0.75f * size)));
+                continue;
+            }
+            DrawVectorModelEx(*s.model, ToF(s.rel * k), s.rock->axis, s.rock->phase + s.rock->spin * now, { r, r, r }, Fade(s.lines, s.fade),
+                              s.fade >= 1.0f ? s.fill : BLANK);
             continue;
         }
         ClearDepth();
@@ -773,51 +881,6 @@ void DrawScene(const GameState &g, const Ship &eye, ViewState &v, const RenderAs
         }
     }
     if (!rocksOpen) ClearDepth();                         // the ship and dust go on top
-
-    // Other captains' ships: drawn when they're close enough to see, a nav dot at any range
-    for (const Traffic &t : g.traffic) {
-        DVec3  rel = FromShip(systems, eye, t.ship.anchor, t.ship.pos);
-        double d   = Len(rel);
-        Color  col = t.npc ? STANCE_FILL[t.stance & 3] : CaptainColor(t.id);
-        bool   big = d > 1e-3 && SHIP_RADIUS / d > 0.0006;         // within ~20 km
-        if (big) {
-            double  s  = MapDist(d) / d;
-            float   sc = (float)s;
-            Vector3 at = ToF(rel * s);
-            Vector3 axis; float angle;
-            QuaternionToAxisAngle(t.ship.rot, &axis, &angle);
-            if (t.npc) DrawVectorModelEx(assets.ship, at, axis, angle * RAD2DEG, { sc, sc, sc }, WHITE, col);
-            else       DrawVectorModelEx(assets.ship, at, axis, angle * RAD2DEG, { sc, sc, sc }, col);
-            if (t.thrusting || t.hyper) {
-                float hf  = HyperFraction(Vector3Length(t.ship.vel));
-                float len = (t.hyper ? 2.5f + 3.0f * hf : 1.2f) * (0.85f + 0.15f * sinf((float)GetTime() * 60.0f + t.id));
-                Vector3 tip = Vector3Add(at, Vector3Scale(Vector3RotateByQuaternion({ 0.0f, 0.05f, 1.0f + len }, t.ship.rot), sc));
-                const Vector3 base[] = { { -0.4f, 0.0f, 1.0f }, { 0.4f, 0.0f, 1.0f }, { 0.0f, 0.25f, 1.0f }, { 0.0f, -0.12f, 1.0f } };
-                for (const Vector3 &p : base)
-                    DrawLine3D(Vector3Add(at, Vector3Scale(Vector3RotateByQuaternion(p, t.ship.rot), sc)), tip, FLAME_COLOR);
-            }
-            if (t.mining && loaded.index >= 0)
-                if (const Asteroid *a = FindAsteroid(g.field, t.miningRock)) {
-                    DVec3  rr = FromShip(systems, eye, loaded.index, a->local);
-                    double rd = Len(rr), rs = MapDist(rd) / rd;
-                    Vector3 end   = ToF((rr - rr * (AsteroidRadius(*a) * 0.6 / rd)) * rs);
-                    Vector3 start = Vector3Add(at, Vector3Scale(Vector3RotateByQuaternion({ 0.0f, 0.0f, -2.0f }, t.ship.rot), sc));
-                    float   fl    = 0.5f + 0.5f * sinf((float)GetTime() * 47.0f + t.id);
-                    DrawLine3D(start, end, ColorLerp({ 255, 120, 30, 255 }, { 255, 230, 120, 255 }, fl));
-                }
-        }
-        NavBody nb;
-        nb.id = TargetId::MakeShip(t.id); nb.name = t.shipName.empty() ? t.name : t.shipName + "  (" + t.name + ")";
-        nb.rel = rel; nb.radius = SHIP_RADIUS;
-        nb.color = col; nb.dot = !big;
-        nb.info = TextFormat("Captain  -  %s", t.mining ? "mining" : t.hyper ? "under drive" : "cruising");
-        if (t.npc) {
-            static const char *looks[] = { "allied", "neutral", "alerted", "HOSTILE" };
-            nb.name = t.name;
-            nb.info = std::string(NpcKindName(t.kind)) + "  -  " + g.systems.factions.Name(t.faction) + "  -  " + looks[t.stance & 3];
-        }
-        nav.push_back(nb);
-    }
 
     v.dust.UpdateAndDraw(Vector3Scale(eye.vel, frameDt), eye.vel, v.camRight, hyperFrac);
 

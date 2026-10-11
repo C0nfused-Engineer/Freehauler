@@ -167,6 +167,13 @@ bool LoadGame(GameState &g, const char *path)
     fresh.boards        = std::move(scratch.boards);
     fresh.papers        = std::move(scratch.papers);
     p.build = scratch.player.build;                 // (a save from before ships were built from parts: the starter ship)
+    if (version < SAVE_SENSORS)                     // (from before sensors: what was the scanner is the telescope; the rest come fitted)
+        for (PartType t : { PartType::Radar, PartType::IrArray, PartType::TachyonDetector }) {
+            bool has = false;
+            for (const Part &q : p.build.parts) if (q.type == t) has = true;
+            Part add; add.type = t;
+            if (!has) p.build.parts.push_back(add);
+        }
     fresh.player        = p;
     Refit(fresh);
     fresh.player.power.bank = fresh.player.spec.bankMJ; fresh.player.power.driveCap = fresh.player.spec.driveCapMJ;

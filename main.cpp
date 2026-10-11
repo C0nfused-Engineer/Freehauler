@@ -61,18 +61,20 @@
 //   Mouse        aim (pitch / yaw)    Q / E      roll left / right
 //   W / S        throttle up / down   A / D      yaw left / right
 //   Shift (hold) hyper (in a system) / warp (between systems)
+//   Space / MMB  lock onto what's under the reticle (Shift then flies to it); again to release it and fly free
 //   W + S        all stop (throttle to zero)     Caps Lock  toggle inertial dampeners
 //   F            comms: hail whoever the nose is on (or you're docked beside), else list
 //                everyone in the system (C: the list)      O   toggle orbit rings
 //   R            the factions: who they are, what they want, where you stand
 //   T            the trade log: prices at every market you know of      N   the news
 //   X            power mode: travel / combat / defence        K   call a tanker (when nearly out of fuel)
+//   ALT (held)   look around with the mouse        TAB   free the mouse as a pointer (again: back to flying)
 //   H            hand over what a pirate has demanded (F with a ship picked out: hail it)
 //   (at a shipyard or starbase: hail it, then 5 to fit out the ship)
 //   J            your contracts (a station's board: hail it, then 4; a faction's list: R, then C)
 //   M            map: the system you're in (list its worlds, pick one to set course); M again,
 //                or M between the stars, for the sector map of nearby systems
-//   MMB or I     info on the target   3 (on a channel, in docking range)   trade
+//   I            info on the target   3 (on a channel, in docking range)   trade
 //   LMB (hold)   mining laser         F5 / F9    quick save / quick load (single player)
 //   Esc          close the top window, or pause (save, load, settings, main menu, exit)
 //
@@ -307,13 +309,28 @@ static bool PlaySession(InputSource &input, ScriptedInput *script, const RenderA
             if (ui.gameReloaded) ResetView(view, prev);
             if (script) script->snap = false;
         }
-        if (!script && ui.WantsCursor() != cursorShown) {
-            cursorShown = ui.WantsCursor();
+        bool wantCursor = ui.WantsCursor() || ui.cursorFree;
+        if (!script && wantCursor != cursorShown) {
+            cursorShown = wantCursor;
             SetCursorShown(cursorShown, script);
             ignoreMouse = 2;                  // re-capturing the mouse reports a big jump
         }
         bool paused = ui.GamePaused() || offline;
-        Controls c = ui.FlightPaused() ? Controls{} : ReadFlightControls(in, frameDt, ui.settings, throttleCut);
+        // ALT held: the mouse looks around instead of steering. TAB (cursorFree): it's a pointer, and steers nothing.
+        bool looking = !ui.FlightPaused() && !wantCursor && (in.Down(KEY_LEFT_ALT) || in.Down(KEY_RIGHT_ALT));
+        InputFrame helm = in;
+        if (looking || ui.cursorFree) helm.mouseDelta = { 0, 0 };
+        if (ui.cursorFree) helm.mouseDown.reset();
+        if (looking) {
+            view.lookYaw   = fmodf(view.lookYaw - in.mouseDelta.x * ui.settings.mouseSens, 360.0f);
+            view.lookPitch = Clamp(view.lookPitch - in.mouseDelta.y * ui.settings.mouseSens * (ui.settings.invertY ? -1.0f : 1.0f), -85.0f, 85.0f);
+        } else {                                               // let go: the view swings back behind the ship
+            float back = expf(-10.0f * frameDt);
+            if (view.lookYaw > 180.0f) view.lookYaw -= 360.0f;
+            if (view.lookYaw < -180.0f) view.lookYaw += 360.0f;
+            view.lookYaw *= back; view.lookPitch *= back;
+        }
+        Controls c = ui.FlightPaused() ? Controls{} : ReadFlightControls(helm, frameDt, ui.settings, throttleCut);
         // A course from the map: the nose swings onto it until it's there or the pilot steers
         DVec3 courseRel;
         if (ui.course.valid() && !FindTarget(g, ui.course, courseRel)) ui.SetCourse({});
@@ -323,6 +340,7 @@ static bool PlaySession(InputSource &input, ScriptedInput *script, const RenderA
         aim.steer  = ui.steer;
         pending.yaw += c.yaw; pending.pitch += c.pitch; pending.roll += c.roll;
         pending.allStop |= c.allStop; pending.toggleDampeners |= c.toggleDampeners; pending.cyclePower |= c.cyclePower;
+        pending.toggleRadar |= c.toggleRadar;
 
         // --- Simulation: fixed steps; this frame's rotation is spread across them ---
         if (paused) { acc = 0.0; pending = {}; prev = g.player.ship; }
@@ -337,6 +355,7 @@ static bool PlaySession(InputSource &input, ScriptedInput *script, const RenderA
             s.allStop         = k == 0 && pending.allStop;
             s.toggleDampeners = k == 0 && pending.toggleDampeners;
             s.cyclePower      = k == 0 && pending.cyclePower;
+            s.toggleRadar     = k == 0 && pending.toggleRadar;
             prev = g.player.ship;
             if (net) net->Step(g, s, aim, STEP);       // predicted here, confirmed by the server
             else     StepGame(g, s, aim, STEP);
@@ -358,6 +377,7 @@ static bool PlaySession(InputSource &input, ScriptedInput *script, const RenderA
         SceneInfo scene;
         DrawScene(g, eye, view, assets, paused ? 0.0f : frameDt, scene);
         aim = DrawNavOverlay(g, eye, view, scene, hud, ui.Has(WindowKind::Info), frameDt);
+        ui.hovered = aim.hovered;
         DrawHud(g, eye, view, ui.Has(WindowKind::Market), ui.Has(WindowKind::Comms), ui.settings.showHelp, ui.online);
         ui.Draw(g);
         if (net) {

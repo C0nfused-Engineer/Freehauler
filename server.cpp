@@ -137,7 +137,7 @@ void Server::Tick()
         if (!p->joined || p->remove) continue;
         const Captain &c = p->cap;
         Traffic t;
-        t.id = c.id; t.name = c.name; t.shipName = c.shipName; t.ship = c.player.ship;
+        t.id = c.id; t.name = c.name; t.shipName = c.shipName; t.ship = c.player.ship; t.hull = (uint8_t)c.player.build.hull;
         t.thrusting  = c.player.ship.throttle > 0.0f;
         t.hyper      = c.flight.last.hyper;
         t.mining     = c.flight.miningActive;
@@ -496,20 +496,29 @@ void Server::SendPackets(double now)
             s.miningActive = c.flight.miningActive; s.miningRock = c.flight.miningRock; s.miningStatus = c.flight.miningStatus;
             for (const Traffic &t : world.traffic)
                 if (t.id != c.id && (!t.npc || t.ship.anchor == c.loaded.index)) s.others.push_back(t);
+            ScopeTraffic(world, p.cap, s.others);              // (only what this captain's sensors hold, and no more of each than they've made out)
             auto dist = [&](const Traffic &t) { return Len(FromShip(world.systems, c.player.ship, t.ship.anchor, t.ship.pos)); };
             std::sort(s.others.begin(), s.others.end(), [&](const Traffic &a, const Traffic &b) { return a.npc != b.npc ? !a.npc : dist(a) < dist(b); });
             if (s.others.size() > (size_t)SNAPSHOT_MAX_SHIPS) s.others.resize(SNAPSHOT_MAX_SHIPS);
             if (p.npcTold.size() > 4000) p.npcTold.clear();
             for (Traffic &t : s.others) {
                 if (!t.npc) continue;
-                t.stance = TrafficStance(world, c, t);
+                t.stance = t.level >= CONTACT_IDENTIFIED ? TrafficStance(world, c, t) : STANCE_NEUTRAL;
+                // Who it is goes once it's been made out (the client shows no more of it than the contact's level allows)
+                const Traffic *truth = t.level >= CONTACT_CLASSIFIED && !t.ghost ? world.FindTraffic(t.id) : nullptr;
+                if (!truth) continue;
                 auto told = p.npcTold.find(t.id);
-                if (told != p.npcTold.end() && told->second == t.tonnes) continue;
-                p.npcTold[t.id] = t.tonnes;
+                if (told != p.npcTold.end() && told->second == truth->tonnes) continue;
+                p.npcTold[t.id] = truth->tonnes;
                 Writer m;
-                m.U8(MSG_NPC); m.I32(t.id); m.U8((uint8_t)t.kind); m.I32(t.faction); m.Str(t.name, 60); m.Str(t.from, 60); m.Str(t.dest, 60);
-                m.I32(t.good); m.F32(t.tonnes);
+                m.U8(MSG_NPC); m.I32(t.id); m.U8((uint8_t)truth->kind); m.U8(truth->hull); m.I32(truth->faction);
+                m.Str(truth->name, 60); m.Str(truth->from, 60); m.Str(truth->dest, 60);
+                m.I32(truth->good); m.F32(truth->tonnes);
                 p.conn.Send(m.buf);
+            }
+            if (p.cap.marksChanged && fabs(now - p.marksSent) >= 0.5) {
+                p.marksSent = now; p.cap.marksChanged = false;
+                p.conn.Send(MsgMarks(world.clock, p.cap));
             }
             Writer w;
             WriteSnapshot(w, s);

@@ -47,6 +47,7 @@ public:
         std::vector<uint8_t>  papersSent;
         std::vector<uint8_t>  buildSent;     // the MSG_BUILD last sent
         std::unordered_map<int, float> npcTold;   // NPC ships this client has been told about (and the cargo it was told)
+        double                marksSent = 0.0;    // when its scope's bearings were last sent
         std::vector<std::pair<TargetId, std::vector<uint8_t>>> commsSent;   // the last MSG_COMMS sent for each open channel
         uint32_t              echoTimeMs = 0;
     };

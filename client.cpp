@@ -1,5 +1,6 @@
 // client.cpp - connecting, prediction and reconciliation, smoothing other ships
 #include "client.h"
+#include "sensors.h"
 #include "shipyard.h"
 #include <algorithm>
 #include <cmath>
@@ -233,6 +234,7 @@ void NetClient::HandleMessage(GameState &g, const std::vector<uint8_t> &msg)
         Traffic t;
         t.id = r.I32(); t.npc = true;
         uint8_t kind = r.U8();
+        t.hull = r.U8();
         t.faction = r.I32(); t.name = r.Str(); t.from = r.Str(); t.dest = r.Str(); t.good = r.I32(); t.tonnes = r.F32();
         if (!r.ok || kind >= (uint8_t)NpcKind::Count || t.good >= GOOD_COUNT) return;
         t.kind = (NpcKind)kind;
@@ -240,6 +242,9 @@ void NetClient::HandleMessage(GameState &g, const std::vector<uint8_t> &msg)
         npcInfo[t.id] = t;
         return;
     }
+    case MSG_MARKS:
+        ReadMarks(r, g.clock, g);
+        return;
     case MSG_STANDING: {
         uint8_t n = r.U8();
         std::vector<float> s;
@@ -464,11 +469,13 @@ void NetClient::UpdateTraffic(GameState &g, float frameDt)
         }
         if (t.npc) {                                              // (who it is came separately)
             auto info = npcInfo.find(entry.first);
-            t.name = "Unknown ship";
+            t.name = "Unknown contact";
             if (info != npcInfo.end()) {
                 const Traffic &i = info->second;
                 t.name = i.name; t.kind = i.kind; t.faction = i.faction; t.from = i.from; t.dest = i.dest; t.good = i.good; t.tonnes = i.tonnes;
-            }
+                t.hull = i.hull;
+            } else if (t.level > CONTACT_DETECTED) t.level = CONTACT_DETECTED;      // (who it is hasn't arrived yet)
+            MaskTraffic(t);                                       // (no more of it than the contact's level allows)
             g.traffic.push_back(t);
             continue;
         }
@@ -476,6 +483,7 @@ void NetClient::UpdateTraffic(GameState &g, float frameDt)
         t.name = nm != names.end() ? nm->second : "Captain " + std::to_string(entry.first);
         auto sn = ships.find(entry.first);
         if (sn != ships.end()) t.shipName = sn->second;
+        MaskTraffic(t);
         g.traffic.push_back(t);
     }
 }

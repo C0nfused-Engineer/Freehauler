@@ -3,6 +3,7 @@
 #include "contracts.h"
 #include "economy.h"
 #include "format.h"
+#include "sensors.h"
 #include "shipparts.h"
 #include <algorithm>
 
@@ -123,13 +124,20 @@ static const Live *g_live = nullptr;
 // captain could buy. Crews run their drives well inside what they'll do: it's far cheaper on the reactor.
 static void Fit(Npc &n, double load)
 {
-    n.spec = SpecOf(NpcBuild(n.kind, load));
+    ShipBuild build = NpcBuild(n.kind, load);
+    n.spec = SpecOf(build);
+    n.hull = (uint8_t)build.hull;
+    n.power.radar = n.kind != NpcKind::Pirate;                     // (raiders don't announce themselves)
     n.tank = n.spec.tank;
     n.fuel = n.tank;
     n.power.bank = n.spec.bankMJ; n.power.driveCap = n.spec.driveCapMJ;
     n.ship.ftl = n.kind == NpcKind::Freighter ? 0.45f : n.kind == NpcKind::Miner ? 0.40f : n.kind == NpcKind::Pirate ? 0.65f
                : n.kind == NpcKind::Patrol ? 0.80f : 0.70f;
 }
+
+// Around a port, ships fly on their engines, and no faster than this for each unit they are from it: a freighter
+// takes a minute or so to work clear of a station, or to come alongside one, and can be flown up to on the way.
+static const double PORT_ZONE = 20000.0 * KM_U, PORT_RATE = 0.12;
 
 // 'body': the place it's bound for (the drive stops short of a body by itself), or null for a point in space
 // (it stops 500 m off). 'goalVel': how the goal is moving (a chase flies the quarry's course plus whatever closes
@@ -164,6 +172,16 @@ static void Auto(Npc &n, DVec3 goal, const Body *body, DVec3 goalVel, float dt)
             nearest = along; detour = true;
         }
     }
+    // Leaving port, or coming into one: on the engines, gently
+    bool   gentle = false;
+    double pace = 1e30;
+    if (n.leftClear > 0.0) {
+        double out = Len(n.pos - n.left) - n.leftClear;
+        if (out < PORT_ZONE) { gentle = true; pace = 60.0 + PORT_RATE * fmax(0.0, out); } else n.leftClear = 0.0;
+    }
+    if (body && dist - stop < PORT_ZONE && !detour) { gentle = true; pace = fmin(pace, 20.0 + PORT_RATE * fmax(0.0, dist - stop)); }
+    if (there) gentle = false;
+
     // Swing the nose onto it, as fast as the thrusters allow
     double  mass = n.spec.dryMass + n.fuel + n.total;
     Vector3 fwd = ShipForward(s), want = Len(aim) > 1e-6 ? ToF(Norm(aim)) : fwd;
@@ -180,7 +198,23 @@ static void Auto(Npc &n, DVec3 goal, const Body *body, DVec3 goalVel, float dt)
     LockInfo lock;
     lock.rel = rel;
     if (chase) lock.speed = fmax(0.0, Len(aim) - WELL_K * fmax(0.0, dist - STOP_LOCK));       // (so the drive's limit is the speed of that course)
-    FlightReport r = FlyShip(s, n.spec, n.power, n.fuel, mass, in, dt, w.systems, l.eye->loaded, !body && !detour && !there ? &lock : nullptr);
+    FlightReport r;
+    if (gentle) {
+        // Thrust toward the pace wanted along the course, as hard as the engines can change the ship's velocity
+        DVec3  wantVel = Len(aim) > 1e-6 ? Norm(aim) * pace : DVec3{};
+        DVec3  change = wantVel - ToD(s.vel);
+        double most = THRUST_K * n.spec.thrust / mass * dt, ask = Len(change);
+        if (ask > most) change = change * (most / ask);
+        s.vel = ToF(ToD(s.vel) + change);
+        s.pos = s.pos + ToD(s.vel) * (double)dt;
+        n.power.engaged = n.power.warping = false;
+        double engineMW = n.spec.engineMW * fmin(1.0, ask / fmax(most, 1e-9));
+        double load = n.spec.idleMW + (RadarOn(n.spec, n.power) ? n.spec.radarMW : 0.0) + engineMW;
+        n.fuel = fmax(0.0, n.fuel - load / (n.spec.reactorEff * n.spec.fuelMJ) * dt);
+        n.power.heat = (float)(load * (1.0 - n.spec.reactorEff) / n.spec.reactorEff + PLUME_HEAT * engineMW);
+    } else {
+        r = FlyShip(s, n.spec, n.power, n.fuel, mass, in, dt, w.systems, l.eye->loaded, !body && !detour && !there ? &lock : nullptr);
+    }
     if (n.fuel < 0.15 * n.tank) n.fuel = n.tank;                   // (NPC crews top up as they go: their fuel isn't counted against anyone's stock yet)
     // Bodies are solid for them too: stopped at the surface, sliding along it
     for (const Body &b : l.eye->loaded.bodies) {
@@ -282,7 +316,7 @@ static void Populate(World &w, const Live &l)
     std::vector<int> minersAt;
     for (const Npc &n : w.npcs) {
         if (n.sys != l.sys) continue;
-        if (n.kind == NpcKind::Patrol) patrols++;
+        if (n.kind == NpcKind::Patrol && n.post < 0) patrols++;
         if (n.kind == NpcKind::Pirate) pirates++;
         if (n.kind == NpcKind::Miner) minersAt.push_back(n.from);
     }
@@ -319,6 +353,19 @@ static void Populate(World &w, const Live &l)
         if (!b) break;
         Npc &n = Spawn(w, NpcKind::Patrol, l, Beside(w, *b), ruler->id);
         n.doing = NpcDo::Dock; n.until = w.clock + 20.0 * Roll(w);
+    }
+    // Pickets: warships stationed at each of the state's sensor outposts. They keep close to it, and see off whatever comes for it.
+    for (int bi = 0; bi < (int)l.eye->loaded.bodies.size() && ruler; bi++) {
+        const Body &b = l.eye->loaded.bodies[bi];
+        if (b.settlement != Settlement::SensorOutpost) continue;
+        int have = 0;
+        for (const Npc &n : w.npcs) if (n.sys == l.sys && n.kind == NpcKind::Patrol && n.post == bi) have++;
+        for (; have < OUTPOST_PICKETS; have++) {
+            Npc &n = Spawn(w, NpcKind::Patrol, l, Beside(w, b), ruler->id);
+            n.post = bi;
+            n.name = ruler->name + TextFormat(" picket %d", 100 + (int)(Roll(w) * 900.0));
+            n.doing = NpcDo::Dock; n.until = w.clock + 20.0 * Roll(w);
+        }
     }
     // Pirates: by how hard the clans are raiding hereabouts
     double raid = RaidLevel(w, l.ly);
@@ -407,7 +454,8 @@ static void Dispatch(World &w, const std::vector<Live> &live)
             for (int g = 0; g < GOOD_COUNT; g++) n.cargo[g] = s.cargo[g];
             Fit(n, n.total);
             n.jumping = a.hub != b.hub;
-            n.doing = NpcDo::Dock; n.until = w.clock + 4.0 + 10.0 * Roll(w);        // casting off
+            n.doing = NpcDo::Dock; n.until = w.clock + 10.0 + 15.0 * Roll(w);       // casting off
+            n.left = dock->local; n.leftClear = dock->radius;
         } else {
             Transit t;
             t.from = s.from; t.to = s.to; t.total = s.total; t.faction = Carrier(w, s.from);
@@ -494,6 +542,38 @@ static void SlinkOff(World &w, Npc &n, const Live &l)
     n.goal = JumpPoint(w, l, NO_SYSTEM) + RandomDir(w) * (0.2 * AU_U);
 }
 
+// ---------------------------------------------------------------------------
+// What a crew knows (sensors.h)
+// ---------------------------------------------------------------------------
+// Does this ship know where that one is? By its own sensors; and a patrol has its system's traffic picture too.
+// 'held': it had it a moment ago (keeping a contact is easier than finding one).
+static bool Holds(const World &w, const Npc &n, int id, DVec3 at, const Signature &sig, bool held)
+{
+    if (Sense(FitOf(n.spec, n.power), sig, Len(at - n.pos), held ? HOLD_GAIN : 1.0) > CONTACT_NONE) return true;
+    if (n.kind != NpcKind::Patrol) return false;
+    auto sys = w.picture.find(n.sys);
+    if (sys == w.picture.end()) return false;
+    auto it = sys->second.find(id);
+    return it != sys->second.end() && it->second > CONTACT_NONE;
+}
+
+bool NpcHolds(const World &w, const Npc &n, const Captain &c)
+{
+    return c.loaded.index == n.sys && Holds(w, n, c.id, ShipLocal(w, c), SignatureOf(c.player.spec, c.player.power), false);
+}
+
+static bool HoldsNpc(const World &w, const Npc &n, const Npc &p) { return Holds(w, n, p.id, p.pos, SignatureOf(p.spec, p.power), false); }
+
+// A chase: where to fly. At the quarry while it's held; once it's lost, at where it was last seen, and after a
+// while of that (false) nowhere.
+static bool Chase(World &w, Npc &n, int id, DVec3 at, DVec3 vel, const Signature &sig, DVec3 &to, DVec3 &toVel, bool &held)
+{
+    held = Holds(w, n, id, at, sig, true);
+    if (held) { n.seenAt = w.clock; n.lastPos = at; to = at; toVel = vel; return true; }
+    to = n.lastPos; toVel = {};
+    return w.clock - n.seenAt < LOSE_AFTER && w.clock >= n.seenAt;
+}
+
 // Returns false when the ship is done with (docked for good, jumped, run off)
 static bool StepNpc(World &w, Npc &n, const Live &l, Captain *const *caps, int count, float dt)
 {
@@ -525,7 +605,7 @@ static bool StepNpc(World &w, Npc &n, const Live &l, Captain *const *caps, int c
         const Body *dest = BodyOf(w, l, n.to);
         if (!dest) { e.Land(n.to, n.cargo); return false; }
         FlyTo(n, *dest, dt);
-        if (n.arrived) { n.doing = NpcDo::Dock; n.until = now + 10.0 + 15.0 * Roll(w); n.close = 1.0; n.vel = {}; n.fuel = n.tank; }
+        if (n.arrived) { n.doing = NpcDo::Dock; n.until = now + 30.0 + 30.0 * Roll(w); n.close = 1.0; n.vel = {}; n.fuel = n.tank; }       // tied up, unloading
         return true;
     }
     // ---------------- Miners: out to the rock, back with the day's ore ----------------
@@ -543,6 +623,7 @@ static bool StepNpc(World &w, Npc &n, const Live &l, Captain *const *caps, int c
             else for (const Zone &z : l.eye->loaded.zones)
                 if (!z.ring) { n.goal = ZoneTargetPoint(z, home->local) + RandomDir(w) * (3000.0 * KM_U); break; }
             n.doing = NpcDo::Travel;
+            n.left = home->local; n.leftClear = home->radius;
         }
         if (n.doing == NpcDo::Travel) {
             Fly(n, n.goal, {}, dt);
@@ -572,9 +653,14 @@ static bool StepNpc(World &w, Npc &n, const Live &l, Captain *const *caps, int c
         const Faction *law = w.systems.factions.Get(n.faction);
         if (n.doing == NpcDo::Hunt) {
             Npc *p = NpcById(w, n.prey);
-            if (!p || p->sys != n.sys || Len(p->was - n.was) > 2.0 * SIGHT) { n.doing = NpcDo::Dock; n.until = now; n.prey = -1; return true; }
-            n.close = Len(p->was - n.was) < 50.0 * KM_U ? n.close + dt : 0.0;
-            Fly(n, p->was, p->vel, dt);
+            DVec3 to, toVel;
+            bool  held = false;
+            if (!p || p->sys != n.sys || !Chase(w, n, p->id, p->was, p->vel, SignatureOf(p->spec, p->power), to, toVel, held)) {
+                n.doing = NpcDo::Dock; n.until = now; n.prey = -1;     // (gone, or lost)
+                return true;
+            }
+            n.close = held && Len(p->was - n.was) < 50.0 * KM_U ? n.close + dt : 0.0;
+            Fly(n, to, toVel, dt);
             if (n.close > 2.0) {                                   // seen off: it runs for it, and its clan thinks twice
                 if (p->faction >= 0 && p->faction < (int)e.raid.size()) e.raid[p->faction] = fmaxf(0.05f, e.raid[p->faction] - 0.02f);
                 News(w, n.faction, n.sys, (law ? law->name : std::string("A")) + " patrol has run off raiders in the " + l.star->name + " system");
@@ -585,10 +671,16 @@ static bool StepNpc(World &w, Npc &n, const Live &l, Captain *const *caps, int c
         }
         if (n.doing == NpcDo::Inspect) {
             Captain *c = CaptainById(caps, count, n.prey, n.sys);
-            DVec3 at = c ? ShipLocal(w, *c) : DVec3{};
-            if (!c || Len(at - n.pos) > 2.0 * SIGHT || now - n.since > 240.0) { n.doing = NpcDo::Dock; n.until = now; n.prey = -1; return true; }
-            Fly(n, at, ToD(c->player.ship.vel), dt);
-            n.close = Len(at - n.pos) < SCAN_RANGE ? n.close + dt : 0.0;
+            DVec3 at = c ? ShipLocal(w, *c) : DVec3{}, to, toVel;
+            bool  held = false;
+            if (!c || now - n.since > 240.0 ||
+                !Chase(w, n, c->id, at, ToD(c->player.ship.vel), SignatureOf(c->player.spec, c->player.power), to, toVel, held)) {
+                if (c && !held && now - n.since <= 240.0) Tell(w, *c, n.name + " has lost track of you");
+                n.doing = NpcDo::Dock; n.until = now; n.prey = -1;
+                return true;
+            }
+            Fly(n, to, toVel, dt);
+            n.close = held && Len(at - n.pos) < SCAN_RANGE ? n.close + dt : 0.0;
             if (n.close > 3.0) {
                 if (!SearchHold(w, *c, n.faction, n.name)) Tell(w, *c, n.name + " scanned your hold: all in order");
                 c->scanSafeUntil = now + SCAN_PEACE;
@@ -600,18 +692,18 @@ static bool StepNpc(World &w, Npc &n, const Live &l, Captain *const *caps, int c
         if (now >= n.look) {
             n.look = now + 1.0;
             for (Npc &p : w.npcs)
-                if (p.sys == n.sys && p.kind == NpcKind::Pirate && p.doing != NpcDo::Leave && Len(p.pos - n.pos) < SIGHT) {
-                    n.doing = NpcDo::Hunt; n.prey = p.id; n.close = 0.0;
+                if (p.sys == n.sys && p.kind == NpcKind::Pirate && p.doing != NpcDo::Leave && HoldsNpc(w, n, p)) {
+                    n.doing = NpcDo::Hunt; n.prey = p.id; n.close = 0.0; n.seenAt = now; n.lastPos = p.pos;
                     return true;
                 }
             for (int i = 0; i < count && law; i++) {
                 Captain &c = *caps[i];
-                if (c.loaded.index != n.sys || now < c.scanSafeUntil || Len(ShipLocal(w, c) - n.pos) > 0.5 * SIGHT) continue;
+                if (c.loaded.index != n.sys || now < c.scanSafeUntil || Len(ShipLocal(w, c) - n.pos) > 0.5 * SIGHT || !NpcHolds(w, n, c)) continue;
                 bool taken = false;                                // (one patrol at a time)
                 for (const Npc &o : w.npcs) if (o.doing == NpcDo::Inspect && o.prey == c.id) taken = true;
                 double interest = 0.04 + 0.08 * law->policing + (c.Standing(n.faction) < -20.0f ? 0.3 : 0.0);
                 if (taken || Roll(w) > interest) continue;
-                n.doing = NpcDo::Inspect; n.prey = c.id; n.close = 0.0; n.since = now;
+                n.doing = NpcDo::Inspect; n.prey = c.id; n.close = 0.0; n.since = now; n.seenAt = now; n.lastPos = ShipLocal(w, c);
                 Tell(w, c, n.name + ": hold your course and stand by to be scanned");
                 return true;
             }
@@ -619,6 +711,13 @@ static bool StepNpc(World &w, Npc &n, const Live &l, Captain *const *caps, int c
         if (n.doing == NpcDo::Dock) {
             Hold(n, dt);
             if (now < n.until) return true;
+            if (n.post >= 0) {                                     // a picket: another station off its outpost, never far from it
+                if (n.post >= (int)l.eye->loaded.bodies.size()) return false;
+                const Body &b = l.eye->loaded.bodies[n.post];
+                n.goal = b.local + RandomDir(w) * (b.radius + (10.0 + 90.0 * Roll(w)) * KM_U);
+                n.doing = NpcDo::Travel;
+                return true;
+            }
             std::vector<const Body *> stops;
             for (int i = 0; i < e.Count(); i++) if (base.defs[i].hub == l.hub) if (const Body *b = BodyOf(w, l, i)) stops.push_back(b);
             if (stops.empty()) return false;
@@ -639,7 +738,8 @@ static bool StepNpc(World &w, Npc &n, const Live &l, Captain *const *caps, int c
         // A patrol close by: break off and run
         if (now >= n.look || n.doing == NpcDo::Hunt) {
             for (const Npc &p : w.npcs)
-                if (p.sys == n.sys && p.kind == NpcKind::Patrol && Len(p.pos - n.pos) < 0.2 * SIGHT && n.doing != NpcDo::Flee) {
+                if (p.sys == n.sys && p.kind == NpcKind::Patrol && Len(p.pos - n.pos) < 0.2 * SIGHT && n.doing != NpcDo::Flee &&
+                    (HoldsNpc(w, n, p) || HearsRadar(SignatureOf(p.spec, p.power), Len(p.pos - n.pos)))) {
                     n.goal = n.pos + Norm(n.pos - p.pos) * (1.5 * AU_U);
                     n.doing = NpcDo::Flee; n.until = now + 25.0; n.prey = -1; n.demanded = false;
                     break;
@@ -654,9 +754,12 @@ static bool StepNpc(World &w, Npc &n, const Live &l, Captain *const *caps, int c
             Npc *p = NpcById(w, n.prey);
             const Body *port = p ? BodyOf(w, l, p->kind == NpcKind::Miner ? p->from : p->to) : nullptr;
             bool safe = port && !p->jumping && Len(p->pos - port->local) < Standoff(*port) + 20000.0 * KM_U;
-            if (!p || p->sys != n.sys || p->total < 1.0f || safe || now - n.since > 200.0) { n.doing = NpcDo::Lurk; n.goal = n.pos; n.prey = -1; return true; }
-            n.close = Len(p->was - n.was) < ROB_RANGE ? n.close + dt : 0.0;
-            Fly(n, p->was, p->vel, dt);
+            DVec3 to, toVel;
+            bool  held = false;
+            if (!p || p->sys != n.sys || p->total < 1.0f || safe || now - n.since > 200.0 ||
+                !Chase(w, n, p->id, p->was, p->vel, SignatureOf(p->spec, p->power), to, toVel, held)) { n.doing = NpcDo::Lurk; n.goal = n.pos; n.prey = -1; return true; }
+            n.close = held && Len(p->was - n.was) < ROB_RANGE ? n.close + dt : 0.0;
+            Fly(n, to, toVel, dt);
             if (n.close > 3.0) {                                   // boarded: half the hold, and it never gets where it was going
                 float lost[GOOD_COUNT];
                 float taken = 0.0f;
@@ -672,21 +775,26 @@ static bool StepNpc(World &w, Npc &n, const Live &l, Captain *const *caps, int c
         }
         if (n.doing == NpcDo::Hunt) {                              // a captain
             Captain *c = CaptainById(caps, count, n.prey, n.sys);
-            DVec3 at = c ? ShipLocal(w, *c) : DVec3{};
+            DVec3 at = c ? ShipLocal(w, *c) : DVec3{}, to, toVel;
             double d = c ? Len(at - n.pos) : 0.0;
-            bool off = !c || d > 2.0 * SIGHT || InPort(w, *c) || now < c->pirateSafeUntil || c->player.CargoTotal() < 1.0 || now - n.since > 240.0;
+            bool held = false;
+            bool off = !c || InPort(w, *c) || now < c->pirateSafeUntil || c->player.CargoTotal() < 1.0 || now - n.since > 240.0 ||
+                       !Chase(w, n, c->id, at, ToD(c->player.ship.vel), SignatureOf(c->player.spec, c->player.power), to, toVel, held);
             if (off) {
-                if (c && c->demandFrom == n.id) { c->demandFrom = -1; if (now >= c->pirateSafeUntil) Tell(w, *c, n.name + " has broken off"); }
+                if (c && c->demandFrom == n.id) {
+                    c->demandFrom = -1;
+                    if (now >= c->pirateSafeUntil) Tell(w, *c, n.name + (held || InPort(w, *c) ? " has broken off" : " has lost you"));
+                }
                 n.doing = NpcDo::Lurk; n.goal = n.pos; n.prey = -1; n.demanded = false;
                 return true;
             }
-            Fly(n, at, ToD(c->player.ship.vel), dt);
-            if (!n.demanded && d < 5000.0 * KM_U) {
+            Fly(n, to, toVel, dt);
+            if (!n.demanded && held && d < 5000.0 * KM_U) {
                 n.demanded = true;
                 c->demandFrom = n.id; c->demandTonnes = ceil(c->player.CargoTotal() * PIRATE_DEMAND);
                 Tell(w, *c, TextFormat("%s: heave to and send over %.0f t, or we take what we like  -  H: hand it over", n.name.c_str(), c->demandTonnes));
             }
-            n.close = n.demanded && d < CATCH_RANGE ? n.close + dt : 0.0;
+            n.close = n.demanded && held && d < CATCH_RANGE ? n.close + dt : 0.0;
             if (n.close > 4.0) {
                 double took = Plunder(c->player.cargo, PIRATE_SHARE);
                 Tell(w, *c, TextFormat("%s boarded you and took %.0f t from the hold", n.name.c_str(), took));
@@ -702,20 +810,20 @@ static bool StepNpc(World &w, Npc &n, const Live &l, Captain *const *caps, int c
         for (int i = 0; i < count; i++) {
             Captain &c = *caps[i];
             if (c.loaded.index != n.sys || c.Standing(n.faction) >= 20.0f || now < c.pirateSafeUntil || c.player.CargoTotal() < 5.0 || InPort(w, c) ||
-                Len(ShipLocal(w, c) - n.pos) > SIGHT) continue;
+                !NpcHolds(w, n, c)) continue;                     // (what it can't see, it can't rob)
             bool taken = false;
             for (const Npc &o : w.npcs) if (o.kind == NpcKind::Pirate && o.doing == NpcDo::Hunt && o.prey == c.id) taken = true;
             if (taken) continue;
-            n.doing = NpcDo::Hunt; n.prey = c.id; n.close = 0.0; n.since = now; n.demanded = false;
+            n.doing = NpcDo::Hunt; n.prey = c.id; n.close = 0.0; n.since = now; n.demanded = false; n.seenAt = now; n.lastPos = ShipLocal(w, c);
             return true;
         }
-        Npc *best = nullptr; double bestD = SIGHT;
+        Npc *best = nullptr; double bestD = 3.0 * AU_U;
         for (Npc &p : w.npcs) {
             if (p.sys != n.sys || (p.kind != NpcKind::Freighter && p.kind != NpcKind::Miner) || p.total < 5.0f || p.doing == NpcDo::Dock) continue;
             double d = Len(p.pos - n.pos);
-            if (d < bestD) { bestD = d; best = &p; }
+            if (d < bestD && HoldsNpc(w, n, p)) { bestD = d; best = &p; }
         }
-        if (best) { n.doing = NpcDo::Hunt; n.prey = best->id; n.close = 0.0; n.since = now; }
+        if (best) { n.doing = NpcDo::Hunt; n.prey = best->id; n.close = 0.0; n.since = now; n.seenAt = now; n.lastPos = best->pos; }
         return true;
     }
     // ---------------- Tankers: out to whoever called, then home ----------------
@@ -737,6 +845,188 @@ static bool StepNpc(World &w, Npc &n, const Live &l, Captain *const *caps, int c
         return true;
     }
     default: return false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sensing: tachyon bursts and who caught them, the systems' networks and their
+// traffic pictures, and what each captain's scope holds (sensors.h)
+// ---------------------------------------------------------------------------
+// A place that keeps a watch and shares it: any port not a clan's, and a state's sensor outposts
+static bool KeepsWatch(const World &w, const Body &b)
+{
+    if (b.settlement == Settlement::SensorOutpost) return true;
+    if (b.population <= 0) return false;
+    const Faction *f = w.systems.factions.Get(b.owner);
+    return !f || f->kind != FactionKind::Clan;
+}
+
+// A network's report of a burst has come in: who hears of it, and who goes to look
+static void Respond(World &w, const Live &l, const World::Alert &a, Captain *const *caps, int count)
+{
+    // Where to look. A fix is a place. A lone bearing isn't, but ships mostly come out of warp where the gravity
+    // field makes them: where the bearing crosses the edge of the field is the first place to try. With neither
+    // (a port's own detector says only that something has arrived), there's just the alarm.
+    DVec3  where = a.pos;
+    double err = a.err;
+    bool   placed = a.fixed;
+    if (!placed && a.bearing) {
+        double best = 1e30;
+        for (int k = 0; k <= 60; k++) {
+            DVec3  p = a.from + a.dir * (a.rLo + (a.rHi - a.rLo) * k / 60.0);
+            double off = fabs(FieldRatio(*l.star, p) - 1.0);
+            if (off < best) { best = off; where = p; }
+        }
+        err = Len(where - a.from) * a.sigma * DEG2RAD + 0.1 * (a.rHi - a.rLo);
+        placed = true;
+    }
+    // Scheduled traffic comes in at the jump points, where it's expected: nobody turns out for that
+    bool expected = false;
+    if (a.fixed && l.hub >= 0)
+        for (const Lane &lane : w.econ.base->lanes) {
+            int other = lane.a == l.hub ? lane.b : lane.b == l.hub ? lane.a : -1;
+            // (anywhere the fix could be, give or take: three times what it claims, and the spread ships arrive over)
+            if (other >= 0 && Len(JumpPoint(w, l, w.econ.base->defs[other].sys) - a.pos) < 3.0 * a.err + 20000.0 * KM_U) expected = true;
+        }
+    if (expected) return;
+
+    // Captains in reach of traffic control are told (not the one it's about)
+    for (int i = 0; i < count; i++) {
+        Captain &c = *caps[i];
+        if (c.loaded.index != l.sys || c.id == a.source || c.trafficControl.empty()) continue;
+        SensorMark m;
+        m.anchor = l.sys; m.at = w.clock; m.note = c.trafficControl; m.counts = a.counts;
+        if (a.fixed) { m.kind = MARK_FIX; m.from = a.pos; m.rLo = a.err; }
+        else if (a.bearing) { m.kind = MARK_TACHYON; m.from = a.from; m.dir = a.dir; m.sigma = a.sigma; m.rLo = a.rLo; m.rHi = a.rHi; }
+        if (a.fixed || a.bearing) AddMark(c, m);
+        Tell(w, c, c.trafficControl + (a.fixed ? ": unscheduled arrival, " + FormatPlanetDist(Len(a.pos - ShipLocal(w, c))) + " from you  -  position marked"
+                                     : a.bearing ? std::string(": unscheduled arrival, bearing only  -  marked")
+                                                 : std::string(": a ship has dropped out of warp somewhere in the system")));
+    }
+    if (!placed) return;
+    // The nearest patrol with nothing better to do goes to look
+    Npc *best = nullptr;
+    for (Npc &n : w.npcs) {
+        if (n.sys != l.sys || n.kind != NpcKind::Patrol || n.post >= 0 || (n.doing != NpcDo::Dock && n.doing != NpcDo::Travel)) continue;     // (pickets stay at their posts)
+        if (!best || Len(n.pos - where) < Len(best->pos - where)) best = &n;
+    }
+    if (best) { best->goal = where + RandomDir(w) * fmin(err, 0.3 * AU_U); best->doing = NpcDo::Travel; }
+}
+
+static void Sensing(World &w, const std::vector<Live> &live, Captain *const *caps, int count)
+{
+    const double now = w.clock;
+
+    // --- Warp bubbles that collapsed this step: who caught the tachyons? ---
+    for (const World::Burst &b : w.bursts) {
+        // Ships' own detectors. A captain gets a bearing on the scope, and a rough idea of the range...
+        for (int i = 0; i < count; i++) {
+            Captain &c = *caps[i];
+            if (c.loaded.index != b.sys || c.id == b.source) continue;
+            TachyonDetection d;
+            if (!DetectBurst(ShipDetector(c.player.spec), ShipLocal(w, c), b.pos, b.mj, w.npcDice, d)) continue;
+            SensorMark m;
+            m.kind = MARK_TACHYON; m.anchor = b.sys; m.from = d.from; m.dir = d.bearing; m.sigma = (float)d.sigma;
+            m.rLo = d.rLo; m.rHi = d.rHi; m.counts = d.counts; m.at = now;
+            AddMark(c, m);
+            Tell(w, c, TextFormat("Tachyon burst: %d counts, %.1f to %.1f AU off  -  bearing marked", d.counts, d.rLo / AU_U, d.rHi / AU_U));
+        }
+        // ...and a raider lying in wait goes to look, as near as it can tell where that is
+        for (Npc &n : w.npcs) {
+            if (n.sys != b.sys || n.id == b.source || n.kind != NpcKind::Pirate || n.doing != NpcDo::Lurk || now < n.heard) continue;
+            TachyonDetection d;
+            if (!DetectBurst(ShipDetector(n.spec), n.pos, b.pos, b.mj, w.npcDice, d)) continue;
+            double guess = sqrt(d.rLo * d.rHi);
+            if (guess > 4.0 * AU_U) continue;                      // (too far to be worth the trip)
+            n.goal = n.pos + d.bearing * guess;
+            n.heard = now + 60.0;
+        }
+        // The system's network: the outposts' bearings, crossed if two or more of them caught it; and the ports'
+        // own detectors, which say only that something has arrived
+        const Live *l = LiveAt(live, b.sys);
+        if (!l) continue;
+        std::vector<TachyonDetection> got;
+        int alarms = 0;
+        for (const Body &body : l->eye->loaded.bodies) {
+            if (!KeepsWatch(w, body)) continue;
+            bool outpost = body.settlement == Settlement::SensorOutpost;
+            TachyonDetection d;
+            if (!DetectBurst(outpost ? OutpostDetector() : PortDetector(), body.local, b.pos, b.mj, w.npcDice, d)) continue;
+            if (outpost) got.push_back(d); else alarms++;
+        }
+        if (got.empty() && !alarms) continue;
+        World::Alert a = {};
+        a.sys = b.sys; a.source = b.source;
+        a.due = now + NET_RELAY * std::max<size_t>(1, got.size());  // (each report is relayed in turn)
+        a.fixed = Triangulate(got, a.pos, a.err);
+        if (!a.fixed && !got.empty()) {
+            const TachyonDetection *best = &got[0];
+            for (const TachyonDetection &d : got) if (d.counts > best->counts) best = &d;
+            a.bearing = true; a.from = best->from; a.dir = best->bearing; a.sigma = (float)best->sigma; a.rLo = best->rLo; a.rHi = best->rHi;
+        }
+        for (const TachyonDetection &d : got) a.counts += d.counts;
+        w.alerts.push_back(a);
+    }
+    w.bursts.clear();
+
+    for (size_t i = 0; i < w.alerts.size();) {
+        const Live *l = LiveAt(live, w.alerts[i].sys);
+        if (l && now < w.alerts[i].due && now > w.alerts[i].due - 600.0) { i++; continue; }
+        World::Alert a = w.alerts[i];
+        w.alerts.erase(w.alerts.begin() + i);
+        if (l) Respond(w, *l, a, caps, count);
+    }
+
+    // --- The traffic picture: what each system's ports, outposts and patrols hold between them (once a second) ---
+    if (now - w.pictureAt >= 1.0 || now < w.pictureAt) {
+        w.pictureAt = now;
+        w.picture.clear();
+        for (const Live &l : live) {
+            std::vector<std::pair<DVec3, SensorFit>> eyes;
+            for (const Body &body : l.eye->loaded.bodies) if (KeepsWatch(w, body)) eyes.push_back({ body.local, PortSensors(body) });
+            if (eyes.empty()) continue;                            // (nobody here to keep one)
+            for (const Npc &n : w.npcs) if (n.sys == l.sys && n.kind == NpcKind::Patrol) eyes.push_back({ n.pos, FitOf(n.spec, n.power) });
+            auto &picture = w.picture[l.sys];
+            auto look = [&](int id, DVec3 at, const Signature &sig) {
+                int best = CONTACT_NONE;
+                for (const auto &e : eyes) best = std::max(best, Sense(e.second, sig, Len(at - e.first)));
+                if (best > CONTACT_NONE) picture[id] = (uint8_t)best;
+            };
+            for (const Npc &n : w.npcs) if (n.sys == l.sys) look(n.id, n.pos, SignatureOf(n.spec, n.power));
+            for (int i = 0; i < count; i++)
+                if (caps[i]->loaded.index == l.sys) look(caps[i]->id, ShipLocal(w, *caps[i]), SignatureOf(caps[i]->player.spec, caps[i]->player.power));
+        }
+    }
+
+    // --- Each captain's scope ---
+    for (int i = 0; i < count; i++) {
+        Captain &c = *caps[i];
+        const Live *l = LiveAt(live, c.loaded.index);
+        DVec3 here = ShipLocal(w, c);
+        // In reach of a lawful port, its traffic control passes on the system's picture
+        std::string control;
+        if (l) {
+            double best = TRAFFIC_CONTROL;
+            for (const Body &body : c.loaded.bodies) {
+                if (body.population <= 0 || !KeepsWatch(w, body)) continue;
+                double d = Len(body.local - here) - body.radius;
+                if (d < best) { best = d; control = body.name; }
+            }
+        }
+        if (control != c.trafficControl) { c.trafficControl = control; c.marksChanged = true; }
+
+        std::vector<SensorTarget> targets;
+        if (l)
+            for (const Npc &n : w.npcs)
+                if (n.sys == l->sys) targets.push_back({ n.id, n.pos - here, n.vel, SignatureOf(n.spec, n.power) });
+        for (int k = 0; k < count; k++) {
+            const Captain &o = *caps[k];
+            if (k == i) continue;
+            DVec3 rel = FromShip(w.systems, c.player.ship, o.player.ship.anchor, o.player.ship.pos);
+            if (Len(rel) < 200.0 * AU_U) targets.push_back({ o.id, rel, ToD(o.player.ship.vel), SignatureOf(o.player.spec, o.player.power) });
+        }
+        auto shared = l ? w.picture.find(l->sys) : w.picture.end();
+        UpdateContacts(w, c, targets, !control.empty() && shared != w.picture.end() ? &shared->second : nullptr);
     }
 }
 
@@ -804,34 +1094,7 @@ void StepTraffic(World &w, Captain *const *caps, int count, float dt)
         if (c.demandFrom >= 0 && !FindNpc(w, c.demandFrom)) c.demandFrom = -1;
     }
 
-    // Warp bubbles that collapsed this step: who picked up the tachyons? The count that reaches a detector falls
-    // with the square of the distance and with the particles' decay on the way (lambda = N A / (4 pi r^2) e^(-r/L));
-    // the chance of noticing is 1 - e^(-lambda). A better scanner is a bigger detector.
-    for (const World::Burst &b : w.bursts) {
-        auto chance = [&](DVec3 at, double scanner) {
-            double r = fmax(Len(at - b.pos), 0.01 * AU_U) / AU_U;
-            double lambda = scanner * (b.mj / 4000.0) * (TACHYON_RANGE_AU * TACHYON_RANGE_AU) / (r * r) * exp(-r / TACHYON_DECAY_AU);
-            return 1.0 - exp(-lambda);
-        };
-        for (int i = 0; i < count; i++) {
-            Captain &c = *caps[i];
-            if (c.loaded.index != b.sys || c.id == b.source) continue;
-            DVec3 here = ShipLocal(w, c);
-            if (Roll(w) < chance(here, c.player.spec.scan))
-                Tell(w, c, TextFormat("Tachyon burst: a ship has dropped out of warp %.1f AU away", Len(here - b.pos) / AU_U));
-        }
-        if (b.source >= NPC_ID_BASE) continue;                     // (it's captains arriving that pirates and patrols come to look at)
-        const Captain *who = nullptr;
-        for (int i = 0; i < count; i++) if (caps[i]->id == b.source) who = caps[i];
-        for (Npc &n : w.npcs) {
-            if (n.sys != b.sys || Roll(w) >= chance(n.pos, n.spec.scan)) continue;
-            bool pirate = n.kind == NpcKind::Pirate && n.doing == NpcDo::Lurk && (!who || who->Standing(n.faction) < 20.0f);
-            bool patrol = n.kind == NpcKind::Patrol && (n.doing == NpcDo::Dock || n.doing == NpcDo::Travel);
-            if (pirate)      n.goal = b.pos + RandomDir(w) * (0.01 * AU_U);
-            else if (patrol) { n.goal = b.pos + RandomDir(w) * (0.01 * AU_U); n.doing = NpcDo::Travel; }
-        }
-    }
-    w.bursts.clear();
+    Sensing(w, live, caps, count);
 
     // On everyone's scopes
     for (const Npc &n : w.npcs) {
@@ -841,7 +1104,7 @@ void StepTraffic(World &w, Captain *const *caps, int count, float dt)
         double v = Len(n.vel);
         t.thrusting = v > 20.0; t.hyper = n.power.engaged;
         t.mining = n.kind == NpcKind::Miner && n.doing == NpcDo::Work;
-        t.good = BulkGood(n.cargo); t.tonnes = n.total;
+        t.good = BulkGood(n.cargo); t.tonnes = n.total; t.hull = n.hull;
         if (n.kind == NpcKind::Freighter || n.kind == NpcKind::Miner) {
             if (n.from >= 0) t.from = base.defs[n.from].name;
             if (n.to >= 0)   t.dest = base.defs[n.to].name;

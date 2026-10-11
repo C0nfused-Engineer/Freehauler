@@ -558,6 +558,7 @@ void AssignOwners(const FactionSet &fs, const StarSystem &sys, LoadedSystem &L)
 
     for (Body &b : L.bodies) {
         b.owner = NO_FACTION;
+        if (b.settlement == Settlement::SensorOutpost) { b.owner = ruler; continue; }      // (the state's own)
         if (b.population <= 0) continue;
         if (lair != NO_FACTION && b.kind == Kind::Station) { b.owner = lair; continue; }
         double  roll = Hash01(b.id ^ 0x0A11E5ull);

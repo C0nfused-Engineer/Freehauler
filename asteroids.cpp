@@ -103,6 +103,10 @@ static void GenerateCell(const CellKey &key, const LoadedSystem &L, const MinedM
             float spin = (float)(rng.uni() * 20.0 - 10.0), phase = (float)(rng.uni() * 360.0);
 
             if (keep * z.density > ZoneDensity(z, p)) continue;            // thinner toward the edges
+            bool berth = false;                                            // a station keeps the space about it swept
+            for (const Body &b : L.bodies)
+                if (b.kind == Kind::Station && Len(p - b.local) < 2.0 * b.radius + AST_KEEP_CLEAR) { berth = true; break; }
+            if (berth) continue;
 
             Asteroid a;
             a.id    = Mix64(cellHash + (uint64_t)k);
@@ -125,11 +129,13 @@ static void GenerateCell(const CellKey &key, const LoadedSystem &L, const MinedM
 
 void UpdateField(AsteroidField &field, const LoadedSystem &L, const MinedMap &mined, DVec3 shipLocal)
 {
-    if (field.system != L.index) { field.cells.clear(); field.system = L.index; }
-    if (L.index < 0 || L.zones.empty()) { field.cells.clear(); return; }
+    if (field.system != L.index) { field.cells.clear(); field.system = L.index; field.fresh = false; }
+    if (L.index < 0 || L.zones.empty()) { field.cells.clear(); field.fresh = false; return; }
 
     CellKey c = { (long long)floor(shipLocal.x / AST_CELL), (long long)floor(shipLocal.y / AST_CELL),
                   (long long)floor(shipLocal.z / AST_CELL) };
+    if (field.fresh && c == field.centre) return;                  // (still in the same cell: nothing to bring in or drop)
+    field.centre = c; field.fresh = true;
     for (auto it = field.cells.begin(); it != field.cells.end();) {
         bool far = llabs(it->first[0] - c[0]) > AST_CELL_RANGE + 1 || llabs(it->first[1] - c[1]) > AST_CELL_RANGE + 1 ||
                    llabs(it->first[2] - c[2]) > AST_CELL_RANGE + 1;

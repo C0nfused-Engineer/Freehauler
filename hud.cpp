@@ -3,6 +3,7 @@
 #include "comms.h"
 #include "economy.h"
 #include "format.h"
+#include "sensors.h"
 #include "theme.h"
 #include <algorithm>
 
@@ -52,6 +53,34 @@ Aim DrawNavOverlay(const GameState &g, const Ship &eye, const ViewState &v, cons
                 DrawCircleV(scr[i].pos, nav[i].star ? 1.1f + 1.5f * nav[i].bright : nav[i].radius == 0.0 ? 1.5f : 2.0f,
                             nav[i].star ? Dim(nav[i].color, 0.45f + 0.55f * nav[i].bright) : nav[i].color);
 
+    // Bearings (sensors.h): the direction of something that can't be placed. A tachyon burst is marked where the
+    // middle of its range would put it, inside a ring as wide as the bearing may be off; as the ship moves, the mark
+    // shifts against the stars, the less the further off it is. A radar sweeping the ship is marked the same way.
+    // A network's fix is a place, with a ring as wide as it may be out.
+    for (const SensorMark &m : g.marks) {
+        bool   fix = m.kind == MARK_FIX, radar = m.kind == MARK_RADAR;
+        double range = fix ? 0.0 : radar ? 1.0 * AU_U : 0.5 * (m.rLo + m.rHi);
+        DVec3  rel = FromShip(g.systems, eye, m.anchor, m.from + m.dir * range);
+        double dist = Len(rel);
+        Vector3 rp = MapPoint(rel);
+        if (dist < 1.0 || Vector3DotProduct(Vector3Subtract(rp, camera.position), v.camFwd) <= 0.0f) continue;
+        Vector2 p = GetWorldToScreen(rp, camera);
+        if (p.x < -50 || p.y < -50 || p.x > sw + 50 || p.y > sh + 50) continue;
+        float fade = radar ? 1.0f : 0.3f + 0.7f * Clamp(1.0f - (float)((g.clock - m.at) / MARK_TIME), 0.0f, 1.0f);
+        Color col = Fade(fix ? MARK_FIX_COLOR : radar ? MARK_RADAR_COLOR : MARK_TACHYON_COLOR, fade);
+        float ring = fix ? (float)(atan(m.rLo / dist) * pxPerRad) : m.sigma * DEG2RAD * pxPerRad;
+        ring = Clamp(ring, 9.0f, sh * 0.45f);
+        DrawCircleLinesV(p, ring, col);
+        DrawLineV({ p.x, p.y - 6 }, { p.x + 6, p.y }, col); DrawLineV({ p.x + 6, p.y }, { p.x, p.y + 6 }, col);
+        DrawLineV({ p.x, p.y + 6 }, { p.x - 6, p.y }, col); DrawLineV({ p.x - 6, p.y }, { p.x, p.y - 6 }, col);
+        std::string label = radar ? std::string("RADAR")
+                          : fix   ? "FIX  " + FormatPlanetDist(dist) + "  +/- " + FormatPlanetDist(m.rLo)
+                                  : std::string(TextFormat("TACHYON  %d counts  %.1f-%.1f AU", m.counts, m.rLo / AU_U, m.rHi / AU_U));
+        if (!radar) label += "  " + FormatETA(fmax(0.0, g.clock - m.at)) + " ago";
+        DrawText(label.c_str(), (int)(p.x + ring * 0.75f + 6), (int)(p.y - ring * 0.75f - 14), 14, col);
+        if (!m.note.empty()) DrawText(m.note.c_str(), (int)(p.x + ring * 0.75f + 6), (int)(p.y - ring * 0.75f + 2), 12, Fade(col, 0.8f));
+    }
+
     // Other captains: a small name tag beside their dot, so you can find each other
     for (int i = 0; i < (int)nav.size(); i++)
         if (scr[i].visible && nav[i].id.type == TargetId::Ship && nav[i].id.index < NPC_ID_BASE && nav[i].id != f.selected)
@@ -73,39 +102,8 @@ Aim DrawNavOverlay(const GameState &g, const Ship &eye, const ViewState &v, cons
         return best;
     };
 
-    int hover = -1;
-    if (f.lock.valid()) {
-        int li = navIndex(f.lock);
-        if (li >= 0 && scr[li].visible) hover = li;
-
-        // The nudge cursor: where the mouse would be steering if the lock weren't holding it.
-        // Touching another body with it switches the lock.
-        Vector2 nudge = { reticle.x - f.lockBreak.x * DEG2RAD * pxPerRad, reticle.y - f.lockBreak.y * DEG2RAD * pxPerRad };
-        TargetId candidate;
-        int ci = -1;
-        if (Vector2Length(f.lockBreak) > 0.4f) DrawCircleLinesV(nudge, 5.0f, Fade(WHITE, 0.6f));
-        if (Vector2Length(f.lockBreak) > 1.0f) {
-            // A candidate must be right under the cursor AND closer to it than the current target is
-            int other = pick(nudge, hover);
-            if (other >= 0) {
-                float toOther  = Vector2Distance(scr[other].pos, nudge) - scr[other].radiusPx;
-                float toLocked = hover >= 0 ? Vector2Distance(scr[hover].pos, nudge) - scr[hover].radiusPx : 1e9f;
-                if (toOther < 10.0f && toOther < toLocked) { candidate = nav[other].id; ci = other; }
-            }
-        }
-        // ...and the cursor has to rest on it briefly, so jitter can't switch targets
-        if (candidate.valid() && candidate == hud.retargetCandidate) hud.retargetDwell += frameDt;
-        else hud.retargetDwell = 0.0f;
-        hud.retargetCandidate = candidate;
-        if (ci >= 0)
-            DrawCircleLinesV(scr[ci].pos, fmaxf(scr[ci].radiusPx, 4.0f) + 6.0f * (1.0f - fminf(hud.retargetDwell / 0.3f, 1.0f)) + 3.0f,
-                             Fade(WHITE, 0.8f));               // shrinking ring = switching
-        if (hud.retargetDwell >= 0.3f) aim.retarget = candidate;
-    } else {
-        hover = pick(reticle, -1);
-        hud.retargetCandidate = {};
-        hud.retargetDwell = 0.0f;
-    }
+    int hover = pick(reticle, -1);
+    (void)hud; (void)frameDt;
     if (hover >= 0) aim.hovered = nav[hover].id;
 
     // Brackets + text panel for a target. 'full' adds ETA, info and a tag line.
@@ -146,10 +144,10 @@ Aim DrawNavOverlay(const GameState &g, const Ship &eye, const ViewState &v, cons
             DrawText(lines[li].first.c_str(), tx, ty + 20 + 18 * (int)li, 16, lines[li].second);
     };
 
-    // --- The selection: bracketed wherever it is, or an edge arrow if it's off screen ---
+    // --- The destination locked (or, with none, the selection): bracketed wherever it is, or an edge arrow if it's off screen ---
     DVec3  selRel;
     double selRadius = 0.0;
-    TargetId sel = f.selected;
+    TargetId sel = f.lock.valid() ? f.lock : f.selected;
     if (sel.valid() && FindTarget(g, sel, selRel, &selRadius)) {
         selRel = selRel + (g.player.ship.pos - eye.pos);    // seen from the (interpolated) eye
         int ni = navIndex(sel);
@@ -157,7 +155,7 @@ Aim DrawNavOverlay(const GameState &g, const Ship &eye, const ViewState &v, cons
         std::string name = TargetName(g, sel);
         bool star   = CanonicalTarget(g, sel).type == TargetId::Star;
         bool locked = sel == f.lock;
-        std::string tag = locked ? "LOCKED" : (infoOpen ? "SELECTED" : "SELECTED  [MMB] info");
+        std::string tag = locked ? "LOCKED  -  SHIFT to go  [SPACE] release" : (infoOpen ? "[SPACE] lock" : "[SPACE] lock  [I] info");
 
         Vector3 rp = MapPoint(selRel);
         bool inFront = Vector3DotProduct(Vector3Subtract(rp, camera.position), v.camFwd) > 0.0f;
@@ -193,7 +191,7 @@ Aim DrawNavOverlay(const GameState &g, const Ship &eye, const ViewState &v, cons
         const NavBody &b = nav[hover];
         bool full = !sel.valid();                          // compact when something else is selected
         drawTarget(b.name, scr[hover].pos, scr[hover].radiusPx, b.rel, b.radius, b.star, b.info, b.color,
-                   "[MMB] info", HUD_LABEL, full ? WHITE : GRAY, full);
+                   "[SPACE] lock  [I] info", HUD_LABEL, full ? WHITE : GRAY, full);
     }
     return aim;
 }
@@ -221,23 +219,20 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
     // full hyper, and a marker under it for the speed the throttle is asking for
     const double GAUGE_LOW = 2.0;
     auto place = [&](double v) { return (float)Clamp((float)(log(fmax(v, GAUGE_LOW) / GAUGE_LOW) / log(WARP_SPEED / GAUGE_LOW)), 0.0f, 1.0f); };
-    double thrust = ThrottleThrust(p.ship.throttle);
+    double asked = ThrottleSpeed(p.ship.throttle);
     DrawRectangleLines(20, 52, 200, 12, HUD_DIM);
     DrawRectangle(22, 54, (int)(196 * place(speed)), 8, hyper ? HUD : HUD_DIM);
     for (double v : { (double)MAX_SPEED, p.spec.hyperSpeed }) { int t = 22 + (int)(196 * place(v)); DrawLine(t, 50, t, 66, HUD); }
-    if (hyper) {                                           // (under it: the speed the drive is set to run at)
-        int mark = 22 + (int)(196 * place(p.ship.ftl * (p.power.warping ? p.spec.warpSpeed : p.spec.hyperSpeed)));
-        DrawTriangle({ (float)mark, 65.0f }, { mark - 5.0f, 73.0f }, { mark + 5.0f, 73.0f }, HUD);
+    {   // (under it: the speed asked for: the throttle's, or what the drive is set to run at)
+        double set = hyper ? p.ship.ftl * (p.power.warping ? p.spec.warpSpeed : p.spec.hyperSpeed) : fabs(asked);
+        int mark = 22 + (int)(196 * place(set));
+        DrawTriangle({ (float)mark, 65.0f }, { mark - 5.0f, 73.0f }, { mark + 5.0f, 73.0f }, !hyper && asked < 0.0 ? ORANGE : HUD);
     }
     DrawText(mode, 228, 50, 16, f.driveCharging || f.driveTooHeavy || f.driveStarved || f.driveNone ? YELLOW : hyper ? HUD : HUD_DIM);
 
     if (hyper) DrawText(TextFormat("DRIVE SET %d%%   field %.0f MW   [W/S]", (int)(p.ship.ftl * 100.0f + 0.5f), f.drivePower), 20, 78, 18, HUD);
-    else {
-        double accel = fabs(thrust) * THRUST_K * p.spec.thrust / p.Mass() * METERS_PER_UNIT;       // m/s^2, at low speed
-        std::string push = accel >= 9.81e4 ? TextFormat("%.0f kg", accel / 9810.0) : accel >= 98.1 ? TextFormat("%.0f g", accel / 9.81) : TextFormat("%.1f m/s2", accel);
-        DrawText(TextFormat("THROTTLE %s%d%%   %s", thrust < 0.0 ? "REV " : "", (int)(fabsf(p.ship.throttle) * 100.0f + 0.5f), push.c_str()),
-                 20, 78, 18, thrust < 0.0 ? ORANGE : HUD);
-    }
+    else DrawText(TextFormat("THROTTLE %s%d%%   %s", asked < 0.0 ? "REV " : "", (int)(fabsf(p.ship.throttle) * 100.0f + 0.5f),
+                             FormatSpeed((float)fabs(asked)).c_str()), 20, 78, 18, asked < 0.0 ? ORANGE : HUD);
     DrawText(p.ship.dampeners ? "DAMPENERS ON" : "DAMPENERS OFF  - DRIFTING", 20, 102, 18,
              p.ship.dampeners ? HUD : ORANGE);
     int y = 126;
@@ -246,10 +241,11 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
         { DrawText(TextFormat("ARRIVED: holding off %s", drive.limiter.c_str()), 20, y, 18, YELLOW); y += 24; }
     else if (hyper && !drive.limiter.empty() && drive.limit < (drive.inField ? p.spec.hyperSpeed : p.spec.warpSpeed) && !f.driveStarved)
         { DrawText(TextFormat("GRAVITY WELL: slowing for %s", drive.limiter.c_str()), 20, y, 18, YELLOW); y += 24; }
-    else if (!hyper && !drive.cruiseLimiter.empty() && thrust > 0.0 && speed >= 0.98 * drive.cruiseLimit)
+    else if (!hyper && !drive.cruiseLimiter.empty() && fabs(asked) > drive.cruiseLimit)
         { DrawText(TextFormat("GRAVITY WELL: slowing for %s", drive.cruiseLimiter.c_str()), 20, y, 18, YELLOW); y += 24; }
-    if (f.lock.valid())          { DrawText(TextFormat("TARGET LOCK: %s", TargetName(g, f.lock).c_str()), 20, y, 18, HUD); y += 24; }
-    else if (f.selected.valid()) { DrawText(TextFormat("TARGET: %s   [MMB] info", TargetName(g, f.selected).c_str()), 20, y, 18, HUD_LABEL); y += 24; }
+    if (f.lock.valid())          { DrawText(TextFormat("LOCKED: %s   [SPACE] release", TargetName(g, f.lock).c_str()), 20, y, 18, HUD); y += 24; }
+    else if (f.selected.valid()) { DrawText(TextFormat("TARGET: %s   [SPACE] lock", TargetName(g, f.selected).c_str()), 20, y, 18, HUD_LABEL); y += 24; }
+    else                         { DrawText("NO LOCK  -  flying free", 20, y, 18, HUD_DIM); y += 24; }
     if (!f.miningStatus.empty()) DrawText(f.miningStatus.c_str(), 20, y, 18, f.miningActive ? ORANGE : YELLOW);
 
     // Cargo hold, bottom left
@@ -312,6 +308,25 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
         else if (f.skimFull) DrawText("SKIMMING HELIUM-3  -  HOLD FULL", 20, sy, 18, ORANGE);
     }
 
+    // Contraband aboard, under the law of the nearest system: a warning up top for as long as it's in the hold
+    if (const Faction *law = systems.factions.Get(systems[eye.anchor].ruler)) {
+        std::string what;
+        if (!(g.Papers(law->id) & PAPER_PERMIT))
+            for (int good : law->contraband) if (p.cargo[good] > 0.05) what += (what.empty() ? "" : ", ") + std::string(GoodData(good).name);
+        if (!what.empty()) {
+            // (between the two columns of the HUD: two lines, the second cut short if it has to be)
+            const char *head = "CONTRABAND ABOARD";
+            std::string text = law->name + " bans " + what;
+            int room = std::max(260, sw - 2 * 420);
+            while (text.size() > 4 && MeasureText(text.c_str(), 16) > room - 24) text = text.substr(0, text.size() - 4) + "...";
+            int tw = std::max(MeasureText(head, 18), MeasureText(text.c_str(), 16)), bx = sw / 2 - tw / 2 - 12;
+            DrawRectangle(bx, 48, tw + 24, 50, Fade(BLACK, 0.8f));
+            DrawRectangleLines(bx, 48, tw + 24, 50, RED);
+            DrawText(head, sw / 2 - MeasureText(head, 18) / 2, 54, 18, RED);
+            DrawText(text.c_str(), sw / 2 - MeasureText(text.c_str(), 16) / 2, 76, 16, RED);
+        }
+    }
+
     // --- Right column: navigation ---
     int x = sw - 400; y = 20;
     DVec3 galPos = systems.PositionLy(eye.anchor, eye.pos);
@@ -345,6 +360,28 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
         y += 22; DrawText(p.spec.scoopRate > 0.0 && p.spec.fuelGood == REF_FUEL ? "Scoop near a star (within 3 radii) or buy fuel" : "Buy fuel, or call a tanker (K)", x, y, 16, ORANGE);
     }
     y += 22;
+
+    // Sensors: is the radar on (it gives the ship away), how hot the ship is running, what's on the scope
+    {
+        bool silent = p.power.mode == POWER_SILENT, on = RadarOn(p.spec, p.power);
+        DrawText(silent ? "RUNNING SILENT  -  radar off, reactor throttled" : on ? "RADAR ON  [G]" : "RADAR OFF  [G]  -  passive only",
+                 x, y, 16, silent ? MARK_FIX_COLOR : on ? HUD_LABEL : YELLOW);
+        y += 20;
+        int held = 0, lost = 0, radars = 0, bursts = 0;
+        for (const Traffic &t : g.traffic) (t.ghost ? lost : held)++;
+        for (const SensorMark &m : g.marks) (m.kind == MARK_RADAR ? radars : bursts)++;
+        // (the heat an infrared array sees, and how far off a basic one sees it)
+        DrawText(TextFormat("HEAT %.1f MW  -  seen at %.2f AU", p.power.heat, IrRange(1.0, p.power.heat) / AU_U), x, y, 16, HUD_DIM);
+        y += 20;
+        std::string scope = TextFormat("CONTACTS %d", held);
+        if (lost) scope += TextFormat("  (%d lost)", lost);
+        DrawText(scope.c_str(), x, y, 16, HUD_DIM);
+        y += 20;
+        if (radars) { DrawText(TextFormat("RADAR WARNING  -  %d sweeping you", radars), x, y, 16, MARK_RADAR_COLOR); y += 20; }
+        if (bursts) { DrawText(TextFormat("TACHYON BEARINGS  %d", bursts), x, y, 16, MARK_TACHYON_COLOR); y += 20; }
+        if (!g.trafficControl.empty()) { DrawText(("TRAFFIC CONTROL  " + g.trafficControl).c_str(), x, y, 16, HUD_LABEL); y += 20; }
+        y += 2;
+    }
 
     // Inside a belt or ring?
     if (g.loaded.index >= 0) {
@@ -429,7 +466,8 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
     // Interaction prompt
     if (!tradeOpen && f.nearBody >= 0 && f.nearBody < (int)g.loaded.bodies.size()) {
         const Body &b = g.loaded.bodies[f.nearBody];
-        std::string pr = b.population <= 0 ? b.name + "  -  uninhabited"
+        std::string pr = b.settlement == Settlement::SensorOutpost ? b.name + "  -  military installation: no docking"
+                       : b.population <= 0 ? b.name + "  -  uninhabited"
                        : CanTradeOverComms(g)  ? "[F] Comms with " + b.name + "  -  3 to trade"
                                                : "[F] Hail " + b.name + " to trade  -  " + SettlementName(b.settlement);
         int w = MeasureText(pr.c_str(), 20);
@@ -438,10 +476,10 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
     }
 
     if (showHelp) {
-        const char *help = online ? "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  X power  M map  R factions  T trade log  N news  J contracts  "
-                                    "MMB info  F hail / comms  LMB mine  ESC menu"
-                                  : "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  X power  M map  R factions  T trade log  N news  J contracts  "
-                                    "MMB info  F hail / comms  LMB mine  F5/F9 quicksave/load  ESC menu";
+        const char *help = online ? "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  ALT look  TAB mouse  X power  G radar  SPACE/MMB lock  M map  R factions  T trade log  N news  J contracts  "
+                                    "I info  F hail / comms  LMB mine  ESC menu"
+                                  : "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  ALT look  TAB mouse  X power  G radar  SPACE/MMB lock  M map  R factions  T trade log  N news  J contracts  "
+                                    "I info  F hail / comms  LMB mine  F5/F9 quicksave/load  ESC menu";
         int size = 16;
         while (size > 10 && MeasureText(help, size) > sw - 40) size--;          // shrink to fit narrow windows
         DrawText(help, 20, sh - 14 - size, size, HUD_DIM);

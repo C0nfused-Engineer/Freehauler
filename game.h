@@ -30,6 +30,7 @@
 #include "shipparts.h"
 #include "targets.h"
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -98,10 +99,10 @@ struct GameEvent {
 // ---------------------------------------------------------------------------
 // Transient state
 // ---------------------------------------------------------------------------
-// What the view reports back each frame: the thing under the reticle, and a
-// body the nudge cursor rested on while locked (switch the lock to it).
-// It also carries the course the pilot set on a map: the selection whenever the
-// reticle isn't on something else, and while 'steer' is on the nose swings onto it.
+// What the view reports back each frame: the thing under the reticle. It also
+// carries the destination the pilot has locked ('course': set by locking onto
+// what's under the reticle, or on a map), and while 'steer' is on the nose swings
+// onto it. ('retarget' is no longer used.)
 struct Aim {
     TargetId hovered;
     TargetId retarget;
@@ -120,7 +121,7 @@ struct Knowledge {
 
 struct FlightState {
     TargetId  selected;                  // what's under the reticle, or the lock target
-    TargetId  lock;                      // body the nose is locked onto in hyper
+    TargetId  lock;                      // the destination locked: under drive, the nose is held on it and the ship stops there
     bool      lockSuppressed = false;    // lock was broken; don't re-lock until the reticle leaves it
     Vector2   lockBreak = { 0, 0 };      // accumulated mouse steering while locked (degrees)
     float     retargetCooldown = 0.0f;   // seconds before the lock may switch again
@@ -190,6 +191,43 @@ struct Traffic {
     std::string from, dest;              // where its cargo came from and is going (may be empty)
     int         good = -1;               // the bulk of its cargo...
     float       tonnes = 0.0f;           // ...and how much it carries in all
+    uint8_t     hull = 1;                // which hull it is (shipparts.h)
+
+    // How it stands on the scope of whoever is looking (sensors.h)
+    uint8_t     level = 3;               // a ContactLevel: how much is known of it
+    uint8_t     by = 0;                  // which sensors hold it (BY_ bits)
+    bool        ghost = false;           // lost: this is where it was last seen...
+    float       age = 0.0f;              // ...this many seconds ago
+};
+
+// ---------------------------------------------------------------------------
+// Sensors (sensors.h): what a captain's scope holds
+// ---------------------------------------------------------------------------
+enum ContactLevel : uint8_t { CONTACT_NONE, CONTACT_DETECTED, CONTACT_CLASSIFIED, CONTACT_IDENTIFIED };
+
+struct Contact {
+    int      id = -1;
+    uint8_t  level = 0;                  // how much is known of it; it never goes down while the contact lasts
+    uint8_t  by = 0;                     // which sensors hold it now (BY_ bits); 0: it's lost
+    double   seen = 0.0;                 // when it was last held (game clock)
+    Traffic  snap;                       // as it was last shown
+    bool     Held() const { return by != 0; }
+};
+
+// A direction to something that can't be placed: the tachyons of a warp exit, or a radar sweeping the ship.
+// Or a place someone else has worked out and passed on (a network's fix).
+enum MarkKind : uint8_t { MARK_TACHYON, MARK_RADAR, MARK_FIX };
+struct SensorMark {
+    uint8_t  kind = MARK_TACHYON;
+    int      source = -1;                // radar: whose it is (so its bearing is kept up to date; it's never shown)
+    SysId    anchor = NO_SYSTEM;         // 'from' is relative to this star
+    DVec3    from;                       // where the bearing was taken (a fix: the place itself)
+    DVec3    dir;                        // unit vector along it
+    float    sigma = 0.0f;               // degrees it may be off by
+    double   rLo = 0.0, rHi = 0.0;       // units along it the source could be (a fix: how far off it may be, in rLo)
+    int      counts = 0;                 // tachyon decays counted
+    double   at = 0.0;                   // when (game clock)
+    std::string note;                    // who passed it on, if someone did
 };
 
 // ---------------------------------------------------------------------------
@@ -217,6 +255,12 @@ struct World {
     // Warp bubbles that have just collapsed (a ship dropped out of warp): tachyons others may pick up (npcs.cpp)
     struct Burst { SysId sys; DVec3 pos; double mj; int source; };
     std::vector<Burst>      bursts;
+    // What a system's sensor network made of a burst, on its way to the people who act on it
+    struct Alert { SysId sys; double due; bool fixed; bool bearing; DVec3 pos; double err; DVec3 from, dir; float sigma; double rLo, rHi; int counts; int source; };
+    std::vector<Alert>      alerts;
+    // The traffic picture each flown system's ports and patrols hold between them: how well each ship is known (by id)
+    std::unordered_map<SysId, std::unordered_map<int, uint8_t>> picture;
+    double                  pictureAt = -1e9;
     MinedMap                minedChanged;// rocks mined since the last time someone looked (the server syncs these)
     std::vector<GameEvent>  events;      // this frame's events (the main loop clears them)
 
@@ -257,6 +301,11 @@ struct Captain {
     int           demandFrom = -1;       // the pirate (an NPC id) that has named its price...
     double        demandTonnes = 0.0;    // ...this many tonnes
     std::vector<std::pair<double, std::string>> shipReplies;   // what other ships have said, by when it gets here
+    std::vector<Contact>    contacts;    // the ships on this captain's scope (sensors.h)
+    std::vector<SensorMark> marks;       // ...and the bearings: tachyon bursts, radars sweeping the ship
+    bool          sensing = false;       // (the contacts are kept here: on a client they aren't, the server sends what they show)
+    std::string   trafficControl;        // the port whose traffic control is sharing its picture, if one is in reach
+    bool          marksChanged = false;  // (the server: tell the client)
     LoadedSystem  loaded;                // generated around this ship
     AsteroidField field;                 // generated around this ship
 };
@@ -289,6 +338,7 @@ void StepCaptain(World &w, Captain &c, const Controls &in, const Aim &aim, float
 void UpdateEconomy(World &w);                    // economy.cpp: runs the economy up to the clock (whoever owns the world calls it)
 void UpdateContracts(World &w);                  // contracts.cpp: lapses old offers (likewise)
 void StepTraffic(World &w, Captain *const *captains, int count, float dt);   // npcs.cpp: the other ships (likewise)
+void ScopeTraffic(const World &w, Captain &c, std::vector<Traffic> &list);   // sensors.cpp: every ship there is -> what this captain's scope shows
 
 // Single player: advance the clock and the economy, step your captain
 inline void StepGame(GameState &g, const Controls &in, const Aim &aim, float dt)
@@ -298,6 +348,7 @@ inline void StepGame(GameState &g, const Controls &in, const Aim &aim, float dt)
     UpdateContracts(g);
     Captain *me = &g;
     StepTraffic(g, &me, 1, dt);
+    ScopeTraffic(g, g, g.traffic);                 // (from here on, the other ships are the ones this captain's sensors hold)
     StepCaptain(g, g, in, aim, dt);
 }
 

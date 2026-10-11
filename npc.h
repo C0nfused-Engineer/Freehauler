@@ -50,6 +50,8 @@ struct Npc {
     PowerState  power;
     double      fuel = 0.0, tank = 0.0;
     bool        arrived = false;           // the autopilot has brought it to where it was sent
+    DVec3       left;                      // the port it has just cast off from...
+    double      leftClear = 0.0;           // ...and that body's radius (0: it's well away, or never was in port)
     DVec3       goal;
     double      until = 0.0;               // when what it's doing ends (docking, working, fleeing)
     int         from = -1, to = -1;        // markets (economy indices): where its cargo came from and is going;
@@ -62,6 +64,13 @@ struct Npc {
     double      since = 0.0;               // when it took up the chase
     bool        demanded = false;          // pirates: it has told its prey what it wants
     double      look = 0.0;                // when it next looks around
+    uint8_t     hull = 1;                  // which hull it's built on (shipparts.h)
+    // What it knows of what it's after (sensors.h): it flies at the quarry while its sensors hold it, and at the
+    // last place they did once they don't
+    double      seenAt = 0.0;
+    DVec3       lastPos;
+    double      heard = 0.0;               // pirates: no chasing another tachyon burst until then
+    int         post = -1;                 // patrols: the sensor outpost (a body of its system) it's stationed at as a picket, if it is one
 };
 
 // A lane freighter between two systems, not flown: just when it gets there

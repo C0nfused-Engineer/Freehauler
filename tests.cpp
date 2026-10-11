@@ -7,6 +7,7 @@
 #include "npcs.h"
 #include "process.h"
 #include "save.h"
+#include "sensors.h"
 #include "server.h"
 #include "settings.h"
 #include "shipyard.h"
@@ -80,7 +81,7 @@ static void Run(GameState &g, double seconds, Controls c = {}, Aim aim = {})
     int steps = (int)(seconds * SIM_HZ + 0.5);
     for (int i = 0; i < steps; i++) {
         Controls s = c;
-        if (i > 0) s.allStop = s.toggleDampeners = s.cyclePower = false;      // one-shot presses happen once
+        if (i > 0) s.allStop = s.toggleDampeners = s.cyclePower = s.toggleRadar = false;      // one-shot presses happen once
         StepGame(g, s, aim, (float)(1.0 / SIM_HZ));
     }
 }
@@ -105,6 +106,7 @@ static void TestFuel()
     const StarSystem &home = g.systems[H];
     int c = BodyIndex(g, home.name + " c"), d = BodyIndex(g, home.name + " d");
     const ShipSpec &spec = g.player.spec;
+    g.player.power.radar = false;                                 // (the radar's draw is its own test: sensors)
     const double perMJ = 1.0 / (spec.reactorEff * spec.fuelMJ);           // tonnes of fuel a megajoule
 
     // Sublight: thrust burns fuel; coasting costs only what the reactor idles at
@@ -116,15 +118,14 @@ static void TestFuel()
     double v = Vector3Length(g.player.ship.vel), burned = f0 - g.player.fuel;
     CHECK(v > 0.5 * LIGHT_SEC_U && fabs(burned - 5.0 * (spec.idleMW + spec.engineMW) * perMJ) < 0.002,
           "5 s at full throttle: %.2f c on %.4f t of fuel", v / LIGHT_SEC_U, burned);
-    Controls damp; damp.toggleDampeners = true;
-    Run(g, 1.0 / SIM_HZ, damp);
-    g.player.ship.throttle = 0.0f;
+    g.player.ship.vel = { 0, 0, 0 }; g.player.ship.throttle = 0.6f;
+    Run(g, 10.0);
+    v = Vector3Length(g.player.ship.vel);
     f0 = g.player.fuel;
     Run(g, 5.0);
-    CHECK(fabs(Vector3Length(g.player.ship.vel) - v) < 1e-3 * v && fabs(f0 - g.player.fuel - 5.0 * spec.idleMW * perMJ) < 1e-6,
-          "dampeners off, throttle shut: it coasts at %.2f c, and that costs only what the reactor idles at (%.4f t in 5 s)",
-          Vector3Length(g.player.ship.vel) / LIGHT_SEC_U, f0 - g.player.fuel);
-    Run(g, 1.0 / SIM_HZ, damp);
+    CHECK(fabs(v - ThrottleSpeed(0.6f)) < 1e-3 * v && fabs(Vector3Length(g.player.ship.vel) - v) < 1e-3 * v && fabs(f0 - g.player.fuel - 5.0 * spec.idleMW * perMJ) < 1e-6,
+          "throttle at 60%%: up to %.0f km/s, and holding it there costs only what the reactor idles at (%.4f t in 5 s)", v / KM_U, f0 - g.player.fuel);
+    g.player.ship.throttle = 0.0f;
     g.player.ship.vel = { 0, 0, 0 };
 
     // Hyper from c toward d
@@ -173,12 +174,18 @@ static void TestFlight()
     ship.anchor = H; ship.pos = home.n * (0.7 * LY_U); ship.vel = { 0, 0, 0 }; ship.throttle = 0.0f;
     Face(g, home.n);
     Controls up; up.throttle = 1;
-    Run(g, 0.2, up);
-    double gentle = speed();
-    Run(g, 0.8, up);
-    CHECK(fabsf(ship.throttle - THROTTLE_RATE) < 0.01f && gentle > 0.0 && gentle < 5.0 && speed() > 20.0 && speed() < 5000.0,
-          "a touch of W is a touch of thrust (%.1f m/s after 0.2 s); a second of it, throttle %.0f%%, %.0f m/s", gentle * METERS_PER_UNIT,
-          ship.throttle * 100.0f, speed() * METERS_PER_UNIT);
+    Run(g, 1.0, up);
+    CHECK(fabsf(ship.throttle - THROTTLE_RATE) < 0.01f && speed() > 1.0 && speed() < 2000.0,
+          "1 s of W: throttle %.0f%%, %.0f m/s", ship.throttle * 100.0f, speed() * METERS_PER_UNIT);
+    {
+        // The throttle sets a speed: the ship goes to it and holds. Most of its travel is speeds for manoeuvring.
+        auto settle = [&](float throttle) { ship.throttle = throttle; Run(g, 6.0); return speed(); };
+        double v20 = settle(0.2f), v50 = settle(0.5f), v80 = settle(0.8f), back = settle(0.2f);
+        CHECK(fabs(v20 - ThrottleSpeed(0.2f)) < 0.01 * v20 && fabs(v50 - ThrottleSpeed(0.5f)) < 0.01 * v50 && fabs(v80 - ThrottleSpeed(0.8f)) < 0.01 * v80 &&
+              fabs(back - v20) < 0.01 * v20 && v20 < 100.0 && v50 < 20000.0 && v80 < 0.05 * LIGHT_SEC_U && g.player.ship.thrustUse == 0.0f,
+              "throttle to speed: 20%% holds %.0f m/s, 50%% holds %.0f km/s, 80%% holds %.0f km/s; back to 20%% and it slows to that again",
+              v20 * METERS_PER_UNIT, v50 / KM_U, v80 / KM_U);
+    }
     ship.vel = { 0, 0, 0 }; ship.throttle = 1.0f;
     double t99 = 0.0;
     while (speed() < 0.99 * LIGHT_SEC_U * 0.9999 && t99 < 60.0) { Run(g, 0.25); t99 += 0.25; }
@@ -233,8 +240,8 @@ static void TestFlight()
     }
     Controls down; down.throttle = -1;
     Run(g, 5.0, down);
-    CHECK(ship.throttle == -THROTTLE_REVERSE && Vector3DotProduct(ship.vel, ShipForward(ship)) < -300.0f && speed() < 50000.0,
-          "S from a standstill: going astern, gently (%.1f km/s after 5 s)", speed() / KM_U);
+    CHECK(ship.throttle == -THROTTLE_REVERSE && Vector3DotProduct(ship.vel, ShipForward(ship)) < -300.0f && speed() < 600.0,
+          "S from a standstill: reverse, no faster than %.1f km/s", speed() / KM_U);
     Run(g, 10.0, stop);
 
     // Hyper straight at a planet: the drive stops by itself, in trading range
@@ -556,6 +563,12 @@ static void TestComms()
     CHECK(lost && g.comms.channels.empty(), "leaving the system drops every channel");
 }
 
+static double AngleTo(const GameState &g, DVec3 rel)
+{
+    DVec3 fwd = ToD(ShipForward(g.player.ship)), want = Norm(rel);
+    return atan2(Len(Cross(fwd, want)), Dot(fwd, want)) * RAD2DEG;
+}
+
 static void TestTargeting()
 {
     GameState g; NewGame(g);
@@ -569,18 +582,35 @@ static void TestTargeting()
     Run(g, 0.05, {}, Aim{});
     CHECK(!g.flight.selected.valid(), "reticle off the body: deselected");
 
+    // Looking at something doesn't lock it: Shift alone flies wherever the nose points
     Controls hyper; hyper.hyper = true;
-    Run(g, 0.5, hyper, aim);
-    CHECK(g.flight.lock == aim.hovered, "Shift locks onto the selection");
-    Run(g, 0.5, hyper, Aim{});
-    CHECK(g.flight.lock == aim.hovered && g.flight.selected == aim.hovered, "lock (and selection) hold when the reticle drifts");
-    Controls jerk = hyper; jerk.yaw = 10.0f;
-    Run(g, 1.0 / SIM_HZ, jerk, aim);
-    CHECK(!g.flight.lock.valid() && g.flight.lockSuppressed, "a deliberate mouse move breaks the lock");
     Run(g, 0.2, hyper, aim);
-    CHECK(!g.flight.lock.valid(), "...and it stays broken while Shift is held");
+    CHECK(!g.flight.lock.valid() && g.flight.selected == aim.hovered, "Shift with nothing locked: no lock, whatever the reticle is on");
+    g.player.ship.vel = { 0, 0, 0 };
+    Park(g, c, 2.0);
+    // Locked (SPACE or the middle button on what's under the reticle): it stays locked wherever the pilot looks
+    Aim locked; locked.course = TargetId::MakeBody(H, d);
+    Run(g, 0.05, {}, locked);
+    CHECK(g.flight.lock == locked.course && g.flight.selected == locked.course, "a destination locked stays locked with the reticle off it, Shift or no Shift");
+    Aim elsewhere = locked; elsewhere.hovered = TargetId::MakeBody(H, c);
+    Run(g, 0.05, {}, elsewhere);
+    CHECK(g.flight.lock == locked.course && g.flight.selected == elsewhere.hovered, "looking at something else selects it; the lock is still the destination");
+    // Under drive the nose is held on it: the mouse does nothing until the lock is released
+    Controls jerk = hyper; jerk.yaw = 10.0f;
+    Run(g, 1.0, hyper, locked);
+    DVec3 to;
+    FindTarget(g, locked.course, to);
+    double before = AngleTo(g, to);
+    Run(g, 0.2, jerk, locked);
+    FindTarget(g, locked.course, to);
+    CHECK(g.flight.lock == locked.course && before < 3.0 && AngleTo(g, to) < 3.0, "under drive the nose is held on the lock (%.2f degrees off it), mouse or no mouse", AngleTo(g, to));
+    // Released: free flight, and the mouse steers again
+    Run(g, 0.2, jerk, Aim{});
+    FindTarget(g, locked.course, to);
+    CHECK(!g.flight.lock.valid() && AngleTo(g, to) > 20.0, "released, there's no lock and the ship goes where it's steered (%.0f degrees off the old destination)", AngleTo(g, to));
+    g.player.ship.vel = { 0, 0, 0 };
+    Park(g, c, 2.0);
     Run(g, 0.1, {}, Aim{});
-    CHECK(!g.flight.lock.valid() && !g.flight.lockSuppressed, "releasing Shift resets");
 
     // Stars: the loaded system's star is a Body; far away it's a Star again
     TargetId star = CanonicalTarget(g, TargetId::MakeStar(H));
@@ -1026,6 +1056,7 @@ static void TestFactions()
         GenerateSystemContents(*s, L);
         AssignOwners(fs, *s, L);
         for (const Body &o : L.bodies) {
+            if (o.settlement == Settlement::SensorOutpost) { if (o.owner != s->ruler || s->ruler == NO_FACTION) bad++; continue; }
             if (o.population <= 0) { if (o.owner != NO_FACTION) bad++; continue; }
             const Faction *f = fs.Get(o.owner);
             if (!f) { self++; continue; }
@@ -1099,6 +1130,28 @@ static void TestFactions()
 
 static void TestMining()
 {
+    {
+        // A station in a belt keeps its berth clear of rocks; the field is brought in from 70 km out
+        GameState h; NewGame(h);
+        int st = -1;
+        for (int i = 0; i < (int)h.loaded.bodies.size(); i++) if (h.loaded.bodies[i].settlement == Settlement::OreRefinery) { st = i; break; }
+        if (st >= 0) {
+            const Body &b = h.loaded.bodies[st];
+            h.player.ship.pos = b.local + h.systems[h.systems.home].n * (b.radius + 100.0); h.player.ship.vel = { 0, 0, 0 };
+            Run(h, 0.05);
+            int rocks = 0, inside = 0;
+            double nearest = 1e30, farthest = 0.0;
+            for (const auto &cell : h.field.cells)
+                for (const Asteroid &r : cell.second) {
+                    double d = Len(r.local - b.local);
+                    rocks++;
+                    nearest = fmin(nearest, d); farthest = fmax(farthest, d);
+                    if (d < 2.0 * b.radius + AST_KEEP_CLEAR) inside++;
+                }
+            CHECK(rocks > 50 && inside == 0 && nearest < 6.0 * (2.0 * b.radius + AST_KEEP_CLEAR) && farthest > 60.0 * KM_U,
+                  "around %s: %d rocks out to %.0f km, the nearest %.1f km off; none in its berth", b.name.c_str(), rocks, farthest / KM_U, nearest / KM_U);
+        }
+    }
     GameState g; NewGame(g);
     int z = -1;
     for (int i = 0; i < (int)g.loaded.zones.size(); i++) if (!g.loaded.zones[i].ring) { z = i; break; }
@@ -1513,7 +1566,7 @@ static void TestContracts()
     {
         Captain all;                                               // (a member of every guild, to see everything)
         for (const Faction &f : fs.list) if (f.kind == FactionKind::Guild) all.SetPaper(f.id, PAPER_MEMBER);
-        int kinds[(int)ContractKind::Count] = {}, bad = 0, guild = 0, gated = 0, relief = 0, boards = 0;
+        int kinds[(int)ContractKind::Count] = {}, bad = 0, guild = 0, gated = 0, relief = 0, boards = 0, illicit = 0, unlabelled = 0;
         for (int i = 0; i < g.econ.Count(); i += 7) {
             Body fake; fake.id = base.defs[i].bodyId;
             RecordBoard(g, all, fake);
@@ -1530,11 +1583,23 @@ static void TestContracts()
                 ((k.kind == ContractKind::Haulage || k.kind == ContractKind::Smuggling) && k.collateral <= 0.0f) ||
                 (k.kind == ContractKind::Survey && (!g.systems.Exists(k.surveySys) || g.systems[k.surveySys].develop > 0.0f || k.need < 2)) ||
                 (k.kind == ContractKind::Smuggling && (fs.Get(k.against) == nullptr || k.fromBody == k.toBody))) bad++;
+            // Whatever a government at either end bans is smuggling, and says so
+            if (cargo) {
+                int law = NO_FACTION;
+                for (uint64_t body : { k.toBody, k.fromBody }) {
+                    const Faction *ruler = fs.Get(base.defs[g.econ.MarketOf(body)].ruler);
+                    if (ruler && std::find(ruler->contraband.begin(), ruler->contraband.end(), k.good) != ruler->contraband.end()) law = ruler->id;
+                }
+                if (law != NO_FACTION) illicit++;
+                if ((law != NO_FACTION) != (k.law != NO_FACTION) || (law != NO_FACTION && (ContractLabel(k).find("Smuggling") != 0 || k.kind == ContractKind::Haulage || k.issuer == law)) ||
+                    (law == NO_FACTION && ContractLabel(k).find("Smuggling") == 0)) unlabelled++;
+            }
         }
         int n = (int)all.offers.size();
         CHECK(bad == 0 && n >= 3 * boards && kinds[0] > 0 && kinds[1] > 0 && kinds[2] > 0 && kinds[3] > 0 && kinds[4] > 0 && guild > 0 && gated > 0,
               "%d boards: %d contracts, all sound - %d haulage, %d supply, %d smuggling, %d survey, %d courier; %d for guild members, %d wanting standing",
               boards, n, kinds[0], kinds[1], kinds[2], kinds[3], kinds[4], guild, gated);
+        CHECK(illicit > 0 && unlabelled == 0, "%d of them carry what a government at one end or the other bans: every one is labelled smuggling, and no lawful haulage or supply order does", illicit);
         Captain nobody;
         Body fake; fake.id = A.id;
         RecordBoard(g, nobody, fake);
@@ -1909,11 +1974,15 @@ static void TestTraffic()
             int pid = p.id;
             size_t news = g.news.size();
             g.trafficNews = -1e9;
-            for (int tries = 0; tries < 60 && g.news.size() == news; tries++) Run(g, 0.5);
+            for (int tries = 0; tries < 80; tries++) {              // (until it's been robbed: other news may come in meanwhile)
+                const Npc *victim = FindNpc(g, fid);
+                if (!victim || victim->total < 0.9f * had) break;
+                Run(g, 0.5);
+            }
             const Npc *after = FindNpc(g, fid), *raider = FindNpc(g, pid);
             (void)was; (void)to;
             CHECK(after && fabs(after->total - 0.5f * had) < 0.01f * had && fabs(after->cargo[bulk] - 0.5f * carried) < 0.01f * carried + 0.01f &&
-                  g.news.size() == news + 1 && (!raider || raider->doing == NpcDo::Leave),
+                  g.news.size() > news && (!raider || raider->doing == NpcDo::Leave),
                   "a raider caught the %s in the open: half its %.0f t gone for good  (\"%s\")", after ? after->name.c_str() : "?", had,
                   g.news.empty() ? "" : g.news.back().text.c_str());
         } else CHECK(false, "found a freighter for the raider to rob");
@@ -2054,6 +2123,7 @@ static void TestPower()
         ship.anchor = H; ship.pos = home.n * (0.7 * LY_U); ship.vel = { 0, 0, 0 }; ship.throttle = 0.0f; ship.ftl = 1.0f;
         Face(g, home.n);
         p.fuel = p.spec.tank; p.power = PowerState();
+        p.power.radar = false;                                    // (the radar's draw is its own test: sensors)
         Run(g, 0.05);
     };
     auto load = [&](double tonnes) { for (int k = 0; k < GOOD_COUNT; k++) p.cargo[k] = 0.0; p.cargo[ORE_IRON] = tonnes; };
@@ -2098,10 +2168,10 @@ static void TestPower()
     ship.throttle = 1.0f;
     Run(g, 2.0);
     CHECK(fabs(g.flight.load - (p.spec.idleMW + p.spec.engineMW)) < 0.01, "at full thrust it draws %.0f MW", g.flight.load);
-    ship.throttle = 0.5f;
-    Run(g, 0.5);
-    CHECK(g.flight.load < p.spec.idleMW + 0.01 * p.spec.engineMW && fabs(ThrottleThrust(0.5f) - 1e-3) < 1e-5,
-          "half throttle is a thousandth of the thrust, and of the engines' power (%.3f MW)", g.flight.load);
+    Run(g, 30.0);
+    CHECK(fabs(g.flight.load - p.spec.idleMW) < 1e-9 && speed() > 0.989 * LIGHT_SEC_U, "once it's at the speed set, the engines shut down: back to %.0f MW at %.2f c", g.flight.load, speed() / LIGHT_SEC_U);
+    ship.throttle = 0.0f;
+    Run(g, 30.0);
 
     // Hyper: P = P0 + K m (v/c)^N. Run it slower and it draws far less.
     load(0.0);
@@ -2202,8 +2272,12 @@ static void TestPower()
     CHECK(second == POWER_COMBAT && travelDrive > 2.5 * travelBank && p.power.bank > 2.5 * p.power.driveCap &&
           fabs(travelDrive / p.spec.capIn + travelBank - 2.0 * (p.spec.reactorMW - p.spec.idleMW)) < 5.0,
           "X cycles the power mode: TRAVEL sends three quarters of the spare output to the drive capacitor, COMBAT to the bank");
-    Run(g, 1.0 / SIM_HZ, cycle); Run(g, 1.0 / SIM_HZ, cycle);
-    CHECK(p.power.mode == POWER_TRAVEL, "...and round again to TRAVEL");
+    Run(g, 1.0 / SIM_HZ, cycle);
+    uint8_t third = p.power.mode;
+    Run(g, 1.0 / SIM_HZ, cycle);
+    uint8_t fourth = p.power.mode;
+    Run(g, 1.0 / SIM_HZ, cycle);
+    CHECK(third == POWER_DEFENCE && fourth == POWER_SILENT && p.power.mode == POWER_TRAVEL, "...then DEFENCE, SILENT, and round again to TRAVEL");
 
     // Out of fuel: emergency power, and a tanker if you want one
     ship.anchor = H; ship.pos = home.u * (6.0 * AU_U) + home.n * (0.3 * AU_U); ship.vel = { 0, 0, 0 };
@@ -2273,10 +2347,11 @@ static void TestShips()
           s.fuelGood == REF_REACTOR_FUEL && d.fuelGood == REF_REACTOR_FUEL && fabs(s.idleMW - d.idleMW) < 1e-9 && s.engineMW == d.engineMW && s.bankMJ == d.bankMJ && s.driveCapMJ == d.driveCapMJ &&
           s.hyperSpeed == d.hyperSpeed && s.hyperP0 == d.hyperP0 && s.hyperMaxMass == d.hyperMaxMass && s.warpSpeed == d.warpSpeed && s.warpP0 == d.warpP0 &&
           s.jumpMJ == d.jumpMJ && s.tank == FUEL_CAPACITY && s.hold == CARGO_CAPACITY && s.laserRate == d.laserRate && s.scoopRate == d.scoopRate &&
-          s.skimRate == d.skimRate && s.scan == d.scan,
+          s.skimRate == d.skimRate && s.scan == d.scan && s.radar == d.radar && s.radarMW == d.radarMW && s.ir == d.ir && s.tachArea == d.tachArea &&
+          s.tachDepth == d.tachDepth && s.tachEff == d.tachEff && s.tachRes == d.tachRes && s.hullSize == d.hullSize,
           "the starter ship: a %s with %d parts, %.1f t dry, %.0f MW, %.0f t of fuel, %.0f t of cargo", Hull(p.build.hull).name, (int)p.build.parts.size(),
           s.dryMass, s.reactorMW, s.tank, s.hold);
-    CHECK(fabs(VolumeUsed(p.build) - 330.0) < 0.01 && BuildVolume(p.build) == 400.0 && HardpointsUsed(p.build) == 4 && BuildHardpoints(p.build) == 6,
+    CHECK(fabs(VolumeUsed(p.build) - 343.0) < 0.01 && BuildVolume(p.build) == 400.0 && HardpointsUsed(p.build) == 7 && BuildHardpoints(p.build) == 9,
           "it uses %.0f of its %.0f m3 and %d of its %d hardpoints", VolumeUsed(p.build), BuildVolume(p.build), HardpointsUsed(p.build), BuildHardpoints(p.build));
     // Size doubles a part; grade makes it lighter, better and much dearer
     {
@@ -2290,7 +2365,7 @@ static void TestShips()
     }
 
     // Away from a yard nothing can be done
-    CHECK(!Shipyard(g) && !FitPart(g, g, MakePart(PartType::Hold, 1)) && p.build.parts.size() == 13, "fitting out needs a shipyard or a starbase");
+    CHECK(!Shipyard(g) && !FitPart(g, g, MakePart(PartType::Hold, 1)) && p.build.parts.size() == 16, "fitting out needs a shipyard or a starbase");
     int yardIndex = -1;
     for (int i = 0; i < (int)g.loaded.bodies.size(); i++) if (g.loaded.bodies[i].settlement == Settlement::Shipyard) { yardIndex = i; break; }
     CHECK(yardIndex >= 0, "the home system has a shipyard (%s)", yardIndex >= 0 ? g.loaded.bodies[yardIndex].name.c_str() : "none");
@@ -2312,13 +2387,13 @@ static void TestShips()
         float plating = g.econ.state[market].stock[GOOD_HULL_PLATING];
         bool fitted = FitPart(g, g, bay);
         CHECK(fitted && price > 0.0 && fabs(cr - p.credits - price) < 1e-6 && p.spec.hold == 125.0 && fabs(p.spec.dryMass - mass - info.mass) < 1e-9 &&
-              fabs(VolumeUsed(p.build) - 360.0) < 0.01 && (!base_target(g, market, GOOD_HULL_PLATING) || fabs(plating - g.econ.state[market].stock[GOOD_HULL_PLATING] - info.tonnes) < 1e-3),
+              fabs(VolumeUsed(p.build) - 373.0) < 0.01 && (!base_target(g, market, GOOD_HULL_PLATING) || fabs(plating - g.econ.state[market].stock[GOOD_HULL_PLATING] - info.tonnes) < 1e-3),
               "fitted a %s for %.0f cr: 125 t of hold now, %.1f t heavier, %.0f m3 used", info.name.c_str(), price, info.mass, VolumeUsed(p.build));
         // No room for a big one; no hardpoint for a third thing outside
         bool big = FitPart(g, g, MakePart(PartType::Hold, 4));
         bool laser = FitPart(g, g, MakePart(PartType::MiningLaser, 1)), scoop = FitPart(g, g, MakePart(PartType::Scoop, 1));
         bool another = FitPart(g, g, MakePart(PartType::MiningLaser, 1));
-        CHECK(!big && laser && scoop && !another && p.spec.laserRate == 4.0 && p.spec.scoopRate == 1.0 && HardpointsUsed(p.build) == 6,
+        CHECK(!big && laser && scoop && !another && p.spec.laserRate == 4.0 && p.spec.scoopRate == 1.0 && HardpointsUsed(p.build) == 9,
               "no room for a size 4 bay; a second mining laser and a scoop take the last two hardpoints, and a third thing has nowhere to go");
         // Taken out again: sold at a loss
         cr = p.credits;
@@ -2341,8 +2416,8 @@ static void TestShips()
         int done = 1;
         while (StretchHull(g, g, false)) done++;
         CHECK(ok && mount && fabs(BuildVolume(p.build) / room - (1.0 + 0.12 * MAX_STRETCH)) < 1e-9 && second > 1.6 * first && done == MAX_STRETCH &&
-              BuildHardpoints(p.build) == 7 && p.spec.dryMass > dry && first > 0.2 * Hull(p.build.hull).cost,
-              "stretched %d times for %.0f m3 (the first cost %.0f cr, the second %.0f), and a seventh hardpoint welded on; then no more",
+              BuildHardpoints(p.build) == 10 && p.spec.dryMass > dry && first > 0.2 * Hull(p.build.hull).cost,
+              "stretched %d times for %.0f m3 (the first cost %.0f cr, the second %.0f), and a tenth hardpoint welded on; then no more",
               done, BuildVolume(p.build), first, second);
     }
 
@@ -2402,16 +2477,16 @@ static void TestShips()
     // Grades: what a yard sells depends on whose it is, and how well it knows you
     {
         int best = YardGrade(g, g, *yard, PartType::Engine);
-        bool tooGood = best < PART_GRADES - 1 && FitPart(g, g, MakePart(PartType::Scanner, 1, PART_GRADES - 1));
+        bool tooGood = best < PART_GRADES - 1 && FitPart(g, g, MakePart(PartType::Telescope, 1, PART_GRADES - 1));
         int company = NO_FACTION;
         for (const Faction &f : fs.list) if (f.kind == FactionKind::Conglomerate && Specialises(f.slant, PartType::Reactor) && company == NO_FACTION) company = f.id;
         Body theirs = *yard;
         theirs.owner = company;
-        int stranger = YardGrade(g, g, theirs, PartType::Reactor), other = YardGrade(g, g, theirs, PartType::Scanner);
+        int stranger = YardGrade(g, g, theirs, PartType::Reactor), other = YardGrade(g, g, theirs, PartType::Telescope);
         g.standing[company] = 30.0f;
         int known = YardGrade(g, g, theirs, PartType::Reactor);
         CHECK(best >= 1 && !tooGood && company != NO_FACTION && stranger == 2 && known == 3 && other == 2 && YardMaker(g, theirs, PartType::Reactor) == company &&
-              YardMaker(g, theirs, PartType::Scanner) == NO_FACTION,
+              YardMaker(g, theirs, PartType::Telescope) == NO_FACTION,
               "%s sells up to %s grade; a yard of %s sells its own reactors up to %s, and %s to a customer it knows", yard->name.c_str(), GradeName(best),
               fs.Name(company).c_str(), GradeName(stranger), GradeName(known));
         // Out of what it's made of, a yard can't build it
@@ -2469,43 +2544,473 @@ static void TestShips()
         remove("test_ship.txt");
     }
 
-    // Tachyons: a warp bubble's collapse can be picked up, the nearer and the better the scanner the likelier
+}
+
+// ---------------------------------------------------------------------------
+// Sensors: tachyon bursts and who catches them, radar, infrared and telescopes,
+// contacts and ghosts, running silent, sensor networks and traffic control
+// ---------------------------------------------------------------------------
+static double AngleBetween(DVec3 a, DVec3 b) { return atan2(Len(Cross(a, b)), Dot(a, b)) * RAD2DEG; }
+
+static void TestSensors()
+{
+    const TachyonSensor ship = ShipDetector(ShipSpec()), outpost = OutpostDetector(), port = PortDetector();
+    const double small = TACH_E0_MJ, big = 50.0 * TACH_E0_MJ;       // a 100 t ship, and a 5,000 t one
+
+    // --- The physics ---
     {
-        GameState h; NewGame(h);
-        Run(h, 0.5);
-        const StarSystem &home = h.systems[h.systems.home];
-        h.player.ship.pos = home.u * (20.0 * AU_U) + home.n * (0.5 * AU_U); h.player.ship.vel = { 0, 0, 0 };
-        Run(h, 0.5);
-        auto heard = [&](double au, int tries) {
+        double near = TachyonExpected(ship, small, 0.5), twice = TachyonExpected(ship, small, 1.0);
+        double far = TachyonExpected(ship, small, 80.0), further = TachyonExpected(ship, small, 160.0);
+        CHECK(fabs(TachyonExpected(ship, small, 5.0) - 3.0) < 0.15 && fabs(near / twice - 4.0 * exp(0.5 / TACH_L0_AU)) < 0.01 &&
+              fabs(far / further - 4.0 * exp(80.0 / TACH_L0_AU)) < 0.01 * far / further,
+              "a small ship's burst: %.1f counts expected in a basic detector 5 AU off; inverse square close in (x%.2f for half the distance), and decay on top of it far out (x%.0f from 160 AU to 80)",
+              TachyonExpected(ship, small, 5.0), near / twice, far / further);
+        CHECK(fabs(TachyonDecayAU(small) - TACH_L0_AU) < 1e-9 && fabs(TachyonDecayAU(big) / TachyonDecayAU(small) - sqrt(50.0)) < 1e-9 &&
+              fabs(TachyonCount(big) / TachyonCount(small) - 50.0) < 1e-9 && TachyonExpected(ship, big, 5.0) > 5.0 * TachyonExpected(ship, small, 5.0) &&
+              TachyonExpected(ship, big, 60.0) > 20.0 * TachyonExpected(ship, small, 60.0),
+              "a ship fifty times the mass: fifty times the tachyons, and they go %.0f AU, not %.0f; %.0f times the count at 5 AU, %.0f times at 60",
+              TachyonDecayAU(big), TachyonDecayAU(small), TachyonExpected(ship, big, 5.0) / TachyonExpected(ship, small, 5.0),
+              TachyonExpected(ship, big, 60.0) / TachyonExpected(ship, small, 60.0));
+        // Counting is Poisson, and repeatable from the same seed
+        uint64_t dice = 7, again = 7;
+        double sum = 0.0, sq = 0.0;
+        bool same = true;
+        for (int i = 0; i < 20000; i++) { int k = Poisson(2.5, dice); sum += k; sq += (double)k * k; if (i < 100 && Poisson(2.5, again) != k) same = false; }
+        double mean = sum / 20000.0, var = sq / 20000.0 - mean * mean;
+        CHECK(fabs(mean - 2.5) < 0.05 && fabs(var - 2.5) < 0.12 && same, "counts are Poisson: 20,000 draws at 2.5 average %.3f, variance %.3f; the same seed gives the same draws", mean, var);
+    }
+
+    // --- Detection is a matter of odds that fall away with distance, never a hard range ---
+    {
+        uint64_t dice = 11;
+        auto caught = [&](const TachyonSensor &s, double mj, double au, int tries) {
             int n = 0;
-            for (int i = 0; i < tries; i++) {
-                h.events.clear();
-                h.bursts.push_back({ h.systems.home, ShipLocal(h) + home.u * (au * AU_U), 3000.0, 424242 });
-                Run(h, 2.0 / SIM_HZ);
-                for (const GameEvent &e : h.events) if (e.text.find("Tachyon burst") != std::string::npos) n++;
-            }
+            TachyonDetection d;
+            for (int i = 0; i < tries; i++) if (DetectBurst(s, {}, DVec3{ au * AU_U, 0, 0 }, mj, dice, d)) n++;
             return n;
         };
-        int near = heard(1.0, 40), mid = heard(6.0, 200), far = heard(120.0, 40);
-        h.player.spec.scan = 4.0;
-        int better = heard(6.0, 200);
-        CHECK(near == 40 && far == 0 && mid > 40 && mid < 160 && better > mid + 20,
-              "a ship dropping out of warp 1 AU off is always noticed, 120 AU off never; at 6 AU, %d times in 200 with the basic scanner and %d with a far better one",
-              mid, better);
-        // Your own arrival is noticed too: a raider that picks it up comes to look
-        h.player.spec = ShipSpec();
-        h.npcs.clear();
+        int at2 = caught(ship, small, 2.0, 300), at6 = caught(ship, small, 6.0, 300), at10 = caught(ship, small, 10.0, 300), at40 = caught(ship, small, 40.0, 300);
+        CHECK(at2 == 300 && at6 > 60 && at6 < 220 && at10 < at6 && at10 > 0 && at40 <= 3,
+              "a basic detector and a small ship's arrival: caught %d times in 300 at 2 AU, %d at 6, %d at 10, %d at 40 (the odds by sum: %.0f%%, %.0f%%, %.0f%%)",
+              at2, at6, at10, at40, 100.0 * TachyonChance(ship, small, 2.0), 100.0 * TachyonChance(ship, small, 6.0), 100.0 * TachyonChance(ship, small, 10.0));
+        int smallAt15 = caught(ship, small, 15.0, 300), bigAt15 = caught(ship, big, 15.0, 300);
+        int postAt40 = caught(outpost, small, 40.0, 300), postAt80 = caught(outpost, small, 80.0, 300), portAt20 = caught(port, small, 20.0, 300);
+        CHECK(smallAt15 < 20 && bigAt15 > 90 && postAt40 == 300 && postAt80 > 150 && portAt20 > 150,
+              "a big ship is caught from much further off (%d times in 300 at 15 AU, where the small one is caught %d); a state's outpost catches the small one every time at 40 AU and %d times at 80; "
+              "a port's own detector, %d times at 20", bigAt15, smallAt15, postAt80, portAt20);
+        int stealth = caught(outpost, small, 400.0, 300) + caught(outpost, big, 1500.0, 300);
+        CHECK(stealth == 0 && TachyonExpected(outpost, small, 400.0) < 1e-3, "dropping out hundreds of AU beyond the edge, nothing catches it (%.5f counts expected at an outpost 400 AU away)",
+              TachyonExpected(outpost, small, 400.0));
+
+        // A bearing, better with more counts; and a range the count can only bracket
+        auto spread = [&](const TachyonSensor &s, double au, double &inBand) {
+            double sum = 0.0; int n = 0, in = 0;
+            TachyonDetection d;
+            DVec3 at = { au * AU_U, 0, 0 };
+            for (int i = 0; i < 400; i++) {
+                if (!DetectBurst(s, {}, at, small, dice, d)) continue;
+                sum += AngleBetween(d.bearing, at); n++;
+                if (d.rLo <= au * AU_U && au * AU_U <= d.rHi) in++;
+            }
+            inBand = n ? (double)in / n : 0.0;
+            return n ? sum / n : 0.0;
+        };
+        double band1, band4, bandPost;
+        double err1 = spread(ship, 1.0, band1), err4 = spread(ship, 4.0, band4), errPost = spread(outpost, 30.0, bandPost);
+        TachyonDetection omni;
+        bool heard = DetectBurst(port, {}, DVec3{ 3.0 * AU_U, 0, 0 }, small, dice, omni);
+        CHECK(err1 < 2.5 && err4 > 2.0 * err1 && err4 < 12.0 && errPost < 0.5 && band1 > 0.95 && band4 > 0.95 && heard && !omni.directional,
+              "the bearing is good to %.1f degrees at 1 AU and %.1f at 4 (fewer counts); an outpost's to %.2f at 30 AU; the true range is inside the bracket %.0f%% of the time; a port's detector gives no direction",
+              err1, err4, errPost, 50.0 * (band1 + band4));
+
+        // Two or more bearings from well apart cross at a place
+        std::vector<DVec3> posts = { { 40.0 * AU_U, 0, 0 }, { -20.0 * AU_U, 0, 35.0 * AU_U }, { -20.0 * AU_U, 0, -35.0 * AU_U }, { 0, 6.0 * AU_U, 0 } };
+        DVec3 burst = { 10.0 * AU_U, 1.0 * AU_U, 25.0 * AU_U };
+        double worst = 0.0, claimed = 0.0;
+        int fixes = 0;
+        for (int i = 0; i < 100; i++) {
+            std::vector<TachyonDetection> got;
+            for (DVec3 at : posts) { TachyonDetection d; if (DetectBurst(outpost, at, burst, small, dice, d)) got.push_back(d); }
+            DVec3 fix; double err;
+            if (!Triangulate(got, fix, err)) continue;
+            fixes++; worst = fmax(worst, Len(fix - burst)); claimed += err;
+        }
+        std::vector<TachyonDetection> one(1), parallel(2);
+        one[0].directional = true; one[0].bearing = { 1, 0, 0 }; one[0].sigma = 1.0;
+        parallel[0] = one[0]; parallel[1] = one[0]; parallel[1].from = { 0, 1000.0, 0 };
+        DVec3 fix; double err;
+        CHECK(fixes == 100 && worst < 1.0 * AU_U && worst < 4.0 * claimed / 100.0 && claimed / 100.0 < 0.5 * AU_U && claimed / 100.0 > 0.01 * AU_U && !Triangulate(one, fix, err) && !Triangulate(parallel, fix, err),
+              "four outposts fix a small ship's arrival every time, never more than %.2f AU out (they claim +/- %.2f); one bearing alone, or two side by side, fix nothing",
+              worst / AU_U, claimed / 100.0 / AU_U);
+    }
+
+    // --- Radar, infrared, telescope ---
+    {
+        SensorFit basic = { 1.0, 1.0, 1.0, true }, passive = { 1.0, 1.0, 1.0, false };
+        Signature hauler, bulk, hot, cold;
+        hauler.heat = 7.5; bulk = hauler; bulk.size = Hull(HULL_BULK).volume / Hull(HULL_HAULER).volume;
+        hot = hauler; hot.heat = 120.0; cold = hauler; cold.heat = 0.5;
+        uint8_t by = 0;
+        int far = Sense(basic, hauler, 1.6 * AU_U), found = Sense(basic, hauler, 1.4 * AU_U, 1.0, &by), known = Sense(basic, hauler, 1.0 * AU_U), named = Sense(basic, hauler, 0.2 * AU_U);
+        CHECK(far == CONTACT_NONE && found == CONTACT_DETECTED && by == BY_RADAR && known == CONTACT_CLASSIFIED && named == CONTACT_IDENTIFIED &&
+              Sense(basic, hauler, 500.0 * KM_U) == CONTACT_IDENTIFIED,
+              "a hauler: nothing at 1.6 AU, a radar contact at 1.4, classified at 1.0, identified by telescope at 0.2");
+        CHECK(Sense(basic, bulk, 2.8 * AU_U) == CONTACT_DETECTED && Sense(basic, bulk, 0.5 * AU_U) == CONTACT_IDENTIFIED &&
+              fabs(RadarRange(1.0, bulk.size) / RadarRange(1.0, 1.0) - pow(bulk.size, 0.25)) < 1e-9 && RadarRange(1.0, 150.0 / 400.0) < 0.8 * RadarRange(1.0, 1.0),
+              "size matters: a bulk carrier shows on radar at %.2f AU and to the eye at %.2f; a courier at %.2f and %.2f", RadarRange(1.0, bulk.size) / AU_U,
+              ScopeRange(1.0, bulk.size) / AU_U, RadarRange(1.0, 0.375) / AU_U, ScopeRange(1.0, 0.375) / AU_U);
+        CHECK(Sense(passive, hauler, 1.4 * AU_U) == CONTACT_NONE && Sense(passive, hot, 3.0 * AU_U, 1.0, &by) == CONTACT_DETECTED && by == BY_IR &&
+              Sense(passive, cold, 0.3 * AU_U) == CONTACT_NONE && Sense(passive, cold, 0.2 * AU_U) > CONTACT_NONE,
+              "with the radar off there's only heat to go by: a ship working hard shows at %.1f AU, one running cold at %.2f", IrRange(1.0, hot.heat) / AU_U, IrRange(1.0, cold.heat) / AU_U);
+        Signature emitter = hauler; emitter.radar = true;
+        CHECK(HearsRadar(emitter, 4.0 * AU_U) && !HearsRadar(emitter, 5.0 * AU_U) && !HearsRadar(hauler, 0.5 * AU_U) && Sense(basic, hauler, 4.0 * AU_U) == CONTACT_NONE,
+              "a radar is heard at 4 AU, far beyond where it can see; a ship that isn't transmitting isn't heard at all");
+        CHECK(Sense(basic, hauler, 1.55 * AU_U) == CONTACT_NONE && Sense(basic, hauler, 1.55 * AU_U, HOLD_GAIN) == CONTACT_DETECTED,
+              "a contact already held is kept a little past where it would be found");
+    }
+
+    // --- In the game: only what the sensors hold is on the scope ---
+    GameState h; NewGame(h);
+    Run(h, 0.5);
+    const SysId H = h.systems.home;
+    const StarSystem &home = h.systems[H];
+    Player &p = h.player;
+    auto shown = [&](int id) -> const Traffic * { for (const Traffic &t : h.traffic) if (t.id == id) return &t; return nullptr; };
+    auto quiet = [&]() { h.npcs.clear(); h.transits.clear(); h.econ.waiting.clear(); h.trafficZoned = h.clock; h.contacts.clear(); h.marks.clear(); };
+    auto away = [&]() {                                              // out in the open, far from every port, at rest
+        p.ship.anchor = H; p.ship.pos = RandomPointFarFromPorts(h); p.ship.vel = { 0, 0, 0 }; p.ship.throttle = 0.0f;
+        p.power = PowerState(); p.fuel = p.spec.tank;
+        for (int k = 0; k < GOOD_COUNT; k++) p.cargo[k] = 0.0;
+        Run(h, 0.05);
+    };
+    int clan = NO_FACTION;
+    for (const Faction &f : h.systems.factions.list) if (f.kind == FactionKind::Clan) { clan = f.id; break; }
+    away(); quiet();
+    DVec3 here = ShipLocal(h);
+    int rid = PutShip(h, NpcKind::Pirate, H, here + home.v * (3.0 * AU_U), clan).id;
+    auto put = [&](int id, double au, double seconds = 0.1) {
+        Npc *n = const_cast<Npc *>(FindNpc(h, id));
+        if (n) { n->pos = here + home.v * (au * AU_U); n->goal = n->pos; n->vel = {}; n->until = h.clock + 1e6; }
         h.trafficZoned = h.clock;
-        int clan = NO_FACTION;
-        for (const Faction &f : h.systems.factions.list) if (f.kind == FactionKind::Clan) { clan = f.id; break; }
-        DVec3 here = ShipLocal(h);
-        Npc &raider = PutShip(h, NpcKind::Pirate, h.systems.home, here + home.v * (2.0 * AU_U), clan);
-        int rid = raider.id;
-        h.bursts.push_back({ h.systems.home, here, 3000.0, h.id });
-        for (int k = 0; k < GOOD_COUNT; k++) h.player.cargo[k] = 0.0;
-        Run(h, 0.1);
+        Run(h, seconds);
+        return shown(id);
+    };
+    {
+        bool none = put(rid, 3.0) == nullptr && h.trafficControl.empty();
+        const Traffic *t = put(rid, 1.0);
+        bool blip = t && t->level == CONTACT_DETECTED && t->by == BY_RADAR && t->name == "Unknown contact" && t->faction == NO_FACTION && !t->ghost;
+        t = put(rid, 0.7);
+        bool kind = t && t->level == CONTACT_CLASSIFIED && t->name == "Unidentified raider" && t->faction == NO_FACTION && t->hull == HULL_COURIER;
+        t = put(rid, 0.1);
+        bool named = t && t->level == CONTACT_IDENTIFIED && t->name == "Test raider" && t->faction == clan && (t->by & BY_SCOPE);
+        t = put(rid, 0.7);
+        bool kept = t && t->level == CONTACT_IDENTIFIED && t->name == "Test raider";     // (still tracked: still known)
+        CHECK(none && blip && kind && named && kept,
+              "a raider 3 AU off isn't on the scope; at 1 AU it's an unknown radar contact; at 0.7, an unidentified raider; at 0.1 the telescope names it, and it stays named while it's tracked");
+        DVec3 rel;
+        bool target = FindTarget(h, TargetId::MakeShip(rid), rel);
+        t = put(rid, 3.0);
+        bool ghost = t && t->ghost && t->name == "Test raider" && Len(t->ship.pos - (here + home.v * (0.7 * AU_U))) < 1000.0 * KM_U && t->age < 1.0f;
+        bool dropped = !FindTarget(h, TargetId::MakeShip(rid), rel);
+        t = put(rid, 3.0, 30.0);
+        bool fading = t && t->ghost && t->age > 29.0f;
+        t = put(rid, 3.0, GHOST_TIME - 29.0);
+        CHECK(target && ghost && dropped && fading && !t && h.contacts.empty(),
+              "out of reach again it's a ghost where it was last seen, and can't be targeted; after %.0f s the ghost is gone too", GHOST_TIME);
+        // Passive only: the radar off
+        Controls radar; radar.toggleRadar = true;
+        put(rid, 1.0);
+        Run(h, 1.0 / SIM_HZ, radar);
+        t = put(rid, 1.0);
+        bool lost = !p.power.radar && t && t->ghost;
+        t = put(rid, 0.5);
+        CHECK(lost && t && !t->ghost && t->by == BY_IR, "radar off: the contact at 1 AU is lost; at 0.5 AU the infrared array has it");
+        Run(h, 1.0 / SIM_HZ, radar);
+        CHECK(p.power.radar, "...and on again");
+    }
+
+    // --- What others see of you: heat and the radar ---
+    {
+        quiet(); away();
+        here = ShipLocal(h);
+        rid = PutShip(h, NpcKind::Pirate, H, here + home.v * (1.2 * AU_U), clan).id;
+        put(rid, 1.2, 0.5);
         const Npc *r = FindNpc(h, rid);
-        CHECK(r && Len(r->goal - here) < 0.02 * AU_U, "a raider 2 AU away picks up the captain's own arrival and makes for the spot");
+        double idle = h.flight.load, heatOn = p.power.heat;
+        bool seenOn = r && NpcHolds(h, *r, h);
+        p.power.radar = false;
+        put(rid, 1.2, 0.5); r = FindNpc(h, rid);
+        double heatOff = p.power.heat;
+        bool seenOff = r && NpcHolds(h, *r, h);
+        CHECK(fabs(idle - (p.spec.idleMW + p.spec.radarMW)) < 1e-6 && fabs(h.flight.load - p.spec.idleMW) < 1e-6 && heatOn > heatOff && seenOn && !seenOff,
+              "the radar draws %.0f MW, and it all ends up as heat: %.1f MW with it on, %.1f off. A raider's infrared 1.2 AU away holds the first and not the second", p.spec.radarMW, heatOn, heatOff);
+        put(rid, 0.8, 0.5); r = FindNpc(h, rid);
+        bool near = r && NpcHolds(h, *r, h);
+        p.power.mode = POWER_SILENT;
+        p.power.driveCap = 0.0;
+        put(rid, 0.8, 2.0); r = FindNpc(h, rid);
+        bool silent = r && !NpcHolds(h, *r, h);
+        CHECK(near && silent && p.power.heat < 0.2 * heatOff && h.flight.load <= SILENT_REACTOR * p.spec.reactorMW && p.power.driveCap == 0.0 && !RadarOn(p.spec, p.power),
+              "at 0.8 AU it holds a ship idling with its radar off; running silent (%.2f MW of heat, nothing charging) it doesn't", p.power.heat);
+        p.ship.throttle = 1.0f;
+        put(rid, 0.8, 0.5); r = FindNpc(h, rid);
+        double silentBurn = p.power.heat;
+        p.power.mode = POWER_TRAVEL;
+        p.ship.vel = { 0, 0, 0 };
+        put(rid, 3.0, 0.5); r = FindNpc(h, rid);
+        CHECK(r && NpcHolds(h, *r, h) && p.power.heat > 40.0 && silentBurn > 5.0 * heatOff,
+              "burning the engines flat out gives off %.0f MW: it's held from 3 AU (and running silent doesn't hide an exhaust: %.0f MW)", p.power.heat, silentBurn);
+        p.ship.throttle = 0.0f; p.ship.vel = { 0, 0, 0 };
+    }
+
+    // --- The radar warning: a bearing on whoever is sweeping you ---
+    {
+        quiet(); away();
+        here = ShipLocal(h);
+        int pid = PutShip(h, NpcKind::Patrol, H, here + home.v * (4.0 * AU_U), home.ruler).id;
+        const Traffic *t = put(pid, 4.0, 0.5);
+        const SensorMark *m = nullptr;
+        for (const SensorMark &o : h.marks) if (o.kind == MARK_RADAR && o.source == pid) m = &o;
+        bool warned = !t && m && AngleBetween(m->dir, home.v) < 0.5;
+        put(pid, 8.0, 1.5);
+        bool quietAgain = true;
+        for (const SensorMark &o : h.marks) if (o.kind == MARK_RADAR) quietAgain = false;
+        t = put(pid, 1.2, 0.5);
+        bool held = t && !t->ghost;
+        for (const SensorMark &o : h.marks) if (o.kind == MARK_RADAR) held = false;
+        CHECK(warned && quietAgain && held, "a patrol's radar 4 AU off: no contact, but a bearing on it; nothing at 8 AU; at 1.2 AU it's a contact, and the bearing isn't needed");
+    }
+
+    // --- Tachyon bursts on the scope: a bearing and a rough range, never a place ---
+    {
+        quiet(); away();
+        here = ShipLocal(h);
+        DVec3 where = here + Norm(home.v + home.u * 0.4) * (3.0 * AU_U);
+        const SensorMark *m = nullptr;
+        for (int tries = 0; tries < 4 && !m; tries++) {
+            h.bursts.push_back({ H, where, small, 424242 });
+            Run(h, 2.0 / SIM_HZ);
+            for (const SensorMark &o : h.marks) if (o.kind == MARK_TACHYON) m = &o;
+        }
+        bool told = false;
+        for (const GameEvent &e : h.events) if (e.text.find("Tachyon burst") != std::string::npos) told = true;
+        CHECK(m && told && m->counts >= TACH_MIN_SHIP && AngleBetween(m->dir, where - here) < 5.0 * m->sigma && m->rLo < 3.0 * AU_U && m->rHi > 3.0 * AU_U &&
+              m->rHi > 2.0 * m->rLo && Len(m->from - here) < 1.0,
+              "a ship drops out of warp 3 AU away: %d counts, a bearing good to %.1f degrees, and a range of %.1f to %.1f AU", m ? m->counts : 0, m ? m->sigma : 0.0,
+              m ? m->rLo / AU_U : 0.0, m ? m->rHi / AU_U : 0.0);
+        size_t marks = h.marks.size();
+        h.bursts.push_back({ H, here, small, h.id });
+        Run(h, 2.0 / SIM_HZ);
+        CHECK(h.marks.size() == marks, "your own arrival isn't marked on your own scope");
+
+        // A raider lying in wait hears your arrival, and comes to where it reckons you are: near, not exact
+        quiet();
+        rid = PutShip(h, NpcKind::Pirate, H, here + home.v * (2.0 * AU_U), clan).id;
+        Run(h, 0.05);
+        h.bursts.push_back({ H, here, 3000.0, h.id });
+        Run(h, 2.0 / SIM_HZ);
+        const Npc *r = FindNpc(h, rid);
+        double off = r ? Len(r->goal - here) : 0.0;
+        CHECK(r && r->doing == NpcDo::Lurk && off > 0.02 * AU_U && off < 2.0 * AU_U && AngleBetween(r->goal - r->pos, here - r->pos) < 8.0,
+              "a raider 2 AU off picks up the captain's own arrival and makes for where it reckons that was: %.2f AU out", off / AU_U);
+    }
+
+    // --- With no lock the drive goes where it's pointed, so space can be searched ---
+    {
+        quiet(); away();
+        int star = 0;
+        Aim aim; aim.course = TargetId::MakeBody(H, star);
+        Controls go; go.hyper = true;
+        Face(h, home.v);
+        Run(h, 0.5, go, aim);
+        bool locked = h.flight.lock.valid();
+        p.ship.vel = { 0, 0, 0 };
+        Face(h, home.v);
+        DVec3 before = ShipLocal(h);
+        Run(h, 2.0, go, Aim());                                  // (the lock released)
+        DVec3 moved = ShipLocal(h) - before;
+        CHECK(locked && !h.flight.lock.valid() && Len(moved) > 0.3 * AU_U && AngleBetween(moved, home.v) < 1.0,
+              "with a destination locked, SHIFT flies to it; with the lock released, the drive goes where the nose points (%.1f AU along it in 2 s)", Len(moved) / AU_U);
+        p.ship.vel = { 0, 0, 0 };
+    }
+
+    // --- A warp bubble run slower carries less, but sheds it slowly ---
+    {
+        quiet();
+        p.ship.anchor = H; p.ship.pos = home.n * (0.7 * LY_U); p.ship.vel = { 0, 0, 0 }; p.ship.ftl = 1.0f;
+        Face(h, home.n);
+        p.power = PowerState(); p.fuel = p.spec.tank;
+        Controls hyper; hyper.hyper = true;
+        Run(h, 3.0, hyper);
+        float full = p.power.field;
+        bool warping = p.power.warping;
+        p.ship.ftl = 0.3f;
+        Run(h, 1.0, hyper);
+        float soon = p.power.field;
+        Run(h, 60.0, hyper);
+        float slow = p.power.field;
+        double mass = p.Mass();
+        CHECK(warping && fabs(full - 1.0f) < 0.01f && soon > 0.85f && fabs(slow - 0.09f) < 0.03f && fabs(BubbleEnergy(p.spec, mass, 1.0) - p.spec.jumpMJ * mass) < 1e-6 &&
+              BubbleEnergy(p.spec, mass, slow) < 0.3 * BubbleEnergy(p.spec, mass, 1.0) && TachyonDecayAU(BubbleEnergy(p.spec, mass, slow)) < 0.55 * TachyonDecayAU(BubbleEnergy(p.spec, mass, 1.0)),
+              "at full speed the bubble holds %.0f MJ; set to 30%% it still holds %.0f%% of that a second later, and %.0f%% after a minute: a burst that carries %.0f AU, not %.0f",
+              BubbleEnergy(p.spec, mass, 1.0), soon * 100.0, 100.0 * BubbleEnergy(p.spec, mass, slow) / BubbleEnergy(p.spec, mass, 1.0),
+              TachyonDecayAU(BubbleEnergy(p.spec, mass, slow)), TachyonDecayAU(BubbleEnergy(p.spec, mass, 1.0)));
+        p.ship.anchor = H; p.ship.pos = RandomPointFarFromPorts(h); p.ship.vel = { 0, 0, 0 }; p.ship.ftl = 1.0f;
+        p.power = PowerState();
+        UpdateLoadedSystem(h);
+        Run(h, 0.5);
+    }
+
+    // --- A state's sensor network: outposts, a fix, a patrol sent to look; and traffic control's picture ---
+    {
+        quiet();
+        std::vector<int> posts;
+        int best = -1;
+        for (int i = 0; i < (int)h.loaded.bodies.size(); i++) {
+            const Body &b = h.loaded.bodies[i];
+            if (b.settlement == Settlement::SensorOutpost) posts.push_back(i);
+            else if (b.population > 0 && (best < 0 || b.population > h.loaded.bodies[best].population)) best = i;
+        }
+        bool spreadOut = posts.size() >= 3, theirs = true;
+        for (int a : posts) {
+            const Body &b = h.loaded.bodies[a];
+            if (b.owner != home.ruler || b.population > 0 || h.econ.MarketOf(b.id) >= 0 || b.kind != Kind::Station || FieldRatio(home, b.local) >= 1.0) theirs = false;
+            for (int o : posts) if (o != a && Len(b.local - h.loaded.bodies[o].local) < 0.15 * home.fieldR) spreadOut = false;
+            if (Len(b.local) > 0.3 * home.fieldR || b.radius < 300.0) theirs = false;                 // (big, and well inside the system)
+        }
+        CHECK(spreadOut && theirs && best >= 0, "the home system has %d sensor outposts, the state's own, well inside it (%.0f AU out in a field of %.0f); nobody trades there",
+              (int)posts.size(), posts.empty() ? 0.0 : Len(h.loaded.bodies[posts[0]].local) / AU_U, home.fieldR / AU_U);
+        if (posts.size() < 3 || best < 0) return;
+        {
+            // Each has its pickets, and they keep to it
+            h.trafficZoned = -1e9;
+            Run(h, 0.1);
+            int pickets = 0, strays = 0;
+            auto count = [&]() {
+                pickets = strays = 0;
+                for (const Npc &n : h.npcs) {
+                    if (n.kind != NpcKind::Patrol || n.post < 0) continue;
+                    pickets++;
+                    const Body &b = h.loaded.bodies[n.post];
+                    if (b.settlement != Settlement::SensorOutpost || n.faction != home.ruler || Len(n.pos - b.local) > b.radius + 2000.0 * KM_U) strays++;
+                }
+            };
+            count();
+            int first = pickets;
+            Run(h, 90.0);
+            count();
+            CHECK(first == OUTPOST_PICKETS * (int)posts.size() && pickets == first && strays == 0,
+                  "%d warships are stationed at each outpost (%d in all), and a minute and a half later every one is still at its post", OUTPOST_PICKETS, pickets);
+            quiet();
+        }
+
+        // Under traffic control at the biggest port, with a patrol standing by
+        Park(h, best, 2.0);
+        p.power = PowerState();
+        h.scanSafeUntil = h.clock + 1e6;                          // (no patrol takes an interest in the captain meanwhile)
+        Run(h, 0.5);
+        here = ShipLocal(h);
+        std::string control = h.trafficControl;
+        int pid = PutShip(h, NpcKind::Patrol, H, here + home.v * (0.05 * AU_U), home.ruler).id;
+        const_cast<Npc *>(FindNpc(h, pid))->until = h.clock + 1e6;
+        Run(h, 0.1);
+        // An arrival nobody was expecting, between two of the outposts
+        const Body &pa = h.loaded.bodies[posts[0]], &pb = h.loaded.bodies[posts[1]];
+        DVec3 where = (pa.local + pb.local) * 0.5 + home.n * (2.0 * AU_U);
+        h.bursts.push_back({ H, where, 20.0 * small, 424242 });
+        Run(h, 2.0 / SIM_HZ);
+        bool pending = h.alerts.size() == 1 && h.alerts[0].fixed;
+        bool early = true;
+        for (const SensorMark &o : h.marks) if (o.kind == MARK_FIX) early = false;
+        Run(h, NET_RELAY * posts.size() + 1.0);
+        const SensorMark *m = nullptr;
+        for (const SensorMark &o : h.marks) if (o.kind == MARK_FIX) m = &o;
+        const Npc *patrol = nullptr;                               // (whichever patrol was nearest)
+        for (const Npc &n : h.npcs) if (n.kind == NpcKind::Patrol && Len(n.goal - where) < 1.0 * AU_U) patrol = &n;
+        (void)pid;
+        CHECK(!control.empty() && pending && early && m && Len(m->from - where) < fmax(3.0 * m->rLo, 0.05 * AU_U) && m->rLo < 1.0 * AU_U && m->note == control &&
+              h.alerts.empty() && patrol,
+              "an unscheduled arrival %.0f AU out: the outposts' fix reaches %s %.0f s later, %.3f AU off (+/- %.3f claimed), and a patrol is sent to look",
+              Len(where) / AU_U, control.c_str(), NET_RELAY * posts.size(), m ? Len(m->from - where) / AU_U : 0.0, m ? m->rLo / AU_U : 0.0);
+
+        // Far beyond the edge: nothing
+        quiet();
+        h.alerts.clear();
+        h.bursts.push_back({ H, Norm(pa.local) * (home.fieldR + 400.0 * AU_U), small, 424242 });
+        Run(h, 2.0 / SIM_HZ);
+        bool unmarked = true;
+        for (const SensorMark &o : h.marks) if (o.kind != MARK_RADAR) unmarked = false;
+        CHECK(h.alerts.empty() && unmarked, "a small ship dropping out 400 AU beyond the edge of the field is caught by nobody");
+
+        // Scheduled traffic arrives at the jump points: caught just the same, and nobody turns out
+        quiet();
+        int hub = -1, other = -1;
+        for (int i = 0; i < h.econ.Count(); i++) if (h.econ.base->defs[i].sys == H) { hub = h.econ.base->defs[i].hub; break; }
+        for (const Lane &l : h.econ.base->lanes) if (other < 0 && (l.a == hub || l.b == hub)) other = l.a == hub ? l.b : l.a;
+        pid = PutShip(h, NpcKind::Patrol, H, here + home.v * (0.05 * AU_U), home.ruler).id;
+        const_cast<Npc *>(FindNpc(h, pid))->until = h.clock + 1e6;
+        if (hub >= 0 && other >= 0) {
+            Transit t;
+            t.from = other; t.to = hub; t.total = 400.0f; t.cargo[REF_FOOD] = 400.0f; t.arrive = h.clock; t.name = "Test liner";
+            h.transits.push_back(t);
+            Run(h, 2.0 / SIM_HZ);
+            bool caught = h.alerts.size() == 1 && h.alerts[0].fixed;
+            int arrived = 0;
+            DVec3 came;
+            for (const Npc &n : h.npcs) if (n.name == "Test liner") { arrived++; came = n.pos; }
+            Run(h, NET_RELAY * posts.size() + 1.0);
+            bool fix = false;
+            for (const SensorMark &o : h.marks) if (o.kind == MARK_FIX) fix = true;
+            bool sent = false;                                     // (has any patrol been sent there?)
+            for (const Npc &n : h.npcs) if (n.kind == NpcKind::Patrol && n.post < 0 && n.doing == NpcDo::Travel && Len(n.goal - came) < 0.35 * AU_U) sent = true;
+            (void)pid;
+            CHECK(arrived == 1 && caught && !fix && !sent,
+                  "a freighter jumping in on a trade lane is fixed too, where scheduled traffic is expected: no alarm, and no patrol is sent");
+        } else CHECK(false, "the home system has a trade lane");
+
+        // Traffic control's picture: a ship the port holds is on your scope while you're in its reach
+        quiet();
+        rid = PutShip(h, NpcKind::Pirate, H, here + home.v * (2.0 * AU_U), clan).id;
+        Run(h, 1.2);
+        const Traffic *t = shown(rid);
+        bool shared = t && !t->ghost && t->by == BY_CONTROL && t->level >= CONTACT_DETECTED && h.trafficControl == control;
+        p.ship.pos = p.ship.pos - home.v * (1.0 * AU_U);
+        Run(h, 1.2);
+        t = shown(rid);
+        CHECK(shared && h.trafficControl.empty() && t && t->ghost,
+              "docked at %s, a raider 2 AU out is on the scope by traffic control alone; an AU away from the port, out of its reach, the contact is lost", control.c_str());
+    }
+
+    // --- Over the wire ---
+    {
+        Snapshot s, back;
+        Traffic a, b;
+        a.id = NPC_ID_BASE + 7; a.npc = true; a.ship.anchor = H; a.ship.pos = { 1.0, 2.0, 3.0 }; a.level = CONTACT_CLASSIFIED; a.by = BY_RADAR | BY_IR; a.stance = STANCE_ALERTED;
+        b.id = 3; b.ship.anchor = H; b.level = CONTACT_IDENTIFIED; b.ghost = true; b.age = 41.0f; b.by = 0;
+        s.others = { a, b };
+        Writer w;
+        WriteSnapshot(w, s);
+        Reader r(w.buf);
+        r.U8();
+        bool ok = ReadSnapshot(r, back) && back.others.size() == 2;
+        CHECK(ok && back.others[0].level == CONTACT_CLASSIFIED && back.others[0].by == (BY_RADAR | BY_IR) && !back.others[0].ghost && back.others[0].stance == STANCE_ALERTED &&
+              back.others[1].level == CONTACT_IDENTIFIED && back.others[1].ghost && back.others[1].age == 41.0f,
+              "a snapshot carries how each ship stands on the scope: what's known of it, by which sensors, and how long a ghost has been one");
+        Captain from, to;
+        SensorMark m;
+        m.kind = MARK_TACHYON; m.anchor = H; m.from = { 5.0, 6.0, 7.0 }; m.dir = Norm(DVec3{ 1, 2, 3 }); m.sigma = 2.5f; m.rLo = 1.0 * AU_U; m.rHi = 4.0 * AU_U;
+        m.counts = 9; m.at = 990.0; m.note = "Somewhere Control";
+        from.marks.push_back(m);
+        m.kind = MARK_RADAR; m.source = NPC_ID_BASE + 3; from.marks.push_back(m);
+        from.trafficControl = "Somewhere";
+        std::vector<uint8_t> msg = MsgMarks(1000.0, from);
+        Reader mr(msg);
+        bool type = mr.U8() == MSG_MARKS;
+        bool read = ReadMarks(mr, 2000.0, to);
+        CHECK(type && read && to.trafficControl == "Somewhere" && to.marks.size() == 2 && to.marks[0].counts == 9 && Len(to.marks[0].dir - from.marks[0].dir) < 1e-6 &&
+              to.marks[0].rHi == 4.0 * AU_U && fabs(to.marks[0].at - 1990.0) < 1e-3 && to.marks[0].note == "Somewhere Control" && to.marks[1].kind == MARK_RADAR &&
+              to.marks[1].source == NPC_ID_BASE + 3,
+              "the bearings on a scope reach the client, with their ages");
     }
 }
 
@@ -2682,6 +3187,7 @@ static void TestNetwork()
 
     // --- Targeting another captain, and a hyper lock onto them ---
     bob.aim.hovered = TargetId::MakeShip(alice.g.id);
+    bob.aim.course = bob.aim.hovered;                          // (locked: SPACE on her)
     Pump(srv, { &alice, &bob }, 0.2);
     CHECK(bob.g.flight.selected == bob.aim.hovered && TargetName(bob.g, bob.aim.hovered) == "Alice" &&
           !TargetInfo(bob.g, bob.aim.hovered).empty(), "Bob can target Alice's ship (info panel: %d rows)", (int)TargetInfo(bob.g, bob.aim.hovered).size());
@@ -2887,8 +3393,18 @@ static void TestNetwork()
     carol.net.simulatedLoss = 0.25f;
     carol.net.Connect("127.0.0.1", PORT, "Carol", "", err);
     Pump(srv, { &alice2, &bob, &carol }, 2.0, true, 0.004);
-    CHECK(carol.net.state == NetClient::State::Joined && carol.g.deltas.mined.count(rockId) == 1 && Sees(carol, "Bob") && Sees(carol, "Alice"),
-          "Carol joined through 25%% packet loss and has the whole picture");
+    bool joined = carol.net.state == NetClient::State::Joined && carol.g.deltas.mined.count(rockId) == 1;
+    // (other ships are on her scope only while her sensors hold them: the others are far off by now. Put her beside Bob.)
+    bool farOff = !Sees(carol, "Bob") && !Sees(carol, "Alice");
+    if (Captain *sc = OnServer(srv, "Carol")) {
+        const Captain *sb2 = OnServer(srv, "Bob");
+        sc->player.ship.anchor = sb2->player.ship.anchor; sc->player.ship.pos = sb2->player.ship.pos + DVec3{ 300.0, 0.0, 0.0 }; sc->player.ship.vel = { 0, 0, 0 };
+    }
+    Pump(srv, { &alice2, &bob, &carol }, 1.0, true, 0.004);
+    const Traffic *beside = Sees(carol, "Bob");
+    (void)farOff;
+    CHECK(joined && beside && beside->level == CONTACT_IDENTIFIED && !beside->ghost,
+          "Carol joined through 25%% packet loss and has the whole picture: the rocks mined before she came, and (once she's beside him) Bob on her scope");
     carol.c.throttle = 1; carol.c.yaw = -0.1f;
     Pump(srv, { &alice2, &bob, &carol }, 1.5, true, 0.004);
     carol.c = {}; carol.c.allStop = true;
@@ -2932,7 +3448,7 @@ int RunHeadlessTests(const char *only)
     struct T { const char *name; void (*fn)(); };
     const T tests[] = {
         { "fuel", TestFuel }, { "flight", TestFlight }, { "trade", TestTrade }, { "stations", TestStations }, { "hz", TestHabitableZone },
-        { "skimming", TestSkimming }, { "comms", TestComms }, { "galaxy", TestGalaxy }, { "systems", TestSystems }, { "maps", TestMaps }, { "factions", TestFactions }, { "economy", TestEconomy }, { "contracts", TestContracts }, { "traffic", TestTraffic }, { "power", TestPower }, { "ships", TestShips },
+        { "skimming", TestSkimming }, { "comms", TestComms }, { "galaxy", TestGalaxy }, { "systems", TestSystems }, { "maps", TestMaps }, { "factions", TestFactions }, { "economy", TestEconomy }, { "contracts", TestContracts }, { "traffic", TestTraffic }, { "power", TestPower }, { "ships", TestShips }, { "sensors", TestSensors },
         { "targeting", TestTargeting }, { "mining", TestMining }, { "save", TestSaveLoad },
         { "protocol", TestProtocol }, { "net", TestNetwork }, { "host", TestHosting },
     };
@@ -3067,7 +3583,7 @@ std::unique_ptr<ScriptedInput> MakeScript(const std::string &name)
             int c = TradeWorld(g);
             (void)home;
             if (f == 30)  s.screenshot = "tour_start.png";
-            if (f == 40)  in.mousePressed[MOUSE_BUTTON_MIDDLE] = true;        // info on what's ahead
+            if (f == 40)  in.Press(KEY_I);                                    // info on what's ahead
             if (f == 50)  s.screenshot = "tour_info.png";
             if (f == 60 && c >= 0) { Park(g, c, 0.9); s.snap = true; }
             if (f == 70)  in.Press(KEY_F);                                    // comms: hails the world we're parked over
@@ -3266,6 +3782,67 @@ std::unique_ptr<ScriptedInput> MakeScript(const std::string &name)
         };
         return s;
     }
+    if (name == "sensors") {                                                 // contacts at each level, a ghost, a radar warning, a tachyon bearing
+        s->body = [](ScriptedInput &s, InputFrame &in) {
+            GameState &g = *s.game;
+            int f = s.frame;
+            static int ghost = -1;
+            if (f == 60) {
+                const StarSystem &sys = g.systems[g.loaded.index];
+                const FactionSet &fs = g.systems.factions;
+                int clan = NO_FACTION, state = sys.ruler;
+                for (const Faction &fa : fs.list) if (clan == NO_FACTION && fa.kind == FactionKind::Clan) clan = fa.id;
+                g.player.ship.pos = RandomPointFarFromPorts(g); g.player.ship.vel = {}; g.player.ship.throttle = 0.0f;
+                Face(g, sys.v);
+                for (int k = 0; k < GOOD_COUNT; k++) g.player.cargo[k] = 0.0;
+                g.scanSafeUntil = 1e18;
+                g.npcs.clear(); g.contacts.clear(); g.marks.clear();
+                DVec3 here = ShipLocal(g);
+                struct { NpcKind kind; int faction; double au, side, up; } row[] = {
+                    { NpcKind::Pirate, clan, 1.0, -0.30, 0.10 },                  // an unknown radar contact
+                    { NpcKind::Patrol, state, 1.1, -0.05, 0.16 },                 // classified
+                    { NpcKind::Patrol, state, 0.15, 0.03, -0.01 },                // identified
+                    { NpcKind::Patrol, state, 4.0, 1.3, 0.5 },                    // too far to see, but its radar is heard
+                    { NpcKind::Pirate, clan, 0.5, 0.16, 0.08 } };                 // (about to be lost)
+                for (auto &r : row) {
+                    Npc &n = PutShip(g, r.kind, g.loaded.index, here + sys.v * (r.au * AU_U) + sys.u * (r.side * AU_U) + sys.n * (r.up * AU_U), r.faction);
+                    n.until = 1e18; n.look = 1e18; n.doing = r.kind == NpcKind::Pirate ? NpcDo::Lurk : NpcDo::Dock;
+                    ghost = n.id;
+                }
+                g.trafficZoned = g.clock;
+                s.snap = true;
+            }
+            if (f == 90) {                                                    // one slips away; and a ship drops out of warp off to the left
+                const StarSystem &sys = g.systems[g.loaded.index];
+                for (Npc &n : g.npcs) if (n.id == ghost) { n.pos = n.pos + sys.v * (6.0 * AU_U); n.goal = n.pos; }
+                g.bursts.push_back({ g.loaded.index, ShipLocal(g) + sys.v * (2.5 * AU_U) - sys.u * (1.2 * AU_U) - sys.n * (0.5 * AU_U), 4000.0, 424242 });
+                g.trafficZoned = g.clock;
+            }
+            if (f == 200) s.screenshot = "sensors_scope.png";
+            if (f == 205) in.Press(KEY_M);
+            if (f == 225) s.screenshot = "sensors_map.png";
+            if (f == 230) in.Press(KEY_ESCAPE);
+            if (f == 235 || f == 240 || f == 245) in.Press(KEY_X);            // round to running silent
+            if (f == 300) s.screenshot = "sensors_silent.png";
+            if (f == 305) s.done = true;
+        };
+        return s;
+    }
+    if (name == "outpost") {                                                 // a sensor outpost and its pickets
+        s->body = [](ScriptedInput &s, InputFrame &in) {
+            GameState &g = *s.game;
+            int f = s.frame;
+            if (f == 10) {
+                g.trafficZoned = -1e9;
+                for (int i = 0; i < (int)g.loaded.bodies.size(); i++)
+                    if (g.loaded.bodies[i].settlement == Settlement::SensorOutpost) { Park(g, i, 2.2); s.snap = true; break; }
+            }
+            if (f == 80) s.screenshot = "outpost.png";
+            if (f == 85) s.done = true;
+            (void)in;
+        };
+        return s;
+    }
     if (name == "ships") {                                                   // fitting out at the yard
         s->body = [](ScriptedInput &s, InputFrame &in) {
             GameState &g = *s.game;
@@ -3287,6 +3864,27 @@ std::unique_ptr<ScriptedInput> MakeScript(const std::string &name)
             if (f == 294) in.Press(KEY_ESCAPE);
             if (f == 300) s.screenshot = "ships_hud.png";
             if (f == 305) s.done = true;
+        };
+        return s;
+    }
+    if (name == "contraband") {                                              // the warning for carrying what the nearest system's law bans
+        s->body = [](ScriptedInput &s, InputFrame &in) {
+            GameState &g = *s.game;
+            int f = s.frame;
+            if (f == 20)
+                for (const StarSystem *sys : Neighbours(g, 40.0)) {
+                    const Faction *law = g.systems.factions.Get(sys->ruler);
+                    if (!law || law->contraband.empty()) continue;
+                    g.player.ship.anchor = sys->id; g.player.ship.pos = sys->n * (0.5 * sys->fieldH) + sys->u * (0.3 * sys->fieldR); g.player.ship.vel = { 0, 0, 0 };
+                    g.player.cargo[law->contraband[0]] = 12.0;
+                    if (law->contraband.size() > 1) g.player.cargo[law->contraband[1]] = 5.0;
+                    s.snap = true;
+                    break;
+                }
+            if (f == 40) s.screenshot = "contraband_box.png";
+            if (f == 44) in.Press(KEY_TAB);
+            if (f == 50) s.screenshot = "contraband_tab.png";
+            if (f == 55) s.done = true;
         };
         return s;
     }

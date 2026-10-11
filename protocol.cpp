@@ -62,7 +62,7 @@ void WritePlayer(Writer &w, const Player &p)
     w.F64(p.fuel);
     w.F64(p.credits);
     w.F32((float)p.power.bank); w.F32((float)p.power.driveCap); w.F32(p.power.engines);
-    w.U8((uint8_t)(p.power.mode | (p.power.engaged ? 128 : 0) | (p.power.warping ? 64 : 0)));
+    w.U8((uint8_t)((p.power.mode & 7) | (p.power.radar ? 32 : 0) | (p.power.engaged ? 128 : 0) | (p.power.warping ? 64 : 0)));
     uint8_t n = 0;                                 // only what's in the hold: index, tonnes
     for (int g = 0; g < GOOD_COUNT; g++) if (p.cargo[g] > 0.0) n++;
     w.U8(n);
@@ -77,7 +77,8 @@ Player ReadPlayer(Reader &r)
     p.credits = r.F64();
     p.power.bank = r.F32(); p.power.driveCap = r.F32(); p.power.engines = r.F32();
     uint8_t pm = r.U8();
-    p.power.mode = (uint8_t)((pm & 63) % POWER_MODES); p.power.engaged = (pm & 128) != 0; p.power.warping = (pm & 64) != 0;
+    p.power.mode = (uint8_t)((pm & 7) % POWER_MODES); p.power.engaged = (pm & 128) != 0; p.power.warping = (pm & 64) != 0;
+    p.power.radar = (pm & 32) != 0;
     uint8_t n = r.U8();
     for (int i = 0; i < n && r.ok; i++) {
         uint8_t g = r.U8();
@@ -93,7 +94,7 @@ void WriteInput(Writer &w, const InputStep &in)
     w.F32(c.throttle);
     w.F32(c.yaw); w.F32(c.pitch); w.F32(c.roll);
     w.U8((c.hyper ? 1 : 0) | (c.fire ? 2 : 0) | (c.allStop ? 4 : 0) | (c.toggleDampeners ? 8 : 0) | (in.aim.steer ? 16 : 0) |
-         (c.cyclePower ? 32 : 0));
+         (c.cyclePower ? 32 : 0) | (c.toggleRadar ? 64 : 0));
     WriteTarget(w, in.aim.hovered);
     WriteTarget(w, in.aim.retarget);
     WriteTarget(w, in.aim.course);
@@ -113,6 +114,7 @@ InputStep ReadInput(Reader &r, uint32_t seq)
     c.roll    = Sane(r.F32(), 90.0f);
     uint8_t f = r.U8();
     c.hyper = (f & 1) != 0; c.fire = (f & 2) != 0; c.allStop = (f & 4) != 0; c.toggleDampeners = (f & 8) != 0; c.cyclePower = (f & 32) != 0;
+    c.toggleRadar = (f & 64) != 0;
     in.aim.steer    = (f & 16) != 0;
     in.aim.hovered  = ReadTarget(r);
     in.aim.retarget = ReadTarget(r);
@@ -202,7 +204,7 @@ std::vector<uint8_t> MsgContract(uint8_t type, const Contract &k)
     Writer w;
     w.U8(type);
     w.U32(k.id); w.U8((uint8_t)k.kind); w.U8((uint8_t)k.effect);
-    w.I32(k.issuer); w.I32(k.guild); w.I32(k.against); w.I32(k.effectOn); w.I32(k.licence);
+    w.I32(k.issuer); w.I32(k.guild); w.I32(k.against); w.I32(k.effectOn); w.I32(k.licence); w.I32(k.law);
     w.F32(k.minStanding); w.U8(k.wide ? 1 : 0);
     w.U64(k.fromBody); w.U64(k.toBody); w.I64(k.fromSys); w.I64(k.toSys);
     w.Str(k.fromName, 80); w.Str(k.toName, 80);
@@ -216,7 +218,7 @@ bool ReadContract(Reader &r, Contract &k)
 {
     k.id = r.U32();
     uint8_t kind = r.U8(), effect = r.U8();
-    k.issuer = r.I32(); k.guild = r.I32(); k.against = r.I32(); k.effectOn = r.I32(); k.licence = r.I32();
+    k.issuer = r.I32(); k.guild = r.I32(); k.against = r.I32(); k.effectOn = r.I32(); k.licence = r.I32(); k.law = r.I32();
     k.minStanding = r.F32(); k.wide = r.U8() != 0;
     k.fromBody = r.U64(); k.toBody = r.U64(); k.fromSys = r.I64(); k.toSys = r.I64();
     k.fromName = r.Str(); k.toName = r.Str();
@@ -279,6 +281,9 @@ void WriteSnapshot(Writer &w, const Snapshot &s)
         const Traffic &t = s.others[n];
         w.I32(t.id);
         uint8_t flags = (t.thrusting ? 1 : 0) | (t.hyper ? 2 : 0) | (t.mining ? 4 : 0);
+        // (how it stands on the scope: what's known of it, by which sensors, and if it's lost, for how long)
+        w.U8((uint8_t)((t.level & 3) | (t.ghost ? 4 : 0) | ((t.by & 15) << 3)));
+        w.U8((uint8_t)fminf(255.0f, fmaxf(0.0f, t.age)));
         if (t.npc) {                                   // NPCs: no flight state to speak of, and a coarse heading will do
             w.I64(t.ship.anchor);
             w.F64(t.ship.pos.x); w.F64(t.ship.pos.y); w.F64(t.ship.pos.z);
@@ -317,6 +322,9 @@ bool ReadSnapshot(Reader &r, Snapshot &s)
     for (int i = 0; i < n && r.ok; i++) {
         Traffic t;
         t.id   = r.I32();
+        uint8_t scope = r.U8();
+        t.level = scope & 3; t.ghost = (scope & 4) != 0; t.by = (scope >> 3) & 15;
+        t.age = (float)r.U8();
         if (t.id >= NPC_ID_BASE) {
             t.npc = true;
             t.ship.anchor = r.I64();
@@ -338,6 +346,45 @@ bool ReadSnapshot(Reader &r, Snapshot &s)
         s.others.push_back(t);
     }
     return r.ok;
+}
+
+std::vector<uint8_t> MsgMarks(double clock, const Captain &c)
+{
+    Writer w;
+    w.U8(MSG_MARKS);
+    w.Str(c.trafficControl, 60);
+    w.U8((uint8_t)std::min<size_t>(c.marks.size(), 24));
+    for (size_t i = 0; i < c.marks.size() && i < 24; i++) {
+        const SensorMark &m = c.marks[i];
+        w.U8(m.kind); w.I32(m.source); w.I64(m.anchor);
+        w.F64(m.from.x); w.F64(m.from.y); w.F64(m.from.z);
+        w.F32((float)m.dir.x); w.F32((float)m.dir.y); w.F32((float)m.dir.z);
+        w.F32(m.sigma); w.F64(m.rLo); w.F64(m.rHi); w.I32(m.counts);
+        w.F32((float)(clock - m.at));                              // (its age: the client's clock isn't quite ours)
+        w.Str(m.note, 60);
+    }
+    return w.buf;
+}
+
+bool ReadMarks(Reader &r, double clock, Captain &c)
+{
+    std::string control = r.Str();
+    std::vector<SensorMark> marks;
+    uint8_t n = r.U8();
+    for (int i = 0; i < n && r.ok; i++) {
+        SensorMark m;
+        m.kind = r.U8(); m.source = r.I32(); m.anchor = r.I64();
+        m.from.x = r.F64(); m.from.y = r.F64(); m.from.z = r.F64();
+        m.dir.x = r.F32(); m.dir.y = r.F32(); m.dir.z = r.F32();
+        m.sigma = r.F32(); m.rLo = r.F64(); m.rHi = r.F64(); m.counts = r.I32();
+        m.at = clock - r.F32();
+        m.note = r.Str();
+        if (m.kind > MARK_FIX) return false;
+        marks.push_back(m);
+    }
+    if (!r.ok) return false;
+    c.trafficControl = control; c.marks = std::move(marks);
+    return true;
 }
 
 // ---------------------------------------------------------------------------

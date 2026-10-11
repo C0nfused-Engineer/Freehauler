@@ -28,7 +28,8 @@ Controls ReadFlightControls(const InputFrame &in, float frameDt, const Settings 
     c.hyper   = in.Down(KEY_LEFT_SHIFT) || in.Down(KEY_RIGHT_SHIFT);
     c.fire    = in.MouseDown(MOUSE_BUTTON_LEFT);
     c.toggleDampeners = in.Pressed(KEY_CAPS_LOCK);
-    c.cyclePower = in.Pressed(KEY_X);                  // travel / combat / defence
+    c.cyclePower = in.Pressed(KEY_X);                  // travel / combat / defence / silent
+    c.toggleRadar = in.Pressed(KEY_G);                 // radar on / off
     return c;
 }
 
@@ -55,7 +56,7 @@ public:
             DrawText(rows[r].label.c_str(), px + 14, ry, 16, HUD_LABEL);
             DrawText(rows[r].value.c_str(), px + 140, ry, 16, WHITE);
         }
-        DrawText("[MMB] close", px + pw - 100, py + ph - 22, 14, HUD_DIM);
+        DrawText("[I] close", px + pw - 80, py + ph - 22, 14, HUD_DIM);
     }
 };
 
@@ -468,6 +469,7 @@ void Ui::HandleInput(InputFrame &in, GameState &g)
         else     Open(MakePauseMenu(online));
     }
     if (in.Pressed(KEY_O)) { settings.showOrbits = !settings.showOrbits; SaveSettings(settings); }
+    if (in.Pressed(KEY_TAB)) { cursorFree = !cursorFree; Say(cursorFree ? "Mouse free  -  TAB to fly with it again" : "Mouse has the helm"); }
     if (in.Pressed(KEY_R)) Open(MakeFactionsWindow());     // (and takes R itself to close)
     if (in.Pressed(KEY_T)) Open(MakeTradeLog());
     if (in.Pressed(KEY_N)) Open(MakeNewsWindow());
@@ -481,6 +483,19 @@ void Ui::HandleInput(InputFrame &in, GameState &g)
     if (in.Pressed(KEY_F) && g.flight.selected.type == TargetId::Ship && g.flight.selected.index >= NPC_ID_BASE) {
         Do(g, { Command::HailShip, g.flight.selected.index });
         in.Consume(KEY_F);
+    }
+    // SPACE or the middle mouse button: lock onto what's under the reticle (SHIFT then flies there). Again, with the
+    // reticle on the same thing or on nothing: release it, and fly free.
+    if (in.Pressed(KEY_SPACE) || in.MousePressed(MOUSE_BUTTON_MIDDLE)) {
+        TargetId look = CanonicalTarget(g, hovered), held = CanonicalTarget(g, course);
+        if (look.valid() && look != held) {
+            course = look; steer = false;
+            Say("Locked onto " + TargetName(g, look) + "  -  hold SHIFT to go  (SPACE: release)");
+        } else if (held.valid()) {
+            Say("Lock released: flying free");
+            course = {}; steer = false;
+        } else Say("Nothing under the reticle to lock onto");
+        in.Consume(KEY_SPACE);
     }
     if (in.Pressed(KEY_H)) Do(g, { Command::PayPirates });         // (hand over what a pirate has demanded)
     if (in.Pressed(KEY_K)) Do(g, { Command::CallTanker });         // (nearly out of fuel: call for a tanker)
@@ -505,7 +520,7 @@ void Ui::HandleInput(InputFrame &in, GameState &g)
         if (Has(WindowKind::Comms)) Close(WindowKind::Comms);
         else                        Open(std::make_unique<CommsWindow>());
     }
-    if (in.Pressed(KEY_I) || in.MousePressed(MOUSE_BUTTON_MIDDLE)) {
+    if (in.Pressed(KEY_I)) {
         if (Has(WindowKind::Info))           Close(WindowKind::Info);
         else if (g.flight.selected.valid())  Open(std::make_unique<InfoWindow>());
     }

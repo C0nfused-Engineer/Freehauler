@@ -4,6 +4,7 @@
 #include "contracts.h"
 #include "economy.h"
 #include "format.h"
+#include "sensors.h"
 #include <algorithm>
 
 // ---------------------------------------------------------------------------
@@ -65,7 +66,7 @@ void NewCaptain(World &w, Captain &c, int id, const std::string &name)
         if (b.kind == Kind::Station && b.econ == Econ::Refinery) { start = &b; break; }
     if (!start)
         for (const Body &b : c.loaded.bodies)
-            if (b.kind == Kind::Station) { start = &b; break; }
+            if (b.kind == Kind::Station && b.population > 0) { start = &b; break; }
     if (!start) {
         int planets = 0;
         for (const Body &b : c.loaded.bodies)
@@ -197,8 +198,10 @@ bool FindTarget(const World &w, const Captain &c, TargetId t, DVec3 &rel, double
         break;
     }
     case TargetId::Ship: {
+        // (a ship can be targeted while a sensor holds it: not once it's lost, and its ghost is all that's left)
         const Traffic *other = t.index != c.id ? w.FindTraffic(t.index) : nullptr;
-        if (!other) return false;
+        if (!other || other->ghost) return false;
+        if (c.sensing) { const Contact *k = FindContact(c, t.index); if (!k || !k->Held()) return false; }
         rel = FromShip(w.systems, ship, other->ship.anchor, other->ship.pos);
         r   = SHIP_RADIUS;
         break;
@@ -234,9 +237,8 @@ std::string TargetName(const World &w, const Captain &c, TargetId t)
 // ---------------------------------------------------------------------------
 // The simulation step
 // ---------------------------------------------------------------------------
-// Hyper target lock: holding Shift while something is targeted swings the
-// nose onto it and ignores small mouse movements. A deliberate movement breaks
-// the lock; the view can switch it to another body (aim.retarget).
+// Target lock: the pilot locks onto a destination (and releases it again); while
+// it's locked, holding Shift swings the nose onto it and flies there.
 // Swings the nose toward a target (the lock, or a course just set on a map)
 // (no faster than the thrusters can swing it: 'most' degrees this step)
 static void TurnToward(Ship &ship, DVec3 rel, float dt, float most)
@@ -253,40 +255,15 @@ static void TurnToward(Ship &ship, DVec3 rel, float dt, float most)
 static void UpdateLock(World &w, Captain &c, Controls &in, const Aim &aim, float dt)
 {
     FlightState &f = c.flight;
-    Ship &ship = c.player.ship;
-    if (!in.hyper) {
-        f.lock = {};
-        f.lockSuppressed = false;
-        return;
-    }
-    // Autopilot to whatever's selected (which follows the reticle)
-    if (!f.lock.valid() && !f.lockSuppressed && f.selected.valid()) {
-        f.lock = f.selected;
-        f.lockBreak = { 0, 0 };
-    }
-    // Nudging the cursor onto another body while locked switches the lock to it
-    f.retargetCooldown = fmaxf(0.0f, f.retargetCooldown - dt);
-    TargetId retarget = CanonicalTarget(c, aim.retarget);
-    if (f.lock.valid() && retarget.valid() && retarget != f.lock && f.retargetCooldown <= 0.0f) {
-        f.lock = retarget;
-        f.lockBreak = { 0, 0 };
-        f.retargetCooldown = 0.5f;                            // no flip-flopping between close bodies
-    }
+    // The lock is the destination the pilot has set: by locking onto what they were looking at, or by picking a
+    // course on a map. It stays until they release it. With none, the ship goes where it's pointed.
+    f.lock = CanonicalTarget(c, aim.course);
     DVec3 rel;
     if (f.lock.valid() && !FindTarget(w, c, f.lock, rel)) f.lock = {};
-    if (!f.lock.valid()) return;
-
-    // Mouse steering builds up toward breaking the lock, but decays,
-    // so jitter never adds up; only a deliberate move gets through
-    float k = expf(-LOCK_BREAK_DECAY * dt);
-    f.lockBreak = { f.lockBreak.x * k + in.yaw, f.lockBreak.y * k + in.pitch };
-    if (Vector2Length(f.lockBreak) > LOCK_BREAK_DEG) {
-        f.lock = {};
-        f.lockSuppressed = true;
-        return;
-    }
-    in.yaw = in.pitch = 0.0f;                                 // ignore small mouse movement
-    TurnToward(ship, rel, dt, (float)(c.player.spec.turn / c.player.Mass() * dt));
+    if (!f.lock.valid() || !in.hyper) return;
+    // Under drive, the nose is held on it (the mouse does nothing until the lock is released)
+    in.yaw = in.pitch = 0.0f;
+    TurnToward(c.player.ship, rel, dt, (float)(c.player.spec.turn / c.player.Mass() * dt));
 }
 
 // Solid bodies and rocks: the ship stops at the surface instead of passing through
@@ -366,14 +343,12 @@ void StepCaptain(World &w, Captain &c, const Controls &input, const Aim &aim, fl
 
     UpdateLoadedSystem(w, c);
 
-    // Selection follows the reticle, falling back on the course set on a map; a hyper lock overrides it
+    // Selection (what F hails, the laser mines, the info panel describes) follows the reticle, falling back on the lock
     f.selected = CanonicalTarget(c, aim.hovered.valid() ? aim.hovered : aim.course);
-    if (f.lock.valid()) f.lock = CanonicalTarget(c, f.lock);
     UpdateLock(w, c, in, aim, dt);
     DVec3 courseRel;
-    if (aim.steer && !f.lock.valid() && FindTarget(w, c, aim.course, courseRel)) TurnToward(ship, courseRel, dt, (float)(p.spec.turn / p.Mass() * dt));
-    if (f.lockSuppressed && !aim.hovered.valid() && !f.selected.valid()) f.lockSuppressed = false;
-    if (f.lock.valid()) f.selected = f.lock;
+    if (aim.steer && !in.hyper && FindTarget(w, c, aim.course, courseRel)) TurnToward(ship, courseRel, dt, (float)(p.spec.turn / p.Mass() * dt));
+    if (!f.selected.valid()) f.selected = f.lock;
 
     // Drive and flight
     // (the reactor burns fuel for what's drawn; on an empty tank the engines and the hyper drive

@@ -3,12 +3,12 @@
 #include <algorithm>
 
 static const HullDef HULLS[HULL_COUNT] = {
-    { "Courier",      "Small and quick: room for a good drive and not much else.",              150.0,  4,  10.0,   8000.0 },
-    { "Hauler",       "The ship everyone starts in: a bit of everything.",                      400.0,  6,  20.0,  20000.0 },
-    { "Prospector",   "Hardpoints to spare for lasers, scoops and skimmers.",                   450.0,  9,  26.0,  32000.0 },
-    { "Cutter",       "A strong frame with mounts all round, built to chase and to fight.",     600.0, 10,  40.0,  60000.0 },
-    { "Freighter",    "Four and a half times a hauler's room. Wants big engines.",             1800.0,  8,  90.0, 110000.0 },
-    { "Bulk carrier", "A flying warehouse.",                                                   6500.0, 10, 320.0, 400000.0 },
+    { "Courier",      "Small and quick: room for a good drive and not much else. Hard to see.", 150.0,  6,  10.0,   8000.0 },
+    { "Hauler",       "The ship everyone starts in: a bit of everything.",                      400.0,  9,  20.0,  20000.0 },
+    { "Prospector",   "Hardpoints to spare for lasers, scoops and skimmers.",                   450.0, 12,  26.0,  32000.0 },
+    { "Cutter",       "A strong frame with mounts all round, built to chase and to fight.",     600.0, 13,  40.0,  60000.0 },
+    { "Freighter",    "Four and a half times a hauler's room. Wants big engines.",             1800.0, 11,  90.0, 110000.0 },
+    { "Bulk carrier", "A flying warehouse, and it shows up like one.",                         6500.0, 13, 320.0, 400000.0 },
 };
 
 const HullDef &Hull(int id) { return HULLS[id >= 0 && id < HULL_COUNT ? id : HULL_HAULER]; }
@@ -16,7 +16,8 @@ const HullDef &Hull(int id) { return HULLS[id >= 0 && id < HULL_COUNT ? id : HUL
 const char *PartTypeName(PartType t)
 {
     static const char *names[] = { "Reactor", "Main engine", "Thrusters", "Hyper drive", "Warp drive", "Drive capacitor", "Capacitor bank",
-                                   "Fuel tank", "Cargo bay", "Mining laser", "Fuel scoop", "Gas skimmer", "Scanner" };
+                                   "Fuel tank", "Cargo bay", "Mining laser", "Fuel scoop", "Gas skimmer", "Telescope", "Radar", "Infrared array",
+                                   "Tachyon detector" };
     return names[(int)t < (int)PartType::Count ? (int)t : 0];
 }
 
@@ -28,7 +29,8 @@ const char *GradeName(int grade)
 
 bool IsExternal(PartType t)
 {
-    return t == PartType::Engine || t == PartType::Thrusters || t == PartType::MiningLaser || t == PartType::Scoop || t == PartType::Skimmer;
+    return t == PartType::Engine || t == PartType::Thrusters || t == PartType::MiningLaser || t == PartType::Scoop || t == PartType::Skimmer ||
+           t == PartType::Telescope || t == PartType::Radar || t == PartType::IrArray;
 }
 
 int FuelGoodOf(int reactorFuel)
@@ -40,10 +42,10 @@ bool Specialises(Slant s, PartType t)
 {
     switch (s) {
     case Slant::Industry:    return t == PartType::Engine || t == PartType::Thrusters;
-    case Slant::Shipping:    return t == PartType::Hold || t == PartType::Tank || t == PartType::HyperDrive;
-    case Slant::Energy:      return t == PartType::Reactor || t == PartType::DriveCap || t == PartType::Bank;
+    case Slant::Shipping:    return t == PartType::Hold || t == PartType::Tank || t == PartType::HyperDrive || t == PartType::Radar;
+    case Slant::Energy:      return t == PartType::Reactor || t == PartType::DriveCap || t == PartType::Bank || t == PartType::IrArray;
     case Slant::Mining:      return t == PartType::MiningLaser || t == PartType::Scoop;
-    case Slant::Finance:     return t == PartType::Scanner || t == PartType::WarpDrive;
+    case Slant::Finance:     return t == PartType::Telescope || t == PartType::WarpDrive || t == PartType::TachyonDetector;
     case Slant::Agriculture: return t == PartType::Skimmer || t == PartType::Tank;
     default:                 return false;
     }
@@ -70,7 +72,10 @@ static const Numbers BASE[(int)PartType::Count] = {
     /* MiningLaser  */ { 1.5,  5.0, 2000.0, GOOD_MACHINERY },
     /* Scoop        */ { 1.0,  5.0, 1500.0, GOOD_MACHINERY },
     /* Skimmer      */ { 1.0,  5.0, 1500.0, GOOD_MACHINERY },
-    /* Scanner      */ { 0.3,  3.0, 1000.0, GOOD_INSTRUMENTS },
+    /* Telescope    */ { 0.3,  3.0, 1000.0, GOOD_INSTRUMENTS },
+    /* Radar        */ { 0.5,  3.0, 1500.0, GOOD_ELECTRONICS },
+    /* IrArray      */ { 0.3,  2.0, 1200.0, GOOD_INSTRUMENTS },
+    /* TachyonDet.  */ { 2.0,  8.0, 4000.0, GOOD_INSTRUMENTS },
 };
 
 static double Scale(const Part &p)  { return pow(2.0, (double)std::max(1, std::min(PART_SIZES, (int)p.size)) - 1.0); }
@@ -84,6 +89,7 @@ struct Does {
     double topSpeed = 0, p0 = 0, k = 0, maxMass = 0, jumpMJ = 0;
     double capMJ = 0, capEff = 0, bankMJ = 0, tank = 0, hold = 0;
     double rate = 0, range = 0, drawMW = 0, scan = 0;
+    double area = 0, depth = 0, catches = 0, res = 0;              // tachyon detectors
 };
 
 static Does Work(const Part &p)
@@ -108,7 +114,16 @@ static Does Work(const Part &p)
     case PartType::MiningLaser: d.rate = 2.0 * m * b; d.range = 300.0 * (1.0 + 0.2 * p.grade); d.drawMW = 8.0 * m; break;
     case PartType::Scoop:      d.rate = 1.0 * m * b; break;
     case PartType::Skimmer:    d.rate = 0.25 * m * b; break;
-    case PartType::Scanner:    d.scan = (1.0 + 0.5 * (p.size - 1)) * (1.0 + 0.25 * p.grade); d.drawMW = 1.0 * m; break;
+    // (sensors: each size reaches half as far again as the smallest, each grade a quarter further)
+    case PartType::Telescope:  d.scan = (1.0 + 0.5 * (p.size - 1)) * (1.0 + 0.25 * p.grade); d.drawMW = 0.5 * m; break;
+    case PartType::Radar:      d.scan = (1.0 + 0.5 * (p.size - 1)) * (1.0 + 0.25 * p.grade); d.drawMW = 2.0 * m; break;     // (while it's on)
+    case PartType::IrArray:    d.scan = (1.0 + 0.5 * (p.size - 1)) * (1.0 + 0.25 * p.grade); d.drawMW = 0.25 * m; break;
+    // (a tachyon detector is a volume: twice the size is twice the volume, shared between its face and its depth.
+    // Better grades catch more of what decays inside, and place it better.)
+    case PartType::TachyonDetector:
+        d.area = 4.0 * pow(m, 2.0 / 3.0); d.depth = 2.0 * pow(m, 1.0 / 3.0); d.catches = 0.5 + 0.1 * p.grade;
+        d.res = 12.0 / (1.0 + 0.5 * p.grade) / pow(m, 1.0 / 3.0); d.drawMW = 0.25 * m;
+        break;
     default: break;
     }
     return d;
@@ -147,7 +162,10 @@ PartInfo Describe(const Part &p, const FactionSet *fs)
     case PartType::MiningLaser: i.does = TextFormat("%.1f t/s at %.1f km, %.0f MW", d.rate, d.range * METERS_PER_UNIT / 1000.0, d.drawMW); break;
     case PartType::Scoop:       i.does = TextFormat("%.1f t/s of deuterium off a star", d.rate); break;
     case PartType::Skimmer:     i.does = TextFormat("%.2f t/s of helium-3", d.rate); break;
-    case PartType::Scanner:     i.does = TextFormat("%.1fx range, %.0f MW", d.scan, d.drawMW); break;
+    case PartType::Telescope:   i.does = TextFormat("%.1fx range, %.1f MW", d.scan, d.drawMW); break;
+    case PartType::Radar:       i.does = TextFormat("%.1fx range, %.0f MW when on", d.scan, d.drawMW); break;
+    case PartType::IrArray:     i.does = TextFormat("%.1fx range, %.1f MW", d.scan, d.drawMW); break;
+    case PartType::TachyonDetector: i.does = TextFormat("%.0f m2 x %.1f m, catches %.0f%%, %.1f deg", d.area, d.depth, d.catches * 100.0, d.res); break;
     default: break;
     }
     return i;
@@ -202,7 +220,11 @@ ShipSpec SpecOf(const ShipBuild &b)
     s.thrust = s.turn = s.reactorMW = s.engineMW = s.bankMJ = s.driveCapMJ = 0.0;
     s.hyperSpeed = s.warpSpeed = s.hyperMaxMass = s.warpMaxMass = 0.0;
     s.tank = s.hold = s.laserRate = s.laserRange = s.laserMW = s.scoopRate = s.skimRate = 0.0;
-    s.scan = 0.3;                                                  // (what a bare hull's own sensors manage)
+    s.scan = s.radar = s.ir = 0.3;                                 // (what a bare hull's own sensors manage)
+    s.radarMW = 0.5;
+    s.tachArea = 0.5; s.tachDepth = 0.5; s.tachEff = 0.3; s.tachRes = 30.0;
+    s.hullSize = BuildVolume(b) / HULLS[HULL_HAULER].volume;
+    double tach = 0.0;
     s.idleMW = 1.0;
     double effBy = 0.0, capBy = 0.0, biggest = 0.0;
     for (const Part &p : b.parts) {
@@ -228,7 +250,14 @@ ShipSpec SpecOf(const ShipBuild &b)
         case PartType::MiningLaser: s.laserRate += d.rate; s.laserRange = fmax(s.laserRange, d.range); s.laserMW += d.drawMW; break;
         case PartType::Scoop:     s.scoopRate += d.rate; break;
         case PartType::Skimmer:   s.skimRate += d.rate; break;
-        case PartType::Scanner:   s.scan = fmax(s.scan, d.scan); s.idleMW += d.drawMW; break;
+        // (of each kind of sensor, only the best one fitted counts)
+        case PartType::Telescope: s.scan = fmax(s.scan, d.scan); s.idleMW += d.drawMW; break;
+        case PartType::Radar:     if (d.scan > s.radar) { s.radar = d.scan; s.radarMW = d.drawMW; } break;
+        case PartType::IrArray:   s.ir = fmax(s.ir, d.scan); s.idleMW += d.drawMW; break;
+        case PartType::TachyonDetector:
+            if (d.area * d.depth * d.catches > tach) { tach = d.area * d.depth * d.catches; s.tachArea = d.area; s.tachDepth = d.depth; s.tachEff = d.catches; s.tachRes = d.res; }
+            s.idleMW += d.drawMW;
+            break;
         default: break;
         }
     }
@@ -251,7 +280,8 @@ ShipBuild StarterBuild()
     b.hull = HULL_HAULER;
     b.parts = { Make(PartType::Reactor, 2), Make(PartType::Engine, 2), Make(PartType::Thrusters, 2), Make(PartType::HyperDrive, 2),
                 Make(PartType::WarpDrive, 2), Make(PartType::DriveCap, 2), Make(PartType::Bank, 1), Make(PartType::Tank, 3), Make(PartType::Tank, 1),
-                Make(PartType::Hold, 3), Make(PartType::MiningLaser, 1), Make(PartType::Skimmer, 1), Make(PartType::Scanner, 1) };
+                Make(PartType::Hold, 3), Make(PartType::MiningLaser, 1), Make(PartType::Skimmer, 1), Make(PartType::Telescope, 1),
+                Make(PartType::Radar, 1), Make(PartType::IrArray, 1), Make(PartType::TachyonDetector, 1) };
     return b;
 }
 
@@ -279,29 +309,32 @@ ShipBuild NpcBuild(NpcKind kind, double load)
         add(PartType::Engine, SizeFor(0.45 * 21.0 * full, 1312.5));
         add(PartType::Thrusters, SizeFor(70.0 * full, 13750.0));
         add(PartType::HyperDrive, SizeFor(1.1 * full, 225.0));
-        add(PartType::Scanner, 1);
+        add(PartType::Radar, 1);
         break;
     }
     case NpcKind::Miner:
         b.hull = HULL_PROSPECTOR;
         add(PartType::Reactor, 2); add(PartType::Engine, 2); add(PartType::Thrusters, 1); add(PartType::HyperDrive, 3);
         add(PartType::Tank, 2); add(PartType::Hold, 3); add(PartType::Hold, 2); add(PartType::MiningLaser, 2); add(PartType::Skimmer, 1);
-        add(PartType::Scanner, 1);
+        add(PartType::Radar, 1);
         break;
     case NpcKind::Pirate:
         b.hull = HULL_COURIER;
         add(PartType::Reactor, 1, 1); add(PartType::Engine, 2); add(PartType::Thrusters, 1); add(PartType::HyperDrive, 1);
-        add(PartType::Tank, 1); add(PartType::Hold, 1); add(PartType::Scanner, 1);
+        add(PartType::Tank, 1); add(PartType::Hold, 1);
+        // (raiders hunt by heat and by eye, with the radar off: it would only say where they are)
+        add(PartType::IrArray, 2); add(PartType::Telescope, 1); add(PartType::Radar, 1); add(PartType::TachyonDetector, 1);
         break;
     case NpcKind::Patrol:
         b.hull = HULL_CUTTER;
         add(PartType::Reactor, 2, 1); add(PartType::Engine, 3); add(PartType::Thrusters, 2); add(PartType::HyperDrive, 2, 1);
-        add(PartType::Tank, 2); add(PartType::Hold, 1); add(PartType::Bank, 2); add(PartType::Scanner, 2);
+        add(PartType::Tank, 2); add(PartType::Hold, 1); add(PartType::Bank, 2);
+        add(PartType::Radar, 2); add(PartType::IrArray, 2); add(PartType::Telescope, 2); add(PartType::TachyonDetector, 1);
         break;
     default:                                                       // tankers
         b.hull = HULL_HAULER;
         add(PartType::Reactor, 2); add(PartType::Engine, 2); add(PartType::Thrusters, 2); add(PartType::HyperDrive, 2);
-        add(PartType::Tank, 3); add(PartType::Tank, 3); add(PartType::Scanner, 1);
+        add(PartType::Tank, 3); add(PartType::Tank, 3); add(PartType::Radar, 1);
         break;
     }
     return b;

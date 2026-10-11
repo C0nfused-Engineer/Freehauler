@@ -4,8 +4,6 @@
 
 // View-side state that persists between frames
 struct HudState {
-    TargetId retargetCandidate;      // body the nudge cursor is resting on (while locked)...
-    float    retargetDwell = 0.0f;   // ...and for how long (must be deliberate, not jitter)
 };
 
 // Nav dots and target brackets. Picks what's under the reticle and returns it

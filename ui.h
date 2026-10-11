@@ -56,6 +56,7 @@ struct Ui {
     float       toastTime = 0.0f;                 // ...and how long it stays
     bool        quit = false;
     bool        gameReloaded = false;             // a save was loaded this frame (the view should snap)
+    bool        cursorFree = false;               // TAB: the mouse is a pointer, not the stick (TAB again takes it back)
     Settings    settings;
 
     // The course set on a map: it becomes the selection (hold Shift to lock on and go), and
@@ -63,6 +64,7 @@ struct Ui {
     TargetId    course;
     bool        steer = false;
     void        SetCourse(TargetId t) { course = t; steer = t.valid(); }
+    TargetId    hovered;                          // what was under the reticle last frame (SPACE / MMB locks onto it)
 
     // Multiplayer: the server runs the world, so menus don't pause it and
     // saving is the server's job. Commands go to sendCommand.

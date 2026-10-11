@@ -30,7 +30,7 @@
 #include <vector>
 
 const uint32_t PROTOCOL_MAGIC   = 0x31504D53;   // "SMP1"
-const uint16_t PROTOCOL_VERSION = 14;           // bump when anything below changes (14: ships built from parts)
+const uint16_t PROTOCOL_VERSION = 16;           // bump when anything below changes (16: sensors: contacts, bearings, radar)
 const uint16_t DEFAULT_PORT     = 23500;
 const int      MAX_PACKET       = 1400;         // stays under a typical 1500-byte MTU
 const int      MAX_MESSAGE      = 1100;         // biggest reliable message
@@ -130,7 +130,8 @@ enum MsgType : uint8_t {
     MSG_JOB,                // a contract you hold
     MSG_PAPERS,             // u8 n, n x u8: your memberships and licences, by faction
     MSG_BUILD,              // your ship: i32 hull, u8 stretch, u8 mounts, u8 n, n x (i32 part, i16 maker)
-    MSG_NPC,                // an NPC ship now on your scope: i32 id, u8 kind, i32 faction, str name, str from, str dest, i32 good, f32 tonnes
+    MSG_NPC,                // an NPC ship your sensors have made out: i32 id, u8 kind, u8 hull, i32 faction, str name, str from, str dest, i32 good, f32 tonnes
+    MSG_MARKS,              // the bearings on your scope, and whose traffic control you're under (see MsgMarks)
 };
 
 // Unreliable payload types (first byte after the reliable section)
@@ -153,6 +154,8 @@ std::vector<uint8_t> MsgNews(const EconNews &n);
 std::vector<uint8_t> MsgContract(uint8_t type, const Contract &k);         // MSG_OFFER or MSG_JOB
 bool                 ReadContract(Reader &r, Contract &out);
 std::vector<std::vector<uint8_t>> MsgMined(const MinedMap &m); // split into messages that fit
+std::vector<uint8_t> MsgMarks(double clock, const Captain &c);
+bool                 ReadMarks(Reader &r, double clock, Captain &c);
 
 // ---------------------------------------------------------------------------
 // Snapshots: the server's view, 30 times a second

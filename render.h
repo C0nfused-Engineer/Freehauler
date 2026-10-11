@@ -26,7 +26,7 @@ inline Vector3 MapPoint(DVec3 rel)
 
 struct RenderAssets {
     VectorModel ship, planet, star;
-    VectorModel station, starbase, drydock, collector, greenhouse, skimmer;   // stations: the common wheel, and the special kinds
+    VectorModel station, starbase, drydock, collector, greenhouse, skimmer, outpost;   // stations: the common wheel, and the special kinds
     std::vector<VectorModel> rocks;          // AST_TEMPLATES procedural shapes
     void Load();
     void Unload();
@@ -61,6 +61,7 @@ struct ViewState {
     Camera3D   camera = {};
     Quaternion camRot = { 0, 0, 0, 1 };
     float      hyperVis = 0.0f;              // smoothed 0..1 hyper amount (camera pull, FOV)
+    float      lookYaw = 0.0f, lookPitch = 0.0f;   // looking around (ALT held): degrees off the ship's heading
     Vector3    camRight = { 1, 0, 0 }, camFwd = { 0, 0, -1 };
     bool       showOrbits = true;
     Dust       dust;

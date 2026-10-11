@@ -3,7 +3,7 @@
 
 const char *PowerModeName(uint8_t mode)
 {
-    static const char *names[] = { "TRAVEL", "COMBAT", "DEFENCE" };
+    static const char *names[] = { "TRAVEL", "COMBAT", "DEFENCE", "SILENT" };
     return names[mode < POWER_MODES ? mode : 0];
 }
 
@@ -21,11 +21,11 @@ double DriveSpeedFor(const ShipSpec &spec, double megawatts, double mass, bool w
     return LIGHT_SEC_U * pow((megawatts - p0) / (k * mass), 1.0 / n);
 }
 
-double ThrottleThrust(float throttle)
+double ThrottleSpeed(float throttle)
 {
     double t = fabs(throttle);
-    double f = (pow(THROTTLE_RANGE, t) - 1.0) / (THROTTLE_RANGE - 1.0);
-    return throttle < 0.0f ? -f : f;
+    double v = THROTTLE_MIN_SPEED * (pow((double)MAX_SPEED / THROTTLE_MIN_SPEED + 1.0, t) - 1.0);
+    return throttle < 0.0f ? -v : v;
 }
 
 FlightStats ShipStats(const ShipSpec &spec, const PowerState &power, double mass, bool haveFuel)
@@ -44,6 +44,11 @@ FlightReport FlyShip(Ship &ship, const ShipSpec &spec, PowerState &power, double
     FlightReport r;
     const bool reactor = fuel > 0.0, wasWarping = power.warping;
     if (in.cyclePower) power.mode = (uint8_t)((power.mode + 1) % POWER_MODES);
+    if (in.toggleRadar) power.radar = !power.radar;
+    // Running silent, the reactor is held right down; and the radar, when it's on, is one more thing to keep fed
+    const bool   silent = power.mode == POWER_SILENT;
+    const double reactorMW = spec.reactorMW * (silent ? SILENT_REACTOR : 1.0);
+    const double idleMW = spec.idleMW * (silent ? SILENT_IDLE : 1.0) + (RadarOn(spec, power) ? spec.radarMW : 0.0);
 
     r.drive = ComputeDrive(ship, sys, loaded, lock, reactor, spec.hyperSpeed, spec.warpSpeed);
 
@@ -52,7 +57,8 @@ FlightReport FlyShip(Ship &ship, const ShipSpec &spec, PowerState &power, double
     // system's field, forming a warp bubble takes the capacitor's charge, all at once; without it (or
     // without a warp drive) the drive holds at hyper speed. Then: no faster than the pilot has set it,
     // and no faster than the reactor can hold the field.
-    const double spare = spec.reactorMW - spec.idleMW;
+    const double spare = reactorMW - idleMW;
+    double set = 0.0;                                              // the speed the pilot has the drive set to
     if (in.hyper && spec.hyperSpeed <= 0.0) { in.hyper = false; r.noDrive = true; }
     if (in.hyper && reactor) {
         if (mass > spec.hyperMaxMass) { in.hyper = false; r.tooHeavy = true; }
@@ -65,25 +71,32 @@ FlightReport FlyShip(Ship &ship, const ShipSpec &spec, PowerState &power, double
                 else { r.charging = can; r.drive.limit = fmin(r.drive.limit, spec.hyperSpeed); }
             }
             double top = power.warping ? spec.warpSpeed : spec.hyperSpeed;
-            double set = fmax(FTL_MIN, fmin(1.0f, ship.ftl)) * top;
+            set = fmax(FTL_MIN, fmin(1.0f, ship.ftl)) * top;
             r.drive.limit = fmin(r.drive.limit, set);
             double v = DriveSpeedFor(spec, spare, mass, power.warping);
             if (v < r.drive.limit) { r.starved = !r.charging && v < 0.999 * set; r.drive.limit = v; }
         }
     }
     if (!in.hyper) power.warping = false;
-    if (wasWarping && !power.warping) r.collapse = spec.jumpMJ * mass;        // the bubble goes, and what was in it with it
+    // The bubble carries more energy the faster it's being run. Run slower, it sheds the difference, but slowly:
+    // a quiet arrival means a slow passage, not a tap on the brakes at the end of it.
+    if (power.warping) {
+        float want = (float)fmin(4.0, (set / WARP_SPEED) * (set / WARP_SPEED));
+        if (!wasWarping || want > power.field) power.field = want;
+        else power.field += (want - power.field) * (float)(1.0 - exp(-dt / FIELD_RELAX));
+    }
+    if (wasWarping && !power.warping) { r.collapse = BubbleEnergy(spec, mass, power.field); power.field = 0.0f; }   // the bubble goes, and what was in it with it
     power.engaged = in.hyper;
 
     UpdateShip(ship, in, dt, r.drive, ShipStats(spec, power, mass, reactor));
-    if (!reactor) { power.engines = 1.0f; return r; }              // (the emergency cell isn't the reactor's business)
+    if (!reactor) { power.engines = 1.0f; power.heat = 0.5f; r.heat = 0.5; return r; }      // (the emergency cell isn't the reactor's business)
 
     // What everything drew this step, and where it came from
     double speed  = Vector3Length(ship.vel);
     double drive  = in.hyper ? DrivePower(spec, speed, mass, power.warping) : 0.0;
     double engine = in.hyper ? 0.0 : spec.engineMW * ship.thrustUse;
     double bankLoads = engine + (laser ? spec.laserMW : 0.0);
-    double out = spec.reactorMW, used = fmin(out, spec.idleMW);
+    double out = reactorMW, used = fmin(out, idleMW);
     out -= used;
     double toDrive = fmin(drive, out);                             // the drive's field is held on reactor power
     out -= toDrive; used += toDrive;
@@ -97,7 +110,7 @@ FlightReport FlyShip(Ship &ship, const ShipSpec &spec, PowerState &power, double
     // Anything left over recharges the capacitors, split by the power mode (a full one's share goes to the
     // other). Some of what goes into the drive capacitor is lost on the way in.
     double share = power.mode == POWER_TRAVEL ? 0.75 : 0.25;
-    double roomD = fmax(0.0, spec.driveCapMJ - power.driveCap) / spec.capIn, roomB = fmax(0.0, spec.bankMJ - power.bank), e = out * dt;
+    double roomD = fmax(0.0, spec.driveCapMJ - power.driveCap) / spec.capIn, roomB = fmax(0.0, spec.bankMJ - power.bank), e = silent ? 0.0 : out * dt;
     double d = fmin(roomD, e * share), b = fmin(roomB, e * (1.0 - share));
     double left = e - d - b;
     double d2 = fmin(roomD - d, left); d += d2; left -= d2;
@@ -107,6 +120,9 @@ FlightReport FlyShip(Ship &ship, const ShipSpec &spec, PowerState &power, double
 
     r.load = used;
     r.burn = used / (spec.reactorEff * spec.fuelMJ);
+    // Heat: what the reactor made and couldn't turn into power, and the engines' exhaust
+    r.heat = used * (1.0 - spec.reactorEff) / spec.reactorEff * (silent ? SILENT_HEAT : 1.0) + PLUME_HEAT * engine * power.engines;
+    power.heat = (float)r.heat;
     fuel = fmax(0.0, fuel - r.burn * dt);
     return r;
 }
@@ -261,49 +277,50 @@ void UpdateShip(Ship &s, const Controls &in, float dt, const DriveInfo &drive, c
         s.dropout = true;
         s.throttle = 0.0f;                                    // let go of Shift and the ship comes to a stop
     } else {
-        // --- Sublight: the throttle is thrust, along the nose ---
+        // --- Sublight: the engines take the ship to the speed the throttle asks for, along the nose, and hold it ---
+        Vector3 before = s.vel;
+        double  target = s.allStop ? 0.0 : fmax(-drive.cruiseLimit, fmin(drive.cruiseLimit, ThrottleSpeed(s.throttle)));
         float   along  = Vector3DotProduct(s.vel, fwd);
         Vector3 drift  = Vector3Subtract(s.vel, Vector3Scale(fwd, along));
-        double  thrust = s.allStop ? 0.0 : ThrottleThrust(s.throttle);
 
-        // Dampeners kill sideways drift hard, so the ship goes where it points. Under power,
-        // a turn keeps its speed: what comes off the drift goes into the new heading.
+        // Dampeners kill sideways drift hard, so the ship goes where it points. Flying
+        // forward, a turn keeps its speed: what comes off the drift goes into the new heading.
         if (s.dampeners || s.allStop) {
             float d = Vector3Length(drift);
             if (d > 0.0f) {
                 float after = fmaxf(0.0f, d * expf(-DAMPER_RATE * dt) - DAMPER_ACCEL * dt);
-                if (along > 0.0f && thrust > 0.0) along = sqrtf(along * along + d * d - after * after);
+                if (along > 0.0f && target > 0.0) along = sqrtf(along * along + d * d - after * after);
                 drift = Vector3Scale(drift, after / d);
             }
         }
 
-        // What the engines can do to the ship's speed this step: thrust over mass, falling away as
-        // light speed nears (a = F / gamma^3 m). Coming down from FTL speeds is the drive's doing.
-        double beta  = fmin(0.999999, fabs(along) / LIGHT_SEC_U);
-        double most  = stats.accel * pow(1.0 - beta * beta, 1.5) * dt;
-        double limit = drive.cruiseLimit;
-        float  was   = along;
-        // (and with the throttle shut, it goes on shedding it: let go of Shift and the ship stops)
-        if (s.dropout && (thrust != 0.0 || fabsf(along) < 1.0f)) s.dropout = false;
-        if (fabsf(along) > MAX_SPEED || s.dropout) {
+        // Along the nose, toward the throttle's speed: as hard as the engines can push this much ship
+        // (thrust over mass, falling away as light speed nears: a = F / gamma^3 m), easing off as it gets
+        // there. Coming down from FTL speeds is the collapsing field's doing, and with the throttle shut
+        // it goes on shedding speed until the ship is stopped.
+        double beta = fmin(0.999999, fabs(along) / LIGHT_SEC_U);
+        double most = stats.accel * pow(1.0 - beta * beta, 1.5) * dt;
+        if (s.dropout && (target != 0.0 || fabsf(along) < 1.0f)) s.dropout = false;
+        bool   shedding = fabsf(along) > MAX_SPEED || s.dropout;
+        if (shedding) {
             along *= (float)exp(-SPOOL_DOWN * dt);
             if (fabsf(along) < 1.0f) along = 0.0f;
-        } else if (thrust != 0.0 && !(thrust < 0.0 && along > 0.0)) {
-            along += (float)(thrust * most);                   // pushing (forward, or astern from rest)
-        } else if (thrust < 0.0 || s.dampeners || s.allStop) {
-            // Braking: reverse thrust against forward motion, or the dampeners bringing the ship to rest
-            // with the throttle at zero. Either way with everything the engines have.
-            along = along > 0.0f ? fmaxf(0.0f, along - (float)most) : fminf(0.0f, along + (float)most);
+        } else {
+            double gap  = target - along;
+            double ease = fmax(SETTLE_ACCEL * dt, fabs(gap) * (1.0 - exp(-SETTLE_RATE * dt)));
+            double step = fmin(fabs(gap), fmin(most, ease));
+            along += (float)(gap < 0.0 ? -step : step);
+            // (a gravity well ahead holds the ship to its limit whatever the engines could manage)
+            along = (float)fmax(-drive.cruiseLimit, fmin(drive.cruiseLimit, (double)along));
         }
-        if (fabsf(was) <= MAX_SPEED) along = (float)fmax(-limit, fmin(limit, (double)along));   // (wells ahead, and 0.99 c)
         s.vel = Vector3Add(Vector3Scale(fwd, along), drift);
 
         float sp = Vector3Length(s.vel);
         if (s.allStop && sp < 0.01f) { s.vel = Vector3Zero(); s.allStop = false; }
 
-        // How hard the engines worked, for power: coasting is free
-        double work = fabs((double)along - was) / fmax(most, 1e-9);
-        s.thrustUse = fabsf(was) > MAX_SPEED || s.dropout || work < 1e-3 ? 0.0f : (float)fmin(work, 1.0);
+        // How hard the engines worked, for power: any change of speed or heading is a burn; holding is free
+        double work = Vector3Length(Vector3Subtract(s.vel, before)) / fmax(most, 1e-9);
+        s.thrustUse = shedding || work < 1e-3 ? 0.0f : (float)fmin(work, 1.0);
     }
 
     s.pos = s.pos + ToD(s.vel) * (double)dt;

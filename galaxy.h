@@ -53,6 +53,7 @@ const double FIELD_EDGE_MARGIN   = 1.35;    // field radius = outermost orbit * 
 const double FIELD_HEIGHT_RATIO  = 0.10;    // field half-thickness = radius * this
 const double LOAD_DISTANCE_LY    = 0.5;     // load a system's planets within this of its star...
 const double UNLOAD_DISTANCE_LY  = 0.6;     // ...unload beyond this (hysteresis)
+const double OUTPOST_ORBIT       = 0.22;    // sensor outposts sit well inside the system: this far out, as a share of the gravity field's radius
 const double BELT_DENSITY        = 3.0e-10; // rocks per cubic unit at a belt's core (~250 within 30 km)
 const double RING_DENSITY        = 6.0e-9;  // ring chunks are smaller and packed tighter
 const unsigned DEFAULT_GALAXY_SEED = 1977;
@@ -105,6 +106,8 @@ enum class Settlement : int8_t {
     Starbase,           // the great port over a core world
     SolarCollector,     // close in to a star, beaming its power out
     Greenhouse,         // feeding a colony that can't feed itself
+    SensorOutpost,      // a state's tachyon early-warning station, one of several around a system (sensors.h): a military
+                        // installation, with pickets on guard; nobody trades there
 };
 
 // What a world has to offer, each 0 (none) to 1 (rich). Settlements go where

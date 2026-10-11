@@ -3,7 +3,7 @@
 // A ship is a hull with parts fitted in it. A hull is so many cubic metres of
 // room inside and so many hardpoints outside; every part takes room and adds
 // mass, and the ones that work on the outside (engines, thrusters, lasers,
-// scoops) take a hardpoint each. Anything that fits can go in: what the ship
+// scoops, radar, infrared arrays, telescopes) take a hardpoint each. Anything that fits can go in: what the ship
 // can then DO is whatever its parts add up to (SpecOf gives the ShipSpec the
 // flight model flies by).
 //
@@ -20,7 +20,13 @@
 
 enum class PartType : uint8_t {
     Reactor, Engine, Thrusters, HyperDrive, WarpDrive, DriveCap, Bank,
-    Tank, Hold, MiningLaser, Scoop, Skimmer, Scanner, Count
+    Tank, Hold, MiningLaser, Scoop, Skimmer,
+    // Sensors (sensors.h): each sees its own way
+    Telescope,          // visual: short-ranged, but it's what tells you who a ship is; it charts worlds too
+    Radar,              // active: finds anything in reach, and anyone can hear it
+    IrArray,            // passive: sees heat, so a ship working hard shows from far off and a cold one hardly at all
+    TachyonDetector,    // catches the burst a warp bubble gives off when it collapses, and the direction it came from
+    Count
 };
 const int PART_SIZES  = 6;          // 1 .. 6
 const int PART_GRADES = 4;          // 0 standard .. 3 elite

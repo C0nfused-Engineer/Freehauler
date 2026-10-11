@@ -53,6 +53,7 @@ const char *SettlementName(Settlement s)
     case Settlement::OreTerminal:       return "Ore terminal";
     case Settlement::OreRefinery:       return "Ore refinery";
     case Settlement::Waystation:        return "Waystation";
+    case Settlement::SensorOutpost:     return "Sensor outpost";
     case Settlement::Freeport:          return "Freeport";
     case Settlement::Starbase:          return "Starbase";
     case Settlement::SolarCollector:    return "Solar collector";
@@ -893,6 +894,35 @@ static void GenerateStations(const StarSystem &sys, LoadedSystem &out)
         double r = fmax(sys.hzIn * in, 4.0 * out.bodies[0].radius);
         add(sys.name + " Solar Array", (sys.u * cos(ang3) + sys.v * sin(ang3)) * r, 0, Mix64(sys.seed ^ 0x501A2ull),
             Settlement::SolarCollector, Econ::Power, 2.2, 3.2, SOLAR);
+    }
+
+    // A state's sensor network: tachyon early-warning stations around the system, so that between them a ship
+    // dropping out of warp can be placed, not just noticed (sensors.h). Wherever a government rules and there's
+    // enough to watch over; a lone colony makes do with the one detector it has at home. They are big military
+    // installations, and they're kept well inside the system: anything coming for them has a long way to come from
+    // the edge, and is seen on the way. Nobody lives there in the ordinary sense, and they come last in the list,
+    // so nothing else's place in it changes.
+    bool lived = false;
+    for (const Body &b : out.bodies) if (b.population > 0) lived = true;
+    if (sys.ruler != NO_FACTION && lived && dev >= 0.3) {
+        Gen og(sys.seed ^ 0x5E4502ull);
+        const int n = dev >= 0.6 ? 4 : 3;
+        double a0 = og.uni(0, 2 * PI);
+        for (int k = 0; k < n; k++) {
+            Body s;
+            // Three around the plane, a third of a turn apart; a fourth, where there is one, high over the star
+            double a = a0 + k * (2 * PI / 3.0) + og.uni(-0.15, 0.15);
+            s.local = k < 3 ? (sys.u * cos(a) + sys.v * sin(a)) * (OUTPOST_ORBIT * sys.fieldR) + sys.n * (og.uni(-0.2, 0.2) * sys.fieldH)
+                            : sys.n * (0.8 * sys.fieldH) + (sys.u * cos(a) + sys.v * sin(a)) * (0.03 * sys.fieldR);
+            s.name = sys.name + TextFormat(" Sensor Outpost %c", 'A' + k);
+            s.kind = Kind::Station; s.parent = 0; s.id = Mix64(sys.seed ^ (0x5E4500ull + k));
+            s.radius = og.uni(320.0, 440.0); s.orbit = Len(s.local - out.bodies[0].local);     // (about two kilometres across)
+            s.lines = { 170, 255, 225, 255 }; s.fill = BLACK;
+            s.settlement = Settlement::SensorOutpost; s.type = SettlementName(s.settlement); s.econ = Econ::None;
+            s.atmosphere = "Pressurized"; s.water = "Recycled"; s.life = "None";
+            s.tempK = 293.0;
+            out.bodies.push_back(s);
+        }
     }
 }
 

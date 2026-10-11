@@ -56,6 +56,7 @@ bool SearchHold(World &w, Captain &c, int law, const std::string &who);
 
 // For the screens
 const char *ContractKindName(ContractKind k);
+std::string ContractLabel(const Contract &k);                              // ...which is "Smuggling" for anything that carries contraband
 std::string ContractTitle(const Contract &k);                              // "Haul 40 t Steel to Halagon b"
 std::string ContractTerms(const FactionSet &fs, const Contract &k);        // what it wants of you first: "Traders' Guild members; Resident"
 // Why this captain can't take it ("" if they can)

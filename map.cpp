@@ -7,6 +7,7 @@
 #include "format.h"
 #include "targetinfo.h"
 #include "theme.h"
+#include "sensors.h"
 #include <algorithm>
 
 static const Color UNKNOWN = { 130, 130, 130, 255 };
@@ -199,6 +200,40 @@ public:
             } else if (b.kind == Kind::Station && b.parent == 0 && known) {
                 DrawRectangleLines((int)p.x - 3, (int)p.y - 3, 7, 7, b.lines);
             }
+        }
+
+        // What the sensors hold: ships (grey until identified, fading once lost), and bearings: a tachyon burst is
+        // somewhere along its line, a network's fix is a place
+        for (const Traffic &t : g.traffic) {
+            if (t.ship.anchor != S.index) continue;
+            Vector2 p = plot.At(t.ship.pos);
+            Color col = t.level < CONTACT_IDENTIFIED ? (t.level >= CONTACT_CLASSIFIED ? Color{ 170, 170, 170, 255 } : Color{ 120, 120, 120, 255 })
+                      : t.npc ? STANCE_FILL[t.stance & 3] : CaptainColor(t.id);
+            if (t.ghost) col = Fade(col, 0.2f + 0.5f * Clamp(1.0f - t.age / (float)GHOST_TIME, 0.0f, 1.0f));
+            DrawLineV({ p.x, p.y - 4 }, { p.x + 4, p.y }, col); DrawLineV({ p.x + 4, p.y }, { p.x, p.y + 4 }, col);
+            DrawLineV({ p.x, p.y + 4 }, { p.x - 4, p.y }, col); DrawLineV({ p.x - 4, p.y }, { p.x, p.y - 4 }, col);
+        }
+        for (const SensorMark &m : g.marks) {
+            if (m.anchor != S.index) continue;
+            float fade = m.kind == MARK_RADAR ? 1.0f : 0.25f + 0.75f * Clamp(1.0f - (float)((g.clock - m.at) / MARK_TIME), 0.0f, 1.0f);
+            if (m.kind == MARK_FIX) {
+                Vector2 p = plot.At(m.from);
+                float r = fmaxf(6.0f, Vector2Distance(p, plot.At(m.from + sys.u * m.rLo)));
+                DrawCircleLinesV(p, r, Fade(MARK_FIX_COLOR, fade));
+                DrawLineV({ p.x - 4, p.y }, { p.x + 4, p.y }, Fade(MARK_FIX_COLOR, fade)); DrawLineV({ p.x, p.y - 4 }, { p.x, p.y + 4 }, Fade(MARK_FIX_COLOR, fade));
+                DrawText("FIX", (int)p.x + (int)r + 4, (int)p.y - 6, 12, Fade(MARK_FIX_COLOR, fade));
+                continue;
+            }
+            Color col = Fade(m.kind == MARK_RADAR ? MARK_RADAR_COLOR : MARK_TACHYON_COLOR, fade);
+            double lo = m.kind == MARK_RADAR ? 0.0 : m.rLo, hi = m.kind == MARK_RADAR ? 4.0 * AU_U : m.rHi;
+            Vector2 prev = plot.At(m.from + m.dir * lo);
+            DrawDotted(plot.At(m.from), prev, Fade(col, 0.5f));    // (from where it was taken, out to the nearest it could be)
+            for (int k = 1; k <= 16; k++) {                         // (the plot is on a log scale: a straight line bends)
+                Vector2 next = plot.At(m.from + m.dir * (lo + (hi - lo) * k / 16.0));
+                DrawLineEx(prev, next, m.kind == MARK_RADAR ? 1.0f : 2.0f, col);
+                prev = next;
+            }
+            DrawText(m.kind == MARK_RADAR ? "RADAR" : "TACHYON", (int)prev.x + 5, (int)prev.y - 6, 12, col);
         }
 
         // The ship, its heading, and the course

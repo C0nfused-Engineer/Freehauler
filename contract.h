@@ -38,6 +38,7 @@ struct Contract {
     int      against = NO_FACTION;      // aimed at this faction: it will think less of you
     int      effectOn = NO_FACTION;
     int      licence = NO_FACTION;      // needs a bonded carrier's licence from this government
+    int      law = NO_FACTION;          // the cargo is contraband under this government, whose space it starts or ends in: smuggling
     float    minStanding = 0.0f;        // the least standing with the issuer (or the guild) to be given it
     bool     wide = false;              // on its faction's list as well as the station's board
 

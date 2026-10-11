@@ -158,7 +158,7 @@ public:
             std::string sub;
             Color sc = HUD_LABEL;
             if (board) {
-                sub = std::string(ContractKindName(k.kind)) + "  -  " + (who ? who->name : k.fromName) + "  -  " + FormatETA(k.allowed) + " allowed";
+                sub = ContractLabel(k) + "  -  " + (who ? who->name : k.fromName) + "  -  " + FormatETA(k.allowed) + " allowed";
             } else {
                 double left = k.deadline - g.clock;
                 sub = JobStatus(g, g, k) + "  -  " + (left >= 0.0 ? FormatETA(left) + " left" : "LATE: half pay, fails in " + FormatETA(left + 0.5 * k.allowed));
@@ -186,7 +186,7 @@ public:
             while (title.size() > 4 && MeasureText(title.c_str(), 20) > right - dx) title = title.substr(0, title.size() - 4) + "...";
             DrawText(title.c_str(), dx, y, 20, WHITE); y += 32;
             const Faction *issuer = fs.Get(k.issuer);
-            line("Kind", ContractKindName(k.kind));
+            line("Kind", ContractLabel(k), k.law != NO_FACTION ? ORANGE : LIGHTGRAY);
             line("Offered by", issuer ? issuer->name : k.fromName + " (independent)", issuer ? issuer->color : LIGHTGRAY);
             if (k.kind == ContractKind::Survey) {
                 line("Survey", Place(g, k.surveyName, k.surveySys));
@@ -211,7 +211,8 @@ public:
             default: break;
             }
             if (const Faction *a = fs.Get(k.against)) line("Against", a->name + " will think less of you", ORANGE);
-            if (k.kind == ContractKind::Smuggling) line("Risk", "Customs at lawful ports may search your hold", ORANGE);
+            if (k.law != NO_FACTION && k.good >= 0)
+                line("Risk", std::string(GoodData(k.good).name) + " is contraband in " + fs.Name(k.law) + " space: customs and patrols seize it", ORANGE);
             std::string terms = ContractTerms(fs, k);
             if (!terms.empty()) line("Open to", terms);
             y += 8;

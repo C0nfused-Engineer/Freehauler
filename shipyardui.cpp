@@ -7,6 +7,7 @@
 #include "format.h"
 #include "shipyard.h"
 #include "theme.h"
+#include "sensors.h"
 #include <algorithm>
 
 class OutfitWindow : public Window {
@@ -169,7 +170,7 @@ public:
         if (top[1] + VISIBLE < n) DrawText("v more", px + pw - 90, y + VISIBLE * ROW_H - 6, 14, HUD_DIM);
 
         // --- What it all adds up to ---
-        int by = py + ph - 142;
+        int by = py + ph - 164;
         DrawLine(px + 18, by - 6, px + pw - 18, by - 6, HUD_DIM);
         double mass = p.Mass(), full = s.dryMass + s.tank + s.hold;
         auto to99 = [&](double m) { return s.thrust > 0.0 ? 7.02 * LIGHT_SEC_U / (THRUST_K * s.thrust / m) : 0.0; };
@@ -184,7 +185,11 @@ public:
         double burn = s.reactorMW > 0.0 ? s.reactorMW / (s.reactorEff * s.fuelMJ) : 0.0;
         line(c2, by + 22, TextFormat("flat out it burns %.2f t/s: %.0f min on a tank", burn, burn > 0.0 ? s.tank / burn / 60.0 : 0.0));
         line(c2, by + 44, TextFormat("CAPACITORS  bank %.0f MJ, drive %.0f MJ", s.bankMJ, s.driveCapMJ));
-        line(c2, by + 66, TextFormat("GEAR  laser %.1f t/s  scoop %.1f  skim %.2f  scan %.1fx", s.laserRate, s.scoopRate, s.skimRate, s.scan));
+        line(c2, by + 66, TextFormat("GEAR  laser %.1f t/s  scoop %.1f  skim %.2f", s.laserRate, s.scoopRate, s.skimRate));
+        // (how far each sensor finds a hauler going about its business; and how far off this ship is found the same way)
+        line(c1, by + 88, TextFormat("SENSORS  radar %.2f AU   infrared %.2f AU   telescope %.2f AU   tachyon detector %.0f m3 at %.0f%%      SEEN  by radar at %.2f AU, by eye at %.2f AU",
+                                     RadarRange(s.radar, 1.0) / AU_U, IrRange(s.ir, HEAT_REF) / AU_U, ScopeRange(s.scan, 1.0) / AU_U, s.tachArea * s.tachDepth, s.tachEff * 100.0,
+                                     RadarRange(1.0, s.hullSize) / AU_U, ScopeRange(1.0, s.hullSize) / AU_U));
         double spare = s.reactorMW - s.idleMW;
         if (s.hyperSpeed > 0.0) {
             double need = DrivePower(s, s.hyperSpeed, full, false);

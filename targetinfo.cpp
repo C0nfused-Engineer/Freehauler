@@ -1,6 +1,8 @@
 // targetinfo.cpp - the facts shown about a target
 #include "targetinfo.h"
 #include "npcs.h"
+#include "sensors.h"
+#include "shipparts.h"
 #include "economy.h"
 #include "format.h"
 
@@ -260,10 +262,24 @@ static std::vector<InfoRow> ZoneBasics(const Captain &c, const Zone &z)
 static std::vector<InfoRow> ShipRows(const World &w, const Captain &c, const Traffic &t)
 {
     float speed = Vector3Length(t.ship.vel);
+    // What the sensors have made of it so far (sensors.h)
+    if (t.ghost)
+        return { { "Contact", "Lost" }, { "Was", t.name }, { "Last seen", TextFormat("%.0f s ago", t.age) }, { "Speed then", FormatSpeed(speed) } };
+    if (t.level < CONTACT_IDENTIFIED) {
+        std::vector<InfoRow> rows = { { "Contact", t.name }, { "Known", ContactLevelName(t.level) }, { "Held by", SensedBy(t.by) } };
+        if (t.level >= CONTACT_CLASSIFIED) {
+            rows.push_back({ "Type", t.npc ? NpcKindName(t.kind) : "Ship" });
+            rows.push_back({ "Hull", Hull(t.hull).name });
+        }
+        rows.push_back({ "Speed", FormatSpeed(speed) });
+        rows.push_back({ "To identify", "Bring it within telescope range (" + FormatPlanetDist(ScopeRange(c.player.spec.scan, t.level >= CONTACT_CLASSIFIED ? Hull(t.hull).volume / Hull(HULL_HAULER).volume : 1.0)) + ")" });
+        return rows;
+    }
     if (t.npc) {
         static const char *looks[] = { "Allied", "Neutral", "Alerted: it has taken an interest in you", "Hostile" };
         std::vector<InfoRow> rows = { { "Ship", t.name }, { "Type", NpcKindName(t.kind) }, { "Flag", w.systems.factions.Name(t.faction) },
-                                      { "Towards you", looks[t.stance & 3] }, { "Speed", FormatSpeed(speed) } };
+                                      { "Towards you", looks[t.stance & 3] }, { "Speed", FormatSpeed(speed) },
+                                      { "Hull", Hull(t.hull).name }, { "Held by", SensedBy(t.by) } };
         if (!t.from.empty() && t.kind == NpcKind::Freighter) rows.push_back({ "Out of", t.from });
         if (!t.dest.empty()) rows.push_back({ t.kind == NpcKind::Miner ? "Works from" : "Bound for", t.dest });
         if (t.kind == NpcKind::Freighter || t.kind == NpcKind::Miner) {

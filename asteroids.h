@@ -11,8 +11,10 @@
 #include <vector>
 
 const double AST_CELL        = 2000.0;      // 10 km cells
-const int    AST_CELL_RANGE  = 3;           // cells generated in each direction around the ship
-const double AST_DRAW_RANGE  = 6000.0;      // rocks drawn (and targetable) out to 30 km
+const int    AST_CELL_RANGE  = 7;           // cells generated in each direction around the ship (70 km)
+const double AST_DRAW_RANGE  = 14000.0;     // rocks seen out to 70 km: specks at first, fading in, then shapes as they near
+const double AST_SHAPE_SIZE  = 0.0015;      // a rock is drawn as its shape (and can be targeted) once it looks this big (radius over distance)
+const double AST_KEEP_CLEAR  = 600.0;       // no rocks within a station's own size and this much more (3 km) of it
 const double AST_TARGET_MAX_SPEED = 2000.0; // rocks are visible at any speed, targetable below 10 km/s
 const int    AST_TEMPLATES   = 16;          // distinct procedural rock shapes
 
@@ -34,6 +36,8 @@ using CellKey = std::array<long long, 3>;
 struct AsteroidField {
     SysId system = NO_SYSTEM;                          // loaded system the cells belong to
     std::map<CellKey, std::vector<Asteroid>> cells;    // generated cells around the ship
+    CellKey centre = { 0, 0, 0 };                      // ...which was in this cell when they were last brought up to date
+    bool    fresh = false;
 };
 
 // Which ore a rock of this composition holds, for a uniform draw u in [0, 1)
