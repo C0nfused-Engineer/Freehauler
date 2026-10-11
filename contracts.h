@@ -50,6 +50,10 @@ bool AbandonContract(World &w, Captain &c, uint32_t id);
 bool JoinGuild(World &w, Captain &c, int faction);
 bool BuyLicence(World &w, Captain &c, int faction, int paper); // PAPER_CARRIER or PAPER_PERMIT
 
+// A search of the hold under a government's law, by 'who': what it bans is seized, with a fine and a black mark.
+// False if there was nothing to find (or the captain holds its permit).
+bool SearchHold(World &w, Captain &c, int law, const std::string &who);
+
 // For the screens
 const char *ContractKindName(ContractKind k);
 std::string ContractTitle(const Contract &k);                              // "Haul 40 t Steel to Halagon b"

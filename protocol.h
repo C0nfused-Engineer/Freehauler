@@ -30,7 +30,7 @@
 #include <vector>
 
 const uint32_t PROTOCOL_MAGIC   = 0x31504D53;   // "SMP1"
-const uint16_t PROTOCOL_VERSION = 10;           // bump when anything below changes (10: contracts)
+const uint16_t PROTOCOL_VERSION = 14;           // bump when anything below changes (14: ships built from parts)
 const uint16_t DEFAULT_PORT     = 23500;
 const int      MAX_PACKET       = 1400;         // stays under a typical 1500-byte MTU
 const int      MAX_MESSAGE      = 1100;         // biggest reliable message
@@ -129,6 +129,8 @@ enum MsgType : uint8_t {
     MSG_JOBS,               // your contracts start again (each follows)
     MSG_JOB,                // a contract you hold
     MSG_PAPERS,             // u8 n, n x u8: your memberships and licences, by faction
+    MSG_BUILD,              // your ship: i32 hull, u8 stretch, u8 mounts, u8 n, n x (i32 part, i16 maker)
+    MSG_NPC,                // an NPC ship now on your scope: i32 id, u8 kind, i32 faction, str name, str from, str dest, i32 good, f32 tonnes
 };
 
 // Unreliable payload types (first byte after the reliable section)
@@ -155,7 +157,8 @@ std::vector<std::vector<uint8_t>> MsgMined(const MinedMap &m); // split into mes
 // ---------------------------------------------------------------------------
 // Snapshots: the server's view, 30 times a second
 // ---------------------------------------------------------------------------
-const int SNAPSHOT_MAX_SHIPS = 14;          // nearest others per snapshot (keeps it in one packet)
+const int SNAPSHOT_MAX_SHIPS = 40;          // most other ships per snapshot...
+const int SNAPSHOT_SHIP_BYTES = 950;        // ...and the room they may take (keeps it in one packet): captains first, then the nearest NPCs
 
 struct Snapshot {
     uint32_t tick = 0;                      // server tick it was taken on

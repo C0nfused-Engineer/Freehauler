@@ -4,6 +4,7 @@
 #include "economy.h"
 #include "format.h"
 #include "save.h"
+#include "shipyard.h"
 #include "targetinfo.h"
 #include "theme.h"
 #include <algorithm>
@@ -27,6 +28,7 @@ Controls ReadFlightControls(const InputFrame &in, float frameDt, const Settings 
     c.hyper   = in.Down(KEY_LEFT_SHIFT) || in.Down(KEY_RIGHT_SHIFT);
     c.fire    = in.MouseDown(MOUSE_BUTTON_LEFT);
     c.toggleDampeners = in.Pressed(KEY_CAPS_LOCK);
+    c.cyclePower = in.Pressed(KEY_X);                  // travel / combat / defence
     return c;
 }
 
@@ -178,10 +180,10 @@ public:
                 else if (mk.role[gd] == Role::Trade)    { tag = "traded"; tc = HUD_DIM; }
                 DrawText(tag, cx[6], ry, 16, tc);
             } else {
-                DrawText("Fuel, into the tank", cx[0], ry, 18, WHITE);
-                DrawText(TextFormat("%.1f/%.0f", p.fuel, FUEL_CAPACITY), cx[3], ry, 18, WHITE);
+                DrawText(TextFormat("%s, into the tank", GoodData(p.spec.fuelGood).name), cx[0], ry, 18, WHITE);
+                DrawText(TextFormat("%.1f/%.0f", p.fuel, p.spec.tank), cx[3], ry, 18, WHITE);
                 DrawText(mk.fuelPrice > 0.0 ? TextFormat("%.0f", mk.fuelPrice) : "none", cx[4], ry, 18, mk.fuelPrice > 0.0 ? WHITE : OFF);
-                if (mk.fuelPrice > 0.0) DrawText(TextFormat("fill: about %s", Thousands((FUEL_CAPACITY - p.fuel) * mk.fuelPrice).c_str()), cx[6] - 30, ry, 16, HUD_DIM);
+                if (mk.fuelPrice > 0.0) DrawText(TextFormat("fill: about %s", Thousands((p.spec.tank - p.fuel) * mk.fuelPrice).c_str()), cx[6] - 30, ry, 16, HUD_DIM);
             }
         }
         if (first > 0)             DrawText("^ more", px + pw - 90, py + 128, 14, HUD_DIM);
@@ -189,7 +191,7 @@ public:
         int fy = py + ph - 62;
         DrawLine(px + 18, fy - 38, px + pw - 18, fy - 38, HUD_DIM);
         DrawText(TextFormat("CREDITS  %s cr", Thousands(p.credits).c_str()), px + 30, fy, 20, HUD);
-        DrawText(TextFormat("HOLD  %.1f / %.0f t", p.CargoTotal(), CARGO_CAPACITY), px + 350, fy, 20, HUD);
+        DrawText(TextFormat("HOLD  %.1f / %.0f t", p.CargoTotal(), p.spec.hold), px + 350, fy, 20, HUD);
         DrawText(TextFormat("B: trade data, %.0f cr", TRADE_DATA_COST), px + 590, fy + 2, 16, HUD_LABEL);
         {   // What the hold of the picked good is really worth here: the price falls as you sell
             int pick = rows[std::min(row, n - 1)];
@@ -257,11 +259,18 @@ public:
                 if (open) ui.Open(MakeContractsWindow(focus));
                 else      ui.Say("Wait for the channel to open");
             }
+            if (in.Pressed(KEY_FIVE) || in.Pressed(KEY_KP_5)) {                // the yard: fitting out
+                const Body *yard = Shipyard(g);
+                if (yard && focus.index == g.flight.nearBody && CommsAnswered(g, g, focus)) { closed = true; ui.Open(MakeOutfitWindow()); }
+                else if (g.loaded.bodies[focus.index].settlement != Settlement::Shipyard && g.loaded.bodies[focus.index].settlement != Settlement::Starbase)
+                    ui.Say(g.loaded.bodies[focus.index].name + " has no yard: try a shipyard or a starbase");
+                else ui.Say("Get into docking range of " + g.loaded.bodies[focus.index].name + " to fit out");
+            }
             if (in.Pressed(KEY_BACKSPACE)) { if (open) ui.Do(g, { Command::HangUp, focus.index }); focus = {}; }
             if (in.Pressed(KEY_LEFT) || in.Pressed(KEY_TAB)) focus = {};       // back to the list; the channel stays open
         }
         for (int k : { KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_TAB, KEY_ENTER, KEY_KP_ENTER, KEY_ONE, KEY_KP_1, KEY_TWO, KEY_KP_2,
-                       KEY_THREE, KEY_KP_3, KEY_FOUR, KEY_KP_4, KEY_BACKSPACE })
+                       KEY_THREE, KEY_KP_3, KEY_FOUR, KEY_KP_4, KEY_FIVE, KEY_KP_5, KEY_BACKSPACE })
             in.Consume(k);
     }
 
@@ -359,7 +368,8 @@ public:
         int tx = x + MeasureText(asks, 16);
         const char *t = trade ? "3 TRADE  " : "3 trade (dock first)  ";
         DrawText(t, tx, py + ph - 24, 16, trade ? HUD : Fade(HUD_DIM, 0.6f));
-        DrawText("4 work  LEFT: others  BKSP hang up", tx + MeasureText(t, 16), py + ph - 24, 16, HUD_DIM);
+        bool yardHere = who.settlement == Settlement::Shipyard || who.settlement == Settlement::Starbase;
+        DrawText(yardHere ? "4 work  5 YARD  LEFT  BKSP" : "4 work  LEFT: others  BKSP hang up", tx + MeasureText(t, 16), py + ph - 24, 16, HUD_DIM);
     }
 
 private:
@@ -468,6 +478,12 @@ void Ui::HandleInput(InputFrame &in, GameState &g)
     }
     // F: comms. It hails whoever the nose is on (or whoever you're docked beside); with
     // nobody to hail it opens the list of everyone in the system. C is the list alone.
+    if (in.Pressed(KEY_F) && g.flight.selected.type == TargetId::Ship && g.flight.selected.index >= NPC_ID_BASE) {
+        Do(g, { Command::HailShip, g.flight.selected.index });
+        in.Consume(KEY_F);
+    }
+    if (in.Pressed(KEY_H)) Do(g, { Command::PayPirates });         // (hand over what a pirate has demanded)
+    if (in.Pressed(KEY_K)) Do(g, { Command::CallTanker });         // (nearly out of fuel: call for a tanker)
     if (in.Pressed(KEY_F)) {
         int who = HailTarget(g);
         const TargetId &sel = g.flight.selected;

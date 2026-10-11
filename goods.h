@@ -78,8 +78,13 @@ inline const GoodInfo &GoodData(int g)
         { "Chemicals",           CHEM,                    130, false, { { ORE_VOLATILES, 1.0f }, { ORE_WATER_ICE, 0.5f }, _ } },
         { "Fertilizer",          CROP,                     70, false, { { ORE_VOLATILES, 0.5f }, { ORE_CARBON, 0.5f }, _ } },
         { "Purified Water",      ICE,                      45, false, { { ORE_WATER_ICE, 1.0f }, _, _ } },
-        { "Fuel",                { 255, 230, 140, 255 },   60, false, { { RAW_HELIUM3, 0.05f }, { ORE_WATER_ICE, 0.5f }, _ } },
-        { "Reactor Fuel",        { 170, 255, 110, 255 },  600, false, { { ORE_URANIUM, 1.0f }, _, _ } },
+        // Deuterium is one hydrogen atom in 6,400, so it is made the way heavy water is: a great deal of water is
+        // run against hydrogen sulphide in hot and cold exchange towers (the Girdler process), which leaves the
+        // deuterium concentrated in the water; that is distilled, and electrolysis splits off the gas. What it
+        // costs is water, in bulk, and the chemicals to keep the towers running.
+        { "Deuterium",           { 255, 230, 140, 255 },  260, false, { { REF_WATER, 4.0f }, { REF_CHEMICALS, 0.1f }, _ } },
+        // Fission fuel: a little enriched uranium as oxide pellets, in ceramic cladding. The everyday reactor fuel.
+        { "Reactor Fuel",        { 170, 255, 110, 255 },   90, false, { { ORE_URANIUM, 0.1f }, { REF_CERAMICS, 0.3f }, _ } },
         { "Foodstuffs",          CROP,                     70, false, { { RAW_GRAIN, 0.8f }, { RAW_LIVESTOCK, 0.2f }, { REF_WATER, 0.2f } } },
         // Finished
         { "Machinery",           METAL,                   420, false, { { REF_STEEL, 1.0f }, { REF_CONDUCTORS, 0.5f }, _ } },

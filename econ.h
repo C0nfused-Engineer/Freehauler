@@ -62,6 +62,10 @@ struct MarketState {
     int   owner = NO_FACTION;
 };
 
+// Goods on the dock at 'from', waiting for a ship to 'to' (where ships carry the trade: npc.h)
+// ('since': when the last ship left for there, or when these goods started waiting)
+struct Shipment { int from = -1, to = -1; float cargo[GOOD_COUNT] = {}; float total = 0.0f; double since = 0.0; };
+
 // Something local that has knocked a market off its stride for a while
 struct Shock { int market; float supply, demand; double until; };
 
@@ -91,6 +95,29 @@ struct Economy {
     std::vector<int>    lastAct;           // (so it doesn't do the same thing twice running)
     std::vector<Shock>  shocks;
     uint64_t            dice = 1;
+
+    // Where captains are, goods go by ship (npcs.h sets 'zone' and moves what's 'waiting')
+    std::vector<uint8_t>  zone;            // by market: 0 trade is numbers; 1 its lane trade is tracked ships; 2 everything is flown
+    std::vector<Shipment> waiting;         // on the docks
+    std::vector<float>    yield;           // by market and good: dug or skimmed, not yet brought in by the miners
+    std::vector<float>    afloat;          // by market and good: on its way there (on a dock, in a hold, in 'yield')
+    void Ship(int from, int to, int good, float tonnes, double clock)
+    {
+        afloat[(size_t)to * GOOD_COUNT + good] += tonnes;
+        for (Shipment &s : waiting) if (s.from == from && s.to == to) { s.cargo[good] += tonnes; s.total += tonnes; if (clock < s.since) s.since = clock; return; }
+        Shipment s; s.from = from; s.to = to; s.cargo[good] = tonnes; s.total = tonnes; s.since = clock;
+        waiting.push_back(s);
+    }
+    // Cargo reaches its market (or, 'lost', never will)
+    void Land(int to, const float *cargo, bool lost = false)
+    {
+        for (int g = 0; g < GOOD_COUNT; g++) {
+            if (cargo[g] <= 0.0f) continue;
+            float &on = afloat[(size_t)to * GOOD_COUNT + g];
+            on = on > cargo[g] ? on - cargo[g] : 0.0f;
+            if (!lost) state[to].stock[g] += cargo[g];
+        }
+    }
 
     bool Built() const { return base != nullptr; }
     int  Count() const { return base ? (int)base->defs.size() : 0; }

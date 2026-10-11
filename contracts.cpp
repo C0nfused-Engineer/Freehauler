@@ -695,7 +695,7 @@ bool AdvanceContract(World &w, Captain &c, uint32_t id)
     if (!k.loaded) {
         if (at != k.fromBody) { Tell(w, c, "Dock at " + k.fromName + " to collect"); return false; }
         if (IssuersCargo(k.kind)) {
-            if (CARGO_CAPACITY - c.player.CargoTotal() + 1e-6 < k.tonnes) { Tell(w, c, TextFormat("Needs %.0f t of room in the hold", k.tonnes)); return false; }
+            if (c.player.spec.hold - c.player.CargoTotal() + 1e-6 < k.tonnes) { Tell(w, c, TextFormat("Needs %.0f t of room in the hold", k.tonnes)); return false; }
             c.player.cargo[k.good] += k.tonnes;
             int m = e.MarketOf(k.fromBody);
             if (m >= 0 && k.kind == ContractKind::Haulage) e.state[m].stock[k.good] = fmaxf(0.0f, e.state[m].stock[k.good] - k.tonnes);
@@ -799,17 +799,27 @@ static void Customs(World &w, Captain &c, const Body &b)
     const MarketDef &d = w.econ.base->defs[m];
     const Faction *law = w.systems.factions.Get(d.ruler);
     if (!law || (c.Papers(law->id) & PAPER_PERMIT)) return;
-    double value = 0.0, tonnes = 0.0;
-    for (int g = 0; g < GOOD_COUNT; g++)
-        if (d.banned[g] && c.player.cargo[g] > 0.05) { value += c.player.cargo[g] * GoodData(g).basePrice; tonnes += c.player.cargo[g]; }
+    double tonnes = 0.0;
+    for (int g = 0; g < GOOD_COUNT; g++) if (d.banned[g] && c.player.cargo[g] > 0.05) tonnes += c.player.cargo[g];
     if (tonnes <= 0.0) return;
     Dice dice{ Mix64(w.seed ^ b.id ^ (uint64_t)(w.clock * 10.0) ^ ((uint64_t)c.id << 40)) };
     if (dice() > 0.25 + 0.6 * law->policing) { Tell(w, c, b.name + " customs wave you in without a search"); return; }
-    for (int g = 0; g < GOOD_COUNT; g++) if (d.banned[g]) c.player.cargo[g] = 0.0;
+    SearchHold(w, c, law->id, b.name + " customs");
+}
+
+bool SearchHold(World &w, Captain &c, int lawId, const std::string &who)
+{
+    const Faction *law = w.systems.factions.Get(lawId);
+    if (!law || (c.Papers(law->id) & PAPER_PERMIT)) return false;
+    double value = 0.0, tonnes = 0.0;
+    for (int g : law->contraband)
+        if (c.player.cargo[g] > 0.05) { value += c.player.cargo[g] * GoodData(g).basePrice; tonnes += c.player.cargo[g]; c.player.cargo[g] = 0.0; }
+    if (tonnes <= 0.0) return false;
     double fine = fmin(c.player.credits, 0.5 * value);
     c.player.credits -= fine;
     Bump(w, c, law->id, -fmin(12.0, 4.0 + value / 5000.0));
-    Tell(w, c, TextFormat("%s customs searched the hold: %.0f t of contraband seized, fined %s cr", b.name.c_str(), tonnes, Thousands(fine).c_str()));
+    Tell(w, c, TextFormat("%s searched the hold: %.0f t of contraband seized, fined %s cr", who.c_str(), tonnes, Thousands(fine).c_str()));
+    return true;
 }
 
 void StepContracts(World &w, Captain &c)

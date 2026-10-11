@@ -74,6 +74,7 @@ inline bool BuyFuel(GameState &g, double qty)             { return BuyFuel(g, g,
 // The economy itself (UpdateEconomy is declared in game.h: the world's step calls it)
 void   EnsureEconomy(World &w);                 // builds it on first use
 double MarketPrice(const World &w, int market, int good);     // mid price right now; 0 if it isn't traded there
+double RaidLevel(const World &w, DVec3 ly);     // how hard the clans are hitting shipping at a place (light years from home): 0 .. 1
 void   StepEconomy(World &w, double days);      // (tests: run it forward without the clock)
 void   PostNews(World &w, int faction, SysId where, const std::string &text);   // a headline (NO_FACTION: local news)
 

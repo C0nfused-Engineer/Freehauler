@@ -16,6 +16,7 @@
 //   standing <faction> <-100..100>   (one line per faction you have any standing with)
 //   prices ...                       (one line per market you have prices for)
 //   econ / stock / owner / faction / embargo / shock / news ...   (the economy: see WriteEconomy)
+//   hull / part                                                   (your ship: see WriteBuild)
 //   papers / job / boardseen / offer                              (your contracts and licences: see WriteCaptainContracts)
 //   contractseq / boardmade / contract                            (the contracts on offer: see WriteContracts)
 //   end
@@ -23,6 +24,7 @@
 #include "save.h"
 #include "contracts.h"
 #include "economy.h"
+#include "shipyard.h"
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -71,6 +73,7 @@ bool SaveGame(const GameState &g, const char *path, const std::string &name)
     for (uint64_t id : g.know.scanned) fprintf(f, "scanned %llu\n", (unsigned long long)id);
     for (size_t i = 0; i < g.standing.size(); i++) if (g.standing[i] != 0.0f) fprintf(f, "standing %d %.9g\n", (int)i, g.standing[i]);
     std::string econ;
+    WriteBuild(g, econ);
     WritePrices(g, econ);
     WriteEconomy(g, econ);
     WriteCaptainContracts(g, econ);
@@ -130,7 +133,7 @@ bool LoadGame(GameState &g, const char *path)
         } else if (!strcmp(key, "charted")) {
             long long sys;
             if (sscanf(rest, "%lld", &sys) == 1) know.charted.insert(sys);
-        } else if (ReadPriceLine(scratch, key, rest) || ReadCaptainContractLine(scratch, key, rest)) {
+        } else if (ReadPriceLine(scratch, key, rest) || ReadCaptainContractLine(scratch, key, rest) || ReadBuildLine(scratch, key, rest)) {
         } else if (!strcmp(key, "econ") || !strcmp(key, "stock") || !strcmp(key, "owner") || !strcmp(key, "faction") ||
                    !strcmp(key, "embargo") || !strcmp(key, "shock") || !strcmp(key, "news") || !strcmp(key, "contractseq") ||
                    !strcmp(key, "boardmade") || !strcmp(key, "contract")) {
@@ -163,7 +166,10 @@ bool LoadGame(GameState &g, const char *path)
     fresh.offers        = std::move(scratch.offers);
     fresh.boards        = std::move(scratch.boards);
     fresh.papers        = std::move(scratch.papers);
+    p.build = scratch.player.build;                 // (a save from before ships were built from parts: the starter ship)
     fresh.player        = p;
+    Refit(fresh);
+    fresh.player.power.bank = fresh.player.spec.bankMJ; fresh.player.power.driveCap = fresh.player.spec.driveCapMJ;
     fresh.deltas.mined  = std::move(mined);
     fresh.shipName      = shipName;
     fresh.know.charted.insert(know.charted.begin(), know.charted.end());   // (on top of home, which a new game already has)

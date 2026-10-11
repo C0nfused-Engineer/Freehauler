@@ -1,5 +1,6 @@
 // targetinfo.cpp - the facts shown about a target
 #include "targetinfo.h"
+#include "npcs.h"
 #include "economy.h"
 #include "format.h"
 
@@ -256,9 +257,24 @@ static std::vector<InfoRow> ZoneBasics(const Captain &c, const Zone &z)
 }
 
 // Another captain's ship
-static std::vector<InfoRow> ShipRows(const World &w, const Traffic &t)
+static std::vector<InfoRow> ShipRows(const World &w, const Captain &c, const Traffic &t)
 {
     float speed = Vector3Length(t.ship.vel);
+    if (t.npc) {
+        static const char *looks[] = { "Allied", "Neutral", "Alerted: it has taken an interest in you", "Hostile" };
+        std::vector<InfoRow> rows = { { "Ship", t.name }, { "Type", NpcKindName(t.kind) }, { "Flag", w.systems.factions.Name(t.faction) },
+                                      { "Towards you", looks[t.stance & 3] }, { "Speed", FormatSpeed(speed) } };
+        if (!t.from.empty() && t.kind == NpcKind::Freighter) rows.push_back({ "Out of", t.from });
+        if (!t.dest.empty()) rows.push_back({ t.kind == NpcKind::Miner ? "Works from" : "Bound for", t.dest });
+        if (t.kind == NpcKind::Freighter || t.kind == NpcKind::Miner) {
+            // A manifest can be read from close by
+            double d = Len(FromShip(w.systems, c.player.ship, t.ship.anchor, t.ship.pos));
+            if (d > CARGO_SCAN_RANGE)   rows.push_back({ "Cargo", "Unknown - scan from within 1,000 km" });
+            else if (t.tonnes < 0.5f)   rows.push_back({ "Cargo", "Empty" });
+            else rows.push_back({ "Cargo", TextFormat("%.0f t, mostly %s", t.tonnes, t.good >= 0 ? GoodData(t.good).name : "sundries") });
+        }
+        return rows;
+    }
     const char *drive = !t.hyper ? (speed > MAX_SPEED * 1.01f ? "Spooling down" : "Cruise")
                                  : (speed > HYPER_SPEED * 1.01 ? "Warp" : "Hyper");
     return { { "Ship", t.shipName.empty() ? std::string("(unnamed)") : t.shipName },
@@ -290,7 +306,7 @@ std::vector<InfoRow> TargetInfo(const World &w, const Captain &c, TargetId t)
                      { "Remaining", TextFormat("%.1f of %.0f t", a->oreLeft, a->oreMax) } };
         return {};
     case TargetId::Ship:
-        if (const Traffic *other = w.FindTraffic(t.index)) return ShipRows(w, *other);
+        if (const Traffic *other = w.FindTraffic(t.index)) return ShipRows(w, c, *other);
         return {};
     default:
         return {};

@@ -2,6 +2,8 @@
 #include "server.h"
 #include "contracts.h"
 #include "economy.h"
+#include "npcs.h"
+#include "shipyard.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -143,6 +145,12 @@ void Server::Tick()
         world.traffic.push_back(t);
     }
 
+    {   // The other ships, around wherever the captains are
+        std::vector<Captain *> caps;
+        for (auto &p : peers) if (p->joined && !p->remove) caps.push_back(&p->cap);
+        StepTraffic(world, caps.data(), (int)caps.size(), STEP);
+    }
+
     // Each captain moves through the input steps its client has sent, in order. Normally
     // that's one per tick; after a hiccup (a late packet) a few at once, to catch up.
     for (auto &pp : peers) {
@@ -220,6 +228,13 @@ void Server::Tick()
                 w.U8(MSG_JOBS);
                 p->conn.Send(w.buf);
                 for (const Contract &k : p->cap.jobs) p->conn.Send(MsgContract(MSG_JOB, k));
+            }
+            {   // Their ship, when it's been changed
+                Writer w;
+                const ShipBuild &b = p->cap.player.build;
+                w.U8(MSG_BUILD); w.I32(b.hull); w.U8(b.stretch); w.U8(b.mounts); w.U8((uint8_t)std::min<size_t>(b.parts.size(), 255));
+                for (size_t i = 0; i < b.parts.size() && i < 255; i++) { w.I32(PackPart(b.parts[i])); w.I16(b.parts[i].maker); }
+                if (w.buf != p->buildSent) { p->conn.Send(w.buf); p->buildSent = w.buf; }
             }
             if (p->cap.papers != p->papersSent) {
                 Writer w;
@@ -391,7 +406,10 @@ void Server::Join(Peer &p, const std::string &name, const std::string &ship)
     bool returning = LoadPlayer(name, saved, p.cap);
     for (const auto &b : p.cap.boards) p.cap.boardsToSend.push_back(b.first);      // (what they'd read of the boards, back to their client)
     if (returning) {
+        saved.build = p.cap.player.build;           // (LoadPlayer read the ship straight into the captain)
         p.cap.player = saved;
+        Refit(p.cap);
+        p.cap.player.power.bank = p.cap.player.spec.bankMJ; p.cap.player.power.driveCap = p.cap.player.spec.driveCapMJ;
         p.cap.loaded = LoadedSystem();
         p.cap.field  = AsteroidField();
         UpdateLoadedSystem(world, p.cap);
@@ -476,9 +494,23 @@ void Server::SendPackets(double now)
             s.lockSuppressed = c.flight.lockSuppressed; s.lockBreak = c.flight.lockBreak;
             s.retargetCooldown = c.flight.retargetCooldown;
             s.miningActive = c.flight.miningActive; s.miningRock = c.flight.miningRock; s.miningStatus = c.flight.miningStatus;
-            for (const Traffic &t : world.traffic) if (t.id != c.id) s.others.push_back(t);
+            for (const Traffic &t : world.traffic)
+                if (t.id != c.id && (!t.npc || t.ship.anchor == c.loaded.index)) s.others.push_back(t);
             auto dist = [&](const Traffic &t) { return Len(FromShip(world.systems, c.player.ship, t.ship.anchor, t.ship.pos)); };
-            std::sort(s.others.begin(), s.others.end(), [&](const Traffic &a, const Traffic &b) { return dist(a) < dist(b); });
+            std::sort(s.others.begin(), s.others.end(), [&](const Traffic &a, const Traffic &b) { return a.npc != b.npc ? !a.npc : dist(a) < dist(b); });
+            if (s.others.size() > (size_t)SNAPSHOT_MAX_SHIPS) s.others.resize(SNAPSHOT_MAX_SHIPS);
+            if (p.npcTold.size() > 4000) p.npcTold.clear();
+            for (Traffic &t : s.others) {
+                if (!t.npc) continue;
+                t.stance = TrafficStance(world, c, t);
+                auto told = p.npcTold.find(t.id);
+                if (told != p.npcTold.end() && told->second == t.tonnes) continue;
+                p.npcTold[t.id] = t.tonnes;
+                Writer m;
+                m.U8(MSG_NPC); m.I32(t.id); m.U8((uint8_t)t.kind); m.I32(t.faction); m.Str(t.name, 60); m.Str(t.from, 60); m.Str(t.dest, 60);
+                m.I32(t.good); m.F32(t.tonnes);
+                p.conn.Send(m.buf);
+            }
             Writer w;
             WriteSnapshot(w, s);
             payload = std::move(w.buf);
@@ -573,6 +605,7 @@ bool Server::SavePlayer(const Captain &c)
         if (p.cargo[o] > 0.0) text += TextFormat("cargo %d %.17g\n", o, p.cargo[o]);
     for (size_t i = 0; i < c.standing.size(); i++)
         if (c.standing[i] != 0.0f) text += TextFormat("standing %d %.9g\n", (int)i, c.standing[i]);
+    WriteBuild(c, text);
     WriteCaptainContracts(c, text);
     text += "end\n";
     return WriteFileSafely(PlayerPath(c.name), text);
@@ -593,7 +626,7 @@ bool Server::LoadPlayer(const std::string &name, Player &out, Captain &cap)
             int damp = 1, ore; double t;
             long long anchor = -1;
             char key[32] = "";
-            if (sscanf(line, "%31s", key) == 1 && ReadCaptainContractLine(cap, key, line + strlen(key))) continue;
+            if (sscanf(line, "%31s", key) == 1 && (ReadCaptainContractLine(cap, key, line + strlen(key)) || ReadBuildLine(cap, key, line + strlen(key)))) continue;
             if (sscanf(line, "ship %lld %lf %lf %lf %f %f %f %f %f %f %f %d %f", &anchor, &s.pos.x, &s.pos.y, &s.pos.z,
                        &s.vel.x, &s.vel.y, &s.vel.z, &s.rot.x, &s.rot.y, &s.rot.z, &s.rot.w, &damp, &s.throttle) >= 12) {
                 s.anchor = anchor;

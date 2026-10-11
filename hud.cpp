@@ -54,7 +54,7 @@ Aim DrawNavOverlay(const GameState &g, const Ship &eye, const ViewState &v, cons
 
     // Other captains: a small name tag beside their dot, so you can find each other
     for (int i = 0; i < (int)nav.size(); i++)
-        if (scr[i].visible && nav[i].id.type == TargetId::Ship && nav[i].id != f.selected)
+        if (scr[i].visible && nav[i].id.type == TargetId::Ship && nav[i].id.index < NPC_ID_BASE && nav[i].id != f.selected)
             DrawText(nav[i].name.c_str(), (int)scr[i].pos.x + 7, (int)scr[i].pos.y - 6, 14, Fade(nav[i].color, 0.8f));
 
     // Closest body to a screen point, within HOVER_RADIUS of its disk. Ties go to the nearer body.
@@ -212,7 +212,8 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
     bool hyper = f.last.hyper;
 
     // --- Left column: ship ---
-    const char *mode = hyper ? (drive.noFuel ? "LIMPING - NO FUEL" : drive.inField ? "HYPER" : "WARP")
+    const char *mode = f.driveNone ? "NO HYPER DRIVE FITTED" : f.driveCharging ? "CHARGING FOR WARP" : f.driveTooHeavy ? "TOO HEAVY FOR THE DRIVE"
+                     : hyper ? (drive.noFuel ? "LIMPING - NO FUEL" : f.driveStarved ? "WARP - REACTOR AT ITS LIMIT" : drive.inField ? "HYPER" : "WARP")
                              : (speed > MAX_SPEED * 1.01f ? "SPOOLING DOWN" : "CRUISE");
     DrawText(("SPEED " + FormatSpeed(speed)).c_str(), 20, 20, 24, HUD);
 
@@ -220,25 +221,32 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
     // full hyper, and a marker under it for the speed the throttle is asking for
     const double GAUGE_LOW = 2.0;
     auto place = [&](double v) { return (float)Clamp((float)(log(fmax(v, GAUGE_LOW) / GAUGE_LOW) / log(WARP_SPEED / GAUGE_LOW)), 0.0f, 1.0f); };
-    double asked = ThrottleSpeed(p.ship.throttle);
+    double thrust = ThrottleThrust(p.ship.throttle);
     DrawRectangleLines(20, 52, 200, 12, HUD_DIM);
     DrawRectangle(22, 54, (int)(196 * place(speed)), 8, hyper ? HUD : HUD_DIM);
-    for (double v : { (double)MAX_SPEED, HYPER_SPEED }) { int t = 22 + (int)(196 * place(v)); DrawLine(t, 50, t, 66, HUD); }
-    int mark = 22 + (int)(196 * place(fabs(asked)));
-    DrawTriangle({ (float)mark, 65.0f }, { mark - 5.0f, 73.0f }, { mark + 5.0f, 73.0f }, asked < 0.0 ? ORANGE : HUD);
-    DrawText(mode, 228, 50, 16, hyper ? HUD : HUD_DIM);
+    for (double v : { (double)MAX_SPEED, p.spec.hyperSpeed }) { int t = 22 + (int)(196 * place(v)); DrawLine(t, 50, t, 66, HUD); }
+    if (hyper) {                                           // (under it: the speed the drive is set to run at)
+        int mark = 22 + (int)(196 * place(p.ship.ftl * (p.power.warping ? p.spec.warpSpeed : p.spec.hyperSpeed)));
+        DrawTriangle({ (float)mark, 65.0f }, { mark - 5.0f, 73.0f }, { mark + 5.0f, 73.0f }, HUD);
+    }
+    DrawText(mode, 228, 50, 16, f.driveCharging || f.driveTooHeavy || f.driveStarved || f.driveNone ? YELLOW : hyper ? HUD : HUD_DIM);
 
-    DrawText(TextFormat("THROTTLE %s%d%%   %s", asked < 0.0 ? "REV " : "", (int)(fabsf(p.ship.throttle) * 100.0f + 0.5f),
-                        FormatSpeed((float)fabs(asked)).c_str()), 20, 78, 18, asked < 0.0 ? ORANGE : HUD);
+    if (hyper) DrawText(TextFormat("DRIVE SET %d%%   field %.0f MW   [W/S]", (int)(p.ship.ftl * 100.0f + 0.5f), f.drivePower), 20, 78, 18, HUD);
+    else {
+        double accel = fabs(thrust) * THRUST_K * p.spec.thrust / p.Mass() * METERS_PER_UNIT;       // m/s^2, at low speed
+        std::string push = accel >= 9.81e4 ? TextFormat("%.0f kg", accel / 9810.0) : accel >= 98.1 ? TextFormat("%.0f g", accel / 9.81) : TextFormat("%.1f m/s2", accel);
+        DrawText(TextFormat("THROTTLE %s%d%%   %s", thrust < 0.0 ? "REV " : "", (int)(fabsf(p.ship.throttle) * 100.0f + 0.5f), push.c_str()),
+                 20, 78, 18, thrust < 0.0 ? ORANGE : HUD);
+    }
     DrawText(p.ship.dampeners ? "DAMPENERS ON" : "DAMPENERS OFF  - DRIFTING", 20, 102, 18,
              p.ship.dampeners ? HUD : ORANGE);
     int y = 126;
     if (p.ship.allStop) { DrawText("ALL STOP", 20, y, 18, YELLOW); y += 24; }
     if (hyper && drive.holding)
         { DrawText(TextFormat("ARRIVED: holding off %s", drive.limiter.c_str()), 20, y, 18, YELLOW); y += 24; }
-    else if (hyper && !drive.limiter.empty() && drive.limit < (drive.inField ? HYPER_SPEED : WARP_SPEED))
+    else if (hyper && !drive.limiter.empty() && drive.limit < (drive.inField ? p.spec.hyperSpeed : p.spec.warpSpeed) && !f.driveStarved)
         { DrawText(TextFormat("GRAVITY WELL: slowing for %s", drive.limiter.c_str()), 20, y, 18, YELLOW); y += 24; }
-    else if (!hyper && !drive.cruiseLimiter.empty() && fabs(asked) > drive.cruiseLimit)
+    else if (!hyper && !drive.cruiseLimiter.empty() && thrust > 0.0 && speed >= 0.98 * drive.cruiseLimit)
         { DrawText(TextFormat("GRAVITY WELL: slowing for %s", drive.cruiseLimiter.c_str()), 20, y, 18, YELLOW); y += 24; }
     if (f.lock.valid())          { DrawText(TextFormat("TARGET LOCK: %s", TargetName(g, f.lock).c_str()), 20, y, 18, HUD); y += 24; }
     else if (f.selected.valid()) { DrawText(TextFormat("TARGET: %s   [MMB] info", TargetName(g, f.selected).c_str()), 20, y, 18, HUD_LABEL); y += 24; }
@@ -253,8 +261,8 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
         int lines = std::min((int)held.size(), MAX_LINES) + ((int)held.size() > MAX_LINES ? 1 : 0);
         double inHold = p.CargoTotal();
         int cy = sh - 56 - 18 * lines;
-        DrawText(TextFormat("CARGO  %.1f / %.0f t", inHold, CARGO_CAPACITY), 20, cy, 18,
-                 inHold >= CARGO_CAPACITY - 1e-6 ? ORANGE : HUD);
+        DrawText(TextFormat("CARGO  %.1f / %.0f t", inHold, p.spec.hold), 20, cy, 18,
+                 inHold >= p.spec.hold - 1e-6 ? ORANGE : HUD);
         int top = cy;
         for (int i = 0; i < (int)held.size() && i < MAX_LINES; i++) {
             int o = held[i];
@@ -269,16 +277,38 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
         }
 
         // Fuel gauge and credits above the cargo
-        float frac = (float)(p.fuel / FUEL_CAPACITY);
+        float frac = (float)(p.fuel / p.spec.tank);
         Color fc = p.fuel <= 0.0 ? RED : frac < 0.2f ? ORANGE : HUD;
-        DrawText(TextFormat("FUEL   %.1f / %.0f t", p.fuel, FUEL_CAPACITY), 20, top - 26, 18, fc);
+        DrawText(TextFormat("FUEL   %.1f / %.0f t", p.fuel, p.spec.tank), 20, top - 26, 18, fc);
         DrawRectangleLines(230, top - 24, 120, 12, HUD_DIM);
         DrawRectangle(232, top - 22, (int)(116 * frac), 8, fc);
-        if (f.burn > 0.0) DrawText(TextFormat("-%.3f t/s", f.burn), 360, top - 26, 18, f.burn > HYPER_BURN * 1.01 ? ORANGE : HUD_DIM);
+        if (f.burn > 0.0) DrawText(TextFormat("-%.3f t/s", f.burn), 360, top - 26, 18, f.load > 0.9 * p.spec.reactorMW ? ORANGE : HUD_DIM);
         DrawText(TextFormat("CREDITS  %s cr", Thousands(p.credits).c_str()), 20, top - 50, 18, HUD);
-        int sy = top - 74;
-        if (f.scooping) { DrawText(TextFormat("FUEL SCOOPING  +%.1f t/s", SCOOP_RATE), 20, sy, 18, ORANGE); sy -= 24; }
-        if (f.skimming) DrawText(TextFormat("SKIMMING HELIUM-3  +%.2f t/s", SKIM_RATE), 20, sy, 18, GoodData(RAW_HELIUM3).color);
+        // Power: what the reactor is putting out, the two capacitors, and where spare output is going
+        {
+            int py = top - 76;
+            auto bar = [&](int bx, const char *label, double frac, Color c) {
+                DrawText(label, bx, py, 16, HUD_LABEL);
+                int lw = MeasureText(label, 16) + 6;
+                DrawRectangleLines(bx + lw, py + 2, 54, 11, HUD_DIM);
+                DrawRectangle(bx + lw + 2, py + 4, (int)(50 * Clamp((float)frac, 0.0f, 1.0f)), 7, c);
+                return bx + lw + 64;
+            };
+            double dc = p.power.driveCap / p.spec.driveCapMJ, bk = p.power.bank / p.spec.bankMJ, ld = f.load / p.spec.reactorMW;
+            int bx = bar(20, "REACTOR", p.fuel > 0.0 ? ld : 0.0, ld > 0.9 ? ORANGE : HUD);
+            bx = bar(bx, "BANK", bk, bk < 0.25 ? ORANGE : HUD);
+            bool jump = p.power.driveCap >= JumpCharge(p.spec, p.Mass());          // (charge for a jump to warp?)
+            bx = bar(bx, "DRIVE", dc, jump ? HUD : ORANGE);
+            DrawText(TextFormat("%.1f jumps", p.power.driveCap / JumpCharge(p.spec, p.Mass())), bx - 4, py, 16, jump ? HUD_LABEL : ORANGE);
+            bx += MeasureText("0.0 jumps", 16) + 8;
+            DrawText(TextFormat("%s [X]", PowerModeName(p.power.mode)), bx, py, 16, HUD_LABEL);
+            DrawText(TextFormat("MASS  %.0f t   0.99c in %.0f s   turn %.0f deg/s", p.Mass(), 7.02 * LIGHT_SEC_U / (THRUST_K * fmax(p.spec.thrust, 1e-9) / p.Mass()), p.spec.turn / p.Mass()),
+                     20, py - 22, 16, p.Mass() > p.spec.hyperMaxMass ? ORANGE : HUD_LABEL);
+            if (p.fuel <= 0.0) DrawText("OUT OF FUEL: emergency power  -  K: call a tanker", 20, py - 44, 16, RED);
+        }
+        int sy = top - (p.fuel <= 0.0 ? 146 : 124);
+        if (f.scooping) { DrawText(TextFormat("FUEL SCOOPING  +%.1f t/s", p.spec.scoopRate), 20, sy, 18, ORANGE); sy -= 24; }
+        if (f.skimming) DrawText(TextFormat("SKIMMING HELIUM-3  +%.2f t/s", p.spec.skimRate), 20, sy, 18, GoodData(RAW_HELIUM3).color);
         else if (f.skimFull) DrawText("SKIMMING HELIUM-3  -  HOLD FULL", 20, sy, 18, ORANGE);
     }
 
@@ -312,7 +342,7 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
     }
     if (p.fuel <= 0.0) {
         y += 22; DrawText("NO FUEL - WARP OFFLINE, HYPER LIMPING", x, y, 18, RED);
-        y += 22; DrawText("Scoop near a star (within 3 radii) or buy fuel", x, y, 16, ORANGE);
+        y += 22; DrawText(p.spec.scoopRate > 0.0 && p.spec.fuelGood == REF_FUEL ? "Scoop near a star (within 3 radii) or buy fuel" : "Buy fuel, or call a tanker (K)", x, y, 16, ORANGE);
     }
     y += 22;
 
@@ -408,9 +438,9 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
     }
 
     if (showHelp) {
-        const char *help = online ? "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  M map  R factions  T trade log  N news  J contracts  "
+        const char *help = online ? "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  X power  M map  R factions  T trade log  N news  J contracts  "
                                     "MMB info  F hail / comms  LMB mine  ESC menu"
-                                  : "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  M map  R factions  T trade log  N news  J contracts  "
+                                  : "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  X power  M map  R factions  T trade log  N news  J contracts  "
                                     "MMB info  F hail / comms  LMB mine  F5/F9 quicksave/load  ESC menu";
         int size = 16;
         while (size > 10 && MeasureText(help, size) > sw - 40) size--;          // shrink to fit narrow windows

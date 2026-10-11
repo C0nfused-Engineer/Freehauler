@@ -33,9 +33,10 @@ void WriteShip(Writer &w, const Ship &s)
     w.F64(s.pos.x); w.F64(s.pos.y); w.F64(s.pos.z);
     w.F32(s.vel.x); w.F32(s.vel.y); w.F32(s.vel.z);
     w.F32(s.rot.x); w.F32(s.rot.y); w.F32(s.rot.z); w.F32(s.rot.w);
-    w.U8((s.dampeners ? 1 : 0) | (s.allStop ? 2 : 0));
+    w.U8((s.dampeners ? 1 : 0) | (s.allStop ? 2 : 0) | (s.dropout ? 4 : 0));
     w.F32(s.thrustUse);
     w.F32(s.throttle);
+    w.F32(s.ftl);
 }
 
 Ship ReadShip(Reader &r)
@@ -48,8 +49,10 @@ Ship ReadShip(Reader &r)
     uint8_t f = r.U8();
     s.dampeners = (f & 1) != 0;
     s.allStop   = (f & 2) != 0;
+    s.dropout   = (f & 4) != 0;
     s.thrustUse = r.F32();
     s.throttle  = r.F32();
+    s.ftl       = r.F32();
     return s;
 }
 
@@ -58,6 +61,8 @@ void WritePlayer(Writer &w, const Player &p)
     WriteShip(w, p.ship);
     w.F64(p.fuel);
     w.F64(p.credits);
+    w.F32((float)p.power.bank); w.F32((float)p.power.driveCap); w.F32(p.power.engines);
+    w.U8((uint8_t)(p.power.mode | (p.power.engaged ? 128 : 0) | (p.power.warping ? 64 : 0)));
     uint8_t n = 0;                                 // only what's in the hold: index, tonnes
     for (int g = 0; g < GOOD_COUNT; g++) if (p.cargo[g] > 0.0) n++;
     w.U8(n);
@@ -70,6 +75,9 @@ Player ReadPlayer(Reader &r)
     p.ship    = ReadShip(r);
     p.fuel    = r.F64();
     p.credits = r.F64();
+    p.power.bank = r.F32(); p.power.driveCap = r.F32(); p.power.engines = r.F32();
+    uint8_t pm = r.U8();
+    p.power.mode = (uint8_t)((pm & 63) % POWER_MODES); p.power.engaged = (pm & 128) != 0; p.power.warping = (pm & 64) != 0;
     uint8_t n = r.U8();
     for (int i = 0; i < n && r.ok; i++) {
         uint8_t g = r.U8();
@@ -84,7 +92,8 @@ void WriteInput(Writer &w, const InputStep &in)
     const Controls &c = in.controls;
     w.F32(c.throttle);
     w.F32(c.yaw); w.F32(c.pitch); w.F32(c.roll);
-    w.U8((c.hyper ? 1 : 0) | (c.fire ? 2 : 0) | (c.allStop ? 4 : 0) | (c.toggleDampeners ? 8 : 0) | (in.aim.steer ? 16 : 0));
+    w.U8((c.hyper ? 1 : 0) | (c.fire ? 2 : 0) | (c.allStop ? 4 : 0) | (c.toggleDampeners ? 8 : 0) | (in.aim.steer ? 16 : 0) |
+         (c.cyclePower ? 32 : 0));
     WriteTarget(w, in.aim.hovered);
     WriteTarget(w, in.aim.retarget);
     WriteTarget(w, in.aim.course);
@@ -103,7 +112,7 @@ InputStep ReadInput(Reader &r, uint32_t seq)
     c.pitch   = Sane(r.F32(), 90.0f);
     c.roll    = Sane(r.F32(), 90.0f);
     uint8_t f = r.U8();
-    c.hyper = (f & 1) != 0; c.fire = (f & 2) != 0; c.allStop = (f & 4) != 0; c.toggleDampeners = (f & 8) != 0;
+    c.hyper = (f & 1) != 0; c.fire = (f & 2) != 0; c.allStop = (f & 4) != 0; c.toggleDampeners = (f & 8) != 0; c.cyclePower = (f & 32) != 0;
     in.aim.steer    = (f & 16) != 0;
     in.aim.hovered  = ReadTarget(r);
     in.aim.retarget = ReadTarget(r);
@@ -264,15 +273,26 @@ void WriteSnapshot(Writer &w, const Snapshot &s)
     w.F32(s.retargetCooldown);
     w.U64(s.miningRock);
     w.Str(s.miningStatus, 100);
-    size_t n = std::min<size_t>(s.others.size(), SNAPSHOT_MAX_SHIPS);
-    w.U8((uint8_t)n);
-    for (size_t i = 0; i < n; i++) {
-        const Traffic &t = s.others[i];
+    size_t countAt = w.Size(), start = w.Size() + 1, n = 0;
+    w.U8(0);
+    for (; n < s.others.size() && n < (size_t)SNAPSHOT_MAX_SHIPS && w.Size() - start < (size_t)SNAPSHOT_SHIP_BYTES; n++) {
+        const Traffic &t = s.others[n];
         w.I32(t.id);
+        uint8_t flags = (t.thrusting ? 1 : 0) | (t.hyper ? 2 : 0) | (t.mining ? 4 : 0);
+        if (t.npc) {                                   // NPCs: no flight state to speak of, and a coarse heading will do
+            w.I64(t.ship.anchor);
+            w.F64(t.ship.pos.x); w.F64(t.ship.pos.y); w.F64(t.ship.pos.z);
+            w.F32(t.ship.vel.x); w.F32(t.ship.vel.y); w.F32(t.ship.vel.z);
+            const Quaternion &q = t.ship.rot;
+            for (float c : { q.x, q.y, q.z, q.w }) w.U8((uint8_t)(int8_t)(c * 127.0f));
+            w.U8(flags | (uint8_t)(t.stance << 4));
+            continue;
+        }
         WriteShip(w, t.ship);
-        w.U8((t.thrusting ? 1 : 0) | (t.hyper ? 2 : 0) | (t.mining ? 4 : 0));
+        w.U8(flags);
         if (t.mining) w.U64(t.miningRock);
     }
+    w.buf[countAt] = (uint8_t)n;
 }
 
 bool ReadSnapshot(Reader &r, Snapshot &s)
@@ -297,6 +317,20 @@ bool ReadSnapshot(Reader &r, Snapshot &s)
     for (int i = 0; i < n && r.ok; i++) {
         Traffic t;
         t.id   = r.I32();
+        if (t.id >= NPC_ID_BASE) {
+            t.npc = true;
+            t.ship.anchor = r.I64();
+            t.ship.pos.x = r.F64(); t.ship.pos.y = r.F64(); t.ship.pos.z = r.F64();
+            t.ship.vel.x = r.F32(); t.ship.vel.y = r.F32(); t.ship.vel.z = r.F32();
+            float q[4];
+            for (float &c : q) c = (float)(int8_t)r.U8() / 127.0f;
+            t.ship.rot = QuaternionNormalize({ q[0], q[1], q[2], q[3] });
+            uint8_t tf = r.U8();
+            t.thrusting = (tf & 1) != 0; t.hyper = (tf & 2) != 0; t.mining = (tf & 4) != 0;
+            t.stance = (Stance)((tf >> 4) & 3);
+            s.others.push_back(t);
+            continue;
+        }
         t.ship = ReadShip(r);
         uint8_t tf = r.U8();
         t.thrusting = (tf & 1) != 0; t.hyper = (tf & 2) != 0; t.mining = (tf & 4) != 0;

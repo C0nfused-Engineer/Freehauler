@@ -34,6 +34,8 @@
 //   econ.h, economy the markets of human space: stock, production, trade, prices; what the
 //                   factions do to them; trading (actions on a Captain)
 //   comms           hailing worlds and stations (actions on a Captain)
+//   npc.h, npcs     the other ships: freighters and miners that carry the economy's goods where a captain
+//                   is, patrols, pirates
 //   contract.h, contracts  paid work: the boards, drawn up from the economy and the factions' agendas;
 //                   taking, doing and failing it; guilds, licences and customs
 //   commands        player actions as data: applied here, or sent to the server
@@ -64,6 +66,9 @@
 //                everyone in the system (C: the list)      O   toggle orbit rings
 //   R            the factions: who they are, what they want, where you stand
 //   T            the trade log: prices at every market you know of      N   the news
+//   X            power mode: travel / combat / defence        K   call a tanker (when nearly out of fuel)
+//   H            hand over what a pirate has demanded (F with a ship picked out: hail it)
+//   (at a shipyard or starbase: hail it, then 5 to fit out the ship)
 //   J            your contracts (a station's board: hail it, then 4; a faction's list: R, then C)
 //   M            map: the system you're in (list its worlds, pick one to set course); M again,
 //                or M between the stars, for the sector map of nearby systems
@@ -317,7 +322,7 @@ static bool PlaySession(InputSource &input, ScriptedInput *script, const RenderA
         aim.course = ui.course;
         aim.steer  = ui.steer;
         pending.yaw += c.yaw; pending.pitch += c.pitch; pending.roll += c.roll;
-        pending.allStop |= c.allStop; pending.toggleDampeners |= c.toggleDampeners;
+        pending.allStop |= c.allStop; pending.toggleDampeners |= c.toggleDampeners; pending.cyclePower |= c.cyclePower;
 
         // --- Simulation: fixed steps; this frame's rotation is spread across them ---
         if (paused) { acc = 0.0; pending = {}; prev = g.player.ship; }
@@ -331,6 +336,7 @@ static bool PlaySession(InputSource &input, ScriptedInput *script, const RenderA
             s.roll  = pending.roll / steps;
             s.allStop         = k == 0 && pending.allStop;
             s.toggleDampeners = k == 0 && pending.toggleDampeners;
+            s.cyclePower      = k == 0 && pending.cyclePower;
             prev = g.player.ship;
             if (net) net->Step(g, s, aim, STEP);       // predicted here, confirmed by the server
             else     StepGame(g, s, aim, STEP);

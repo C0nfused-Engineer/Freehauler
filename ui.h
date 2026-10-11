@@ -20,7 +20,7 @@
 #include <string>
 #include <vector>
 
-enum class WindowKind { Info, Market, Comms, SystemMap, SectorMap, Factions, TradeLog, News, Contracts, Pause, SaveMenu, LoadMenu, SettingsMenu, ConfirmExit,
+enum class WindowKind { Info, Market, Comms, SystemMap, SectorMap, Factions, TradeLog, News, Contracts, Outfit, Pause, SaveMenu, LoadMenu, SettingsMenu, ConfirmExit,
                         MainMenu, SinglePlayerMenu, MultiplayerMenu, JoinMenu, HostMenu, NewGameMenu };
 
 // What the main menu decided
@@ -113,6 +113,9 @@ std::unique_ptr<Window> MakeNewsWindow();
 // The contracts window (contractsui.cpp): J for the contracts you hold; or a station's board (asked for over the
 // comms), or a faction's list
 std::unique_ptr<Window> MakeContractsWindow(TargetId station = {}, int faction = NO_FACTION);
+
+// Fitting out the ship, in dock at a shipyard or starbase (shipyardui.cpp)
+std::unique_ptr<Window> MakeOutfitWindow();
 
 // One line of the system map's list: a star, world, belt, moon or station (indented under its world)
 struct MapRow {

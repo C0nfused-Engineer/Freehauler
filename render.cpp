@@ -1,5 +1,6 @@
 // render.cpp - drawing the 3D scene
 #include "render.h"
+#include "npcs.h"
 #include "targetinfo.h"
 #include "theme.h"
 #include "rlgl.h"
@@ -777,7 +778,7 @@ void DrawScene(const GameState &g, const Ship &eye, ViewState &v, const RenderAs
     for (const Traffic &t : g.traffic) {
         DVec3  rel = FromShip(systems, eye, t.ship.anchor, t.ship.pos);
         double d   = Len(rel);
-        Color  col = CaptainColor(t.id);
+        Color  col = t.npc ? STANCE_FILL[t.stance & 3] : CaptainColor(t.id);
         bool   big = d > 1e-3 && SHIP_RADIUS / d > 0.0006;         // within ~20 km
         if (big) {
             double  s  = MapDist(d) / d;
@@ -785,7 +786,8 @@ void DrawScene(const GameState &g, const Ship &eye, ViewState &v, const RenderAs
             Vector3 at = ToF(rel * s);
             Vector3 axis; float angle;
             QuaternionToAxisAngle(t.ship.rot, &axis, &angle);
-            DrawVectorModelEx(assets.ship, at, axis, angle * RAD2DEG, { sc, sc, sc }, col);
+            if (t.npc) DrawVectorModelEx(assets.ship, at, axis, angle * RAD2DEG, { sc, sc, sc }, WHITE, col);
+            else       DrawVectorModelEx(assets.ship, at, axis, angle * RAD2DEG, { sc, sc, sc }, col);
             if (t.thrusting || t.hyper) {
                 float hf  = HyperFraction(Vector3Length(t.ship.vel));
                 float len = (t.hyper ? 2.5f + 3.0f * hf : 1.2f) * (0.85f + 0.15f * sinf((float)GetTime() * 60.0f + t.id));
@@ -809,6 +811,11 @@ void DrawScene(const GameState &g, const Ship &eye, ViewState &v, const RenderAs
         nb.rel = rel; nb.radius = SHIP_RADIUS;
         nb.color = col; nb.dot = !big;
         nb.info = TextFormat("Captain  -  %s", t.mining ? "mining" : t.hyper ? "under drive" : "cruising");
+        if (t.npc) {
+            static const char *looks[] = { "allied", "neutral", "alerted", "HOSTILE" };
+            nb.name = t.name;
+            nb.info = std::string(NpcKindName(t.kind)) + "  -  " + g.systems.factions.Name(t.faction) + "  -  " + looks[t.stance & 3];
+        }
         nav.push_back(nb);
     }
 

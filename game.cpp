@@ -129,7 +129,7 @@ void UpdateKnowledge(World &w, Captain &c)
         const Body &b = c.loaded.bodies[bi];
         if (b.kind == Kind::Star || c.know.scanned.count(b.id)) continue;
         double d = Len(FromShip(w.systems, c.player.ship, c.loaded.index, b.local)) - b.radius;
-        if (d > fmax(SCAN_RADII * b.radius, SCAN_MIN)) continue;
+        if (d > fmax(SCAN_RADII * b.radius, SCAN_MIN) * c.player.spec.scan) continue;      // (as far as the scanner reaches)
         bool news = !Known(c, bi);
         c.know.scanned.insert(b.id);
         if (news) w.Emit(EventType::Notice, "Scanned " + b.name, TargetId::MakeBody(c.loaded.index, bi), -1, 0.0, 0.0, c.id);
@@ -238,10 +238,15 @@ std::string TargetName(const World &w, const Captain &c, TargetId t)
 // nose onto it and ignores small mouse movements. A deliberate movement breaks
 // the lock; the view can switch it to another body (aim.retarget).
 // Swings the nose toward a target (the lock, or a course just set on a map)
-static void TurnToward(Ship &ship, DVec3 rel, float dt)
+// (no faster than the thrusters can swing it: 'most' degrees this step)
+static void TurnToward(Ship &ship, DVec3 rel, float dt, float most)
 {
-    Quaternion full = QuaternionFromVector3ToVector3(ShipForward(ship), ToF(Norm(rel)));
-    Quaternion step = QuaternionSlerp(QuaternionIdentity(), full, 1.0f - expf(-LOCK_TURN_RATE * dt));
+    Vector3 fwd = ShipForward(ship), want = ToF(Norm(rel));
+    float   angle = acosf(Clamp(Vector3DotProduct(fwd, want), -1.0f, 1.0f)) * RAD2DEG;
+    if (angle < 1e-4f) return;
+    float   turn = fminf(angle * (1.0f - expf(-LOCK_TURN_RATE * dt)), most);
+    Quaternion full = QuaternionFromVector3ToVector3(fwd, want);
+    Quaternion step = QuaternionSlerp(QuaternionIdentity(), full, turn / angle);
     ship.rot = QuaternionNormalize(QuaternionMultiply(step, ship.rot));
 }
 
@@ -281,7 +286,7 @@ static void UpdateLock(World &w, Captain &c, Controls &in, const Aim &aim, float
         return;
     }
     in.yaw = in.pitch = 0.0f;                                 // ignore small mouse movement
-    TurnToward(ship, rel, dt);
+    TurnToward(ship, rel, dt, (float)(c.player.spec.turn / c.player.Mass() * dt));
 }
 
 // Solid bodies and rocks: the ship stops at the surface instead of passing through
@@ -323,24 +328,25 @@ static void UpdateMining(World &w, Captain &c, const Controls &in, float dt)
     f.miningStatus.clear();
     if (!in.fire || in.hyper) return;
 
+    if (p.spec.laserRate <= 0.0) { f.miningStatus = "NO MINING LASER FITTED"; return; }
     Asteroid *a = f.selected.type == TargetId::Asteroid ? FindAsteroid(c.field, f.selected.rock) : nullptr;
     if (!a) { f.miningStatus = "MINING LASER: no asteroid targeted"; return; }
     double surf = Len(FromShip(w.systems, p.ship, c.loaded.index, a->local)) - AsteroidRadius(*a);
     double hold = p.CargoTotal();
-    if (surf > MINING_RANGE) {
-        f.miningStatus = "MINING LASER: out of range (" + FormatPlanetDist(surf) + ", need 1.5 km)";
+    if (surf > p.spec.laserRange) {
+        f.miningStatus = "MINING LASER: out of range (" + FormatPlanetDist(surf) + ", need " + FormatPlanetDist(p.spec.laserRange) + ")";
         return;
     }
-    if (hold >= CARGO_CAPACITY - 1e-6) { f.miningStatus = "CARGO HOLD FULL"; return; }
+    if (hold >= p.spec.hold - 1e-6) { f.miningStatus = "CARGO HOLD FULL"; return; }
 
-    double amount = fmin(MINING_RATE * dt, fmin((double)a->oreLeft, CARGO_CAPACITY - hold));
+    double amount = fmin(p.spec.laserRate * dt, fmin((double)a->oreLeft, p.spec.hold - hold));
     a->oreLeft -= (float)amount;
     p.cargo[a->ore] += amount;
     w.deltas.mined[a->id] = a->oreLeft;
     w.minedChanged[a->id] = a->oreLeft;
     f.miningActive = true;
     f.miningRock   = a->id;
-    f.miningStatus = TextFormat("MINING %s  +%.1f t/s", GoodData(a->ore).name, MINING_RATE);
+    f.miningStatus = TextFormat("MINING %s  +%.1f t/s", GoodData(a->ore).name, p.spec.laserRate);
     if (a->oreLeft <= 0.001f) {
         w.deltas.mined[a->id] = 0.0f;
         w.minedChanged[a->id] = 0.0f;
@@ -365,25 +371,27 @@ void StepCaptain(World &w, Captain &c, const Controls &input, const Aim &aim, fl
     if (f.lock.valid()) f.lock = CanonicalTarget(c, f.lock);
     UpdateLock(w, c, in, aim, dt);
     DVec3 courseRel;
-    if (aim.steer && !f.lock.valid() && FindTarget(w, c, aim.course, courseRel)) TurnToward(ship, courseRel, dt);
+    if (aim.steer && !f.lock.valid() && FindTarget(w, c, aim.course, courseRel)) TurnToward(ship, courseRel, dt, (float)(p.spec.turn / p.Mass() * dt));
     if (f.lockSuppressed && !aim.hovered.valid() && !f.selected.valid()) f.lockSuppressed = false;
     if (f.lock.valid()) f.selected = f.lock;
 
     // Drive and flight
-    DVec3  lockRel;
-    double lockRadius = 0.0;
-    bool   haveLock = f.lock.valid() && FindTarget(w, c, f.lock, lockRel, &lockRadius);
-    f.drive = ComputeDrive(ship, w.systems, c.loaded, haveLock ? &lockRel : nullptr, lockRadius,
-                           haveLock ? TargetName(w, c, f.lock) : std::string(), p.fuel > 0.0);
-    UpdateShip(ship, in, dt, f.drive);
+    // (the reactor burns fuel for what's drawn; on an empty tank the engines and the hyper drive
+    // limp on the emergency cell, so you're never quite stranded)
+    LockInfo lock;
+    bool haveLock = f.lock.valid() && FindTarget(w, c, f.lock, lock.rel, &lock.radius);
+    if (haveLock) {
+        lock.name = TargetName(w, c, f.lock);
+        if (f.lock.type == TargetId::Ship) if (const Traffic *other = w.FindTraffic(f.lock.index)) lock.speed = Vector3Length(other->ship.vel);
+    }
+    FlightReport flown = FlyShip(ship, p.spec, p.power, p.fuel, p.Mass(), in, dt, w.systems, c.loaded, haveLock ? &lock : nullptr, f.miningActive);
+    f.drive = flown.drive; f.burn = flown.burn; f.load = flown.load;
+    f.driveCharging = flown.charging; f.driveTooHeavy = flown.tooHeavy; f.driveStarved = flown.starved;
+    f.driveNone = flown.noDrive; f.drivePower = flown.drivePower;
+    in.hyper = p.power.engaged;                               // (what the drive did, not what was asked)
     f.last = in;
-
-    // Fuel: the drive burns by speed (exponentially more as you go faster); cruise
-    // thrusters only while working. On an empty tank thrusters run on reserve and
-    // hyper limps on emergency power, so you're never stranded.
-    f.burn = in.hyper ? (f.drive.noFuel ? 0.0 : DriveBurnRate(Vector3Length(ship.vel))) : CRUISE_BURN * ship.thrustUse;
-    if (p.fuel <= 0.0) f.burn = 0.0;
-    p.fuel = fmax(0.0, p.fuel - f.burn * dt);
+    if (authoritative && flown.collapse > 0.0 && c.loaded.index >= 0)          // out of warp: the bubble's collapse can be picked up
+        w.bursts.push_back({ c.loaded.index, ShipLocal(w, c), flown.collapse, c.id });
 
     // Rocks around where the ship is NOW (after moving: in hyper one step can cross the whole
     // field). They exist at any speed so you can see when you've entered a belt, even in hyper.
@@ -395,20 +403,22 @@ void StepCaptain(World &w, Captain &c, const Controls &input, const Aim &aim, fl
     if (c.loaded.index >= 0)
         for (const Body &b : c.loaded.bodies)
             if (b.kind == Kind::Star && Len(FromShip(w.systems, ship, c.loaded.index, b.local)) < b.radius * SCOOP_RANGE) {
-                f.scooping = p.fuel < FUEL_CAPACITY;
-                p.fuel = fmin(FUEL_CAPACITY, p.fuel + SCOOP_RATE * dt);
+                // (a scoop takes in deuterium, for a deuterium fusion reactor: other reactors' fuel has to be bought)
+                if (p.spec.scoopRate <= 0.0 || p.spec.fuelGood != REF_FUEL) break;
+                f.scooping = p.fuel < p.spec.tank;
+                p.fuel = fmin(p.spec.tank, p.fuel + p.spec.scoopRate * dt);
             }
 
     // Helium-3 skimming: dip into a gas giant's upper atmosphere (not in hyper)
     f.skimming = f.skimFull = false;
-    if (c.loaded.index >= 0 && !in.hyper)
+    if (c.loaded.index >= 0 && !in.hyper && p.spec.skimRate > 0.0)
         for (const Body &b : c.loaded.bodies)
             if (b.kind == Kind::Planet && b.giant && b.massEarth >= GIANT_MASS &&
                 Len(FromShip(w.systems, ship, c.loaded.index, b.local)) < b.radius * SKIM_DEPTH) {
-                double room = CARGO_CAPACITY - p.CargoTotal();
+                double room = p.spec.hold - p.CargoTotal();
                 f.skimming = room > 1e-6;
                 f.skimFull = !f.skimming;
-                if (authoritative && f.skimming) p.cargo[RAW_HELIUM3] += fmin(room, SKIM_RATE * dt);
+                if (authoritative && f.skimming) p.cargo[RAW_HELIUM3] += fmin(room, p.spec.skimRate * dt);
                 break;
             }
 

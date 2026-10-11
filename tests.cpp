@@ -4,10 +4,12 @@
 #include "comms.h"
 #include "contracts.h"
 #include "economy.h"
+#include "npcs.h"
 #include "process.h"
 #include "save.h"
 #include "server.h"
 #include "settings.h"
+#include "shipyard.h"
 #include "format.h"
 #include "targetinfo.h"
 #include "ui.h"
@@ -78,7 +80,7 @@ static void Run(GameState &g, double seconds, Controls c = {}, Aim aim = {})
     int steps = (int)(seconds * SIM_HZ + 0.5);
     for (int i = 0; i < steps; i++) {
         Controls s = c;
-        if (i > 0) s.allStop = s.toggleDampeners = false;      // one-shot presses happen once
+        if (i > 0) s.allStop = s.toggleDampeners = s.cyclePower = false;      // one-shot presses happen once
         StepGame(g, s, aim, (float)(1.0 / SIM_HZ));
     }
 }
@@ -102,21 +104,32 @@ static void TestFuel()
     const SysId H = g.systems.home;
     const StarSystem &home = g.systems[H];
     int c = BodyIndex(g, home.name + " c"), d = BodyIndex(g, home.name + " d");
+    const ShipSpec &spec = g.player.spec;
+    const double perMJ = 1.0 / (spec.reactorEff * spec.fuelMJ);           // tonnes of fuel a megajoule
 
-    // Cruise: getting up to the speed the throttle asks for burns fuel; holding it is free
-    Park(g, c, 0.5); Face(g, home.u);
+    // Sublight: thrust burns fuel; coasting costs only what the reactor idles at
+    g.player.ship.anchor = H; g.player.ship.pos = home.n * (0.7 * LY_U); g.player.ship.vel = { 0, 0, 0 };
+    Face(g, home.u);
     double f0 = g.player.fuel;
-    g.player.ship.throttle = 0.25f;
-    Run(g, 10.0);
-    double v = Vector3Length(g.player.ship.vel);
-    CHECK(fabs(v - ThrottleSpeed(0.25f)) < 0.01 * v && f0 - g.player.fuel > 0.001 && f0 - g.player.fuel < 0.1,
-          "quarter throttle: up to %.0f m/s on %.4f t of fuel", v * METERS_PER_UNIT, f0 - g.player.fuel);
+    g.player.ship.throttle = 1.0f;
+    Run(g, 5.0);
+    double v = Vector3Length(g.player.ship.vel), burned = f0 - g.player.fuel;
+    CHECK(v > 0.5 * LIGHT_SEC_U && fabs(burned - 5.0 * (spec.idleMW + spec.engineMW) * perMJ) < 0.002,
+          "5 s at full throttle: %.2f c on %.4f t of fuel", v / LIGHT_SEC_U, burned);
+    Controls damp; damp.toggleDampeners = true;
+    Run(g, 1.0 / SIM_HZ, damp);
+    g.player.ship.throttle = 0.0f;
     f0 = g.player.fuel;
     Run(g, 5.0);
-    CHECK(f0 - g.player.fuel == 0.0, "holding a steady speed is free (got %.4f)", f0 - g.player.fuel);
-    g.player.ship.throttle = 0.0f;
+    CHECK(fabs(Vector3Length(g.player.ship.vel) - v) < 1e-3 * v && fabs(f0 - g.player.fuel - 5.0 * spec.idleMW * perMJ) < 1e-6,
+          "dampeners off, throttle shut: it coasts at %.2f c, and that costs only what the reactor idles at (%.4f t in 5 s)",
+          Vector3Length(g.player.ship.vel) / LIGHT_SEC_U, f0 - g.player.fuel);
+    Run(g, 1.0 / SIM_HZ, damp);
+    g.player.ship.vel = { 0, 0, 0 };
 
     // Hyper from c toward d
+    g.player.ship.anchor = H; g.player.ship.pos = {};
+    UpdateLoadedSystem(g);
     const Body &bc = g.loaded.bodies[c], &bd = g.loaded.bodies[d];
     g.player.ship.pos = bc.local + Norm(bd.local - bc.local) * (bc.radius + 2000 * KM_U);
     g.player.ship.vel = { 0, 0, 0 };
@@ -126,15 +139,16 @@ static void TestFuel()
     Aim toward; toward.hovered = TargetId::MakeBody(H, d);     // locked on, so we stop there
     Run(g, 25.0, hyper, toward);
     double toD = Len(FromShip(g.systems, g.player.ship, H, bd.local)) - bd.radius;
-    CHECK(f0 - g.player.fuel > 0.2 && f0 - g.player.fuel < 1.5, "hyper c -> d (%.2f AU, locked on) burns %.3f t", Len(bd.local - bc.local) / AU_U, f0 - g.player.fuel);
+    CHECK(f0 - g.player.fuel > 0.1 && f0 - g.player.fuel < 1.5, "hyper c -> d (%.2f AU, locked on) burns %.3f t", Len(bd.local - bc.local) / AU_U, f0 - g.player.fuel);
     CHECK(toD < 0.001 * AU_U, "hyper arrives at d (%.0f km from its surface)", toD / KM_U);
 
     // Warp, out of the field
     g.player.ship.anchor = H; g.player.ship.pos = home.n * (0.7 * LY_U); g.player.ship.vel = { 0, 0, 0 };
     Face(g, home.n);
     g.player.fuel = 50; f0 = 50;
+    g.player.power = PowerState();
     Run(g, 10.0, hyper);
-    CHECK(!g.flight.drive.inField && f0 - g.player.fuel > 1.9 && f0 - g.player.fuel < 2.5,
+    CHECK(!g.flight.drive.inField && f0 - g.player.fuel > 1.0 && f0 - g.player.fuel < 2.2,
           "10 s of warp burns %.3f t (speed %.3f ly/s)", f0 - g.player.fuel, Vector3Length(g.player.ship.vel) / LY_U);
 
     // Empty tank: limp
@@ -145,7 +159,7 @@ static void TestFuel()
           "empty tank limps at %.4f AU/s", Vector3Length(g.player.ship.vel) / AU_U);
 }
 
-// Flying: throttle, rudder, dampeners, and the hyper drive stopping short of what it's aimed at
+// Flying: the throttle is thrust, rudder, dampeners, and the hyper drive stopping short of what it's aimed at
 static void TestFlight()
 {
     GameState g; NewGame(g);
@@ -159,12 +173,17 @@ static void TestFlight()
     ship.anchor = H; ship.pos = home.n * (0.7 * LY_U); ship.vel = { 0, 0, 0 }; ship.throttle = 0.0f;
     Face(g, home.n);
     Controls up; up.throttle = 1;
-    Run(g, 1.0, up);
-    CHECK(fabsf(ship.throttle - THROTTLE_RATE) < 0.01f && speed() > 1.0 && speed() < 2000.0,
-          "1 s of W: throttle %.0f%%, %.0f m/s", ship.throttle * 100.0f, speed() * METERS_PER_UNIT);
-    Run(g, 11.0, up);
-    CHECK(ship.throttle == 1.0f && speed() > 0.989 * LIGHT_SEC_U && speed() <= 0.9901 * LIGHT_SEC_U,
-          "12 s of W: full throttle, %.4f c", speed() / LIGHT_SEC_U);
+    Run(g, 0.2, up);
+    double gentle = speed();
+    Run(g, 0.8, up);
+    CHECK(fabsf(ship.throttle - THROTTLE_RATE) < 0.01f && gentle > 0.0 && gentle < 5.0 && speed() > 20.0 && speed() < 5000.0,
+          "a touch of W is a touch of thrust (%.1f m/s after 0.2 s); a second of it, throttle %.0f%%, %.0f m/s", gentle * METERS_PER_UNIT,
+          ship.throttle * 100.0f, speed() * METERS_PER_UNIT);
+    ship.vel = { 0, 0, 0 }; ship.throttle = 1.0f;
+    double t99 = 0.0;
+    while (speed() < 0.99 * LIGHT_SEC_U * 0.9999 && t99 < 60.0) { Run(g, 0.25); t99 += 0.25; }
+    CHECK(ship.throttle == 1.0f && t99 > 17.0 && t99 < 23.0 && speed() <= 0.9901 * LIGHT_SEC_U,
+          "full throttle from rest: 0.99 c in %.1f s, and no further", t99);
     Run(g, 3.0);
     CHECK(ship.throttle == 1.0f && speed() > 0.989 * LIGHT_SEC_U, "hands off: the throttle stays where it was set");
 
@@ -181,10 +200,20 @@ static void TestFlight()
     CHECK(!ship.dampeners && nose() < 0.8f, "dampeners off: the same turn leaves the ship sliding (%.0f degrees of slip)", acosf(nose()) * RAD2DEG);
     Run(g, 1.0 / SIM_HZ, damp);
 
-    // All stop, and reverse
+    // Throttle shut: the dampeners bring the ship to rest with the engines. All stop does the same from any setting.
+    Run(g, 3.0);
+    ship.throttle = 0.0f;
+    double before = speed();
+    Run(g, 5.0);
+    double slowing = speed();
+    Run(g, 20.0);
+    CHECK(before > 0.9 * LIGHT_SEC_U && slowing < before && slowing > 0.1 * LIGHT_SEC_U && speed() == 0.0,
+          "throttle shut at 0.99 c: the dampeners brake with the engines (%.2f c after 5 s), stopped inside 25 s", slowing / LIGHT_SEC_U);
+    ship.throttle = 1.0f;
+    Run(g, 4.0);
     Controls stop; stop.allStop = true;
-    Run(g, 5.0, stop);
-    CHECK(speed() == 0.0 && ship.throttle == 0.0f && !ship.allStop, "all stop (W+S): throttle to zero, stopped from 0.99 c inside 5 s");
+    Run(g, 25.0, stop);
+    CHECK(speed() == 0.0 && ship.throttle == 0.0f && !ship.allStop, "all stop (W+S): throttle to zero, and stopped");
     {
         // The keys: W and S together are all stop, and neither does anything more until both are up
         Settings keys;
@@ -204,9 +233,9 @@ static void TestFlight()
     }
     Controls down; down.throttle = -1;
     Run(g, 5.0, down);
-    CHECK(ship.throttle == -THROTTLE_REVERSE && Vector3DotProduct(ship.vel, ShipForward(ship)) < -300.0f && speed() < 600.0,
-          "S from a standstill: reverse, no faster than %.1f km/s", speed() / KM_U);
-    Run(g, 2.0, stop);
+    CHECK(ship.throttle == -THROTTLE_REVERSE && Vector3DotProduct(ship.vel, ShipForward(ship)) < -300.0f && speed() < 50000.0,
+          "S from a standstill: going astern, gently (%.1f km/s after 5 s)", speed() / KM_U);
+    Run(g, 10.0, stop);
 
     // Hyper straight at a planet: the drive stops by itself, in trading range
     UpdateLoadedSystem(g);
@@ -227,7 +256,7 @@ static void TestFlight()
     Run(g, 2.0);
     CHECK(speed() == 0.0, "let go of Shift with the throttle at zero: stays put");
 
-    // Hyper zeroes the throttle, so letting go of Shift doesn't send you into the thing at cruise
+    // Hyper zeroes the throttle, so letting go of Shift doesn't send you into the thing under thrust
     ship.pos = bd.local + out * (0.05 * AU_U); ship.vel = { 0, 0, 0 }; ship.throttle = 0.8f;
     Face(g, bd.local - ship.pos);
     Run(g, 20.0, hyper);
@@ -239,9 +268,9 @@ static void TestFlight()
     Face(g, bd.local + side * (3.0 * StopDistance(bd)) - ship.pos);
     Run(g, 3.0, hyper);
     double inHyper = speed();
-    Run(g, 4.0);
+    Run(g, 2.0);
     CHECK(ship.throttle == 0.0f && inHyper > 1000.0 * APPROACH_SPEED && speed() == 0.0,
-          "any hyper run does: 3 s of Shift in the open, let go, and the ship is stopped 4 s later");
+          "any hyper run does: 3 s of Shift in the open, let go, and the collapsing field has the ship stopped 2 s later");
 
     // ...but not if you're only passing by
     ship.pos = bd.local + out * (0.05 * AU_U); ship.vel = { 0, 0, 0 };
@@ -262,11 +291,11 @@ static void TestFlight()
     CHECK(speed() == 0.0 && fabs(from - StopDistance(bs)) < 20.0 && g.flight.nearBody == st && TradePartner(g),
           "hyper at %s from 20,000 km: stopped %.1f km off, in trading range", bs.name.c_str(), (from - bs.radius) / KM_U);
 
-    // Cruise flat out at a planet: the gravity well slows you; you arrive at the surface gently
-    ship.pos = bd.local + out * (0.01 * AU_U); ship.vel = { 0, 0, 0 }; ship.throttle = 1.0f;
+    // Sublight flat out at a planet: the gravity well slows you; you arrive at the surface gently
+    ship.pos = bd.local + out * (0.1 * AU_U); ship.vel = { 0, 0, 0 }; ship.throttle = 1.0f;
     Face(g, bd.local - ship.pos);
     double fastest = 0.0, over = 0.0;
-    for (int i = 0; i < 40 * (int)SIM_HZ; i++) {
+    for (int i = 0; i < 120 * (int)SIM_HZ; i++) {
         StepGame(g, {}, {}, (float)(1.0 / SIM_HZ));
         double up = Len(FromShip(g.systems, ship, H, bd.local)) - bd.radius;
         fastest = fmax(fastest, speed());
@@ -274,8 +303,8 @@ static void TestFlight()
     }
     double alt = Len(FromShip(g.systems, ship, H, bd.local)) - bd.radius;
     CHECK(fastest > 0.9 * LIGHT_SEC_U && over < 1.1 && speed() <= APPROACH_SPEED * 1.01 && alt < 50.0 * KM_U && alt > 0.0,
-          "full throttle at %s from 0.01 AU: 0.99 c on the way, slowed by its gravity well, at the surface doing %.1f km/s",
-          bd.name.c_str(), speed() / KM_U);
+          "full throttle at %s from 0.1 AU: %.2f c on the way, slowed by its gravity well, at the surface doing %.1f km/s",
+          bd.name.c_str(), fastest / LIGHT_SEC_U, speed() / KM_U);
 }
 
 static void TestTrade()
@@ -1529,6 +1558,7 @@ static void TestContracts()
         Contract &k = Inject(g, ContractKind::Haulage, H, A, B, REF_FOOD, 20.0f, 1000.0f, 2000.0f);
         k.issuer = 0;
         uint32_t id = k.id;
+        g.econ.state[mA].stock[REF_FOOD] = 200.0f;
         float stockA = g.econ.state[mA].stock[REF_FOOD], stockB = g.econ.state[mB].stock[REF_FOOD];
         bool took = AcceptContract(g, g, id);
         CHECK(took && g.jobs.size() == 1 && g.player.credits == 3000.0 && g.contracts.end() == std::find_if(g.contracts.begin(), g.contracts.end(),
@@ -1762,6 +1792,723 @@ static void TestContracts()
     }
 }
 
+// Somewhere in the loaded system a long way from any inhabited place
+static DVec3 RandomPointFarFromPorts(const GameState &g)
+{
+    const StarSystem &s = g.systems[g.loaded.index];
+    return s.u * (0.35 * s.fieldR) + s.n * (0.5 * s.fieldH);
+}
+
+// Space traffic: the ships that carry the economy where a captain is, and the ones that prey on and police them
+static Npc &PutShip(World &w, NpcKind kind, SysId sys, DVec3 pos, int faction)
+{
+    Npc n;
+    n.id = NPC_ID_BASE + (++w.npcSeq);
+    n.kind = kind; n.sys = sys; n.pos = pos; n.goal = pos; n.faction = faction;
+    n.name = kind == NpcKind::Pirate ? "Test raider" : kind == NpcKind::Patrol ? "Test patrol" : "Test freighter";
+    n.doing = kind == NpcKind::Pirate ? NpcDo::Lurk : NpcDo::Dock;
+    w.npcs.push_back(n);
+    return w.npcs.back();
+}
+
+static void TestTraffic()
+{
+    GameState g; NewGame(g);
+    Run(g, 6.0);
+    const EconBase &base = *g.econ.base;
+    const FactionSet &fs = g.systems.factions;
+    const SysId H = g.systems.home;
+    int hub = -1, tracked = 0, flown = 0;
+    for (int i = 0; i < g.econ.Count(); i++) {
+        if (base.defs[i].sys == H) hub = base.defs[i].hub;
+        if (g.econ.zone[i] == 2) flown++;
+        if (g.econ.zone[i] == 1) tracked++;
+    }
+    int kinds[4] = {}, elsewhere = 0;
+    for (const Npc &n : g.npcs) { kinds[(int)n.kind]++; if (n.sys != H) elsewhere++; }
+    CHECK(hub >= 0 && flown >= 5 && tracked >= 2 && kinds[(int)NpcKind::Miner] > 0 && kinds[(int)NpcKind::Patrol] > 0 && elsewhere == 0 &&
+          g.traffic.size() == g.npcs.size(),
+          "in the home system: %d markets flown, %d neighbouring hubs tracked; %d miners and %d patrols out already", flown, tracked,
+          kinds[(int)NpcKind::Miner], kinds[(int)NpcKind::Patrol]);
+    Run(g, 200.0);
+    int most = 0, loaded = 0;
+    for (int k = 0; k < 4; k++) kinds[k] = 0;
+    for (const Npc &n : g.npcs) { kinds[(int)n.kind]++; if (n.total > 0.0f) loaded++; }
+    most = (int)g.npcs.size();
+    CHECK(kinds[0] >= 3 && most >= 8 && most <= 90 && loaded >= 3, "200 s on: %d ships in flight (%d freighters, %d miners, %d patrols, %d pirates), %d of them loaded; %d more under way between systems",
+          most, kinds[0], kinds[3], kinds[1], kinds[2], loaded, (int)g.transits.size());
+
+    // Goods in a ship are in nobody's stock until it docks
+    int dest = -1, gd = -1;
+    for (int i = 0; i < g.econ.Count() && dest < 0; i++) {
+        if (base.defs[i].hub != hub || i == hub) continue;
+        for (int k = FIRST_FINISHED; k < GOOD_COUNT; k++) if (base.defs[i].target[k] <= 0.0f) { dest = i; gd = k; break; }
+    }
+    CHECK(dest >= 0, "found a market that doesn't deal in something (%s, %s)", dest >= 0 ? base.defs[dest].name.c_str() : "?", dest >= 0 ? GoodData(gd).name : "?");
+    if (dest < 0) return;
+    float s0 = g.econ.state[dest].stock[gd];
+    g.econ.Ship(hub, dest, gd, 60.0f, g.clock - 1000.0);           // (it's been on the dock a while: the next ship takes it)
+    float afloat = g.econ.afloat[(size_t)dest * GOOD_COUNT + gd];
+    const Npc *carrier = nullptr;
+    for (int tries = 0; tries < 130 && !carrier; tries++) {         // (the next ship for there takes it)
+        Run(g, 1.0);
+        for (const Npc &n : g.npcs) if (n.kind == NpcKind::Freighter && n.from == hub && n.to == dest && n.cargo[gd] >= 60.0f) carrier = &n;
+    }
+    int id = carrier ? carrier->id : 0;
+    const Traffic *seen = g.FindTraffic(id);
+    CHECK(carrier && afloat == 60.0f && g.econ.state[dest].stock[gd] == s0 && seen && seen->npc && seen->dest == base.defs[dest].name && seen->tonnes >= 60.0f,
+          "60 t on the dock at %s: the %s takes it aboard, bound for %s - on nobody's shelves yet", base.defs[hub].name.c_str(),
+          carrier ? carrier->name.c_str() : "?", base.defs[dest].name.c_str());
+    double waited = 0.0;
+    while (FindNpc(g, id) && waited < 400.0) { Run(g, 5.0); waited += 5.0; }
+    CHECK(!FindNpc(g, id) && g.econ.state[dest].stock[gd] == s0 + 60.0f && g.econ.afloat[(size_t)dest * GOOD_COUNT + gd] == 0.0f,
+          "...it docked %.0f s later and the goods are in stock", waited);
+
+    // Hailing a ship; reading a manifest from close by
+    {
+        const Npc *f = nullptr;
+        for (int tries = 0; tries < 200 && !f; tries++) {
+            Run(g, 1.0);
+            for (const Npc &n : g.npcs) if (n.kind == NpcKind::Freighter && n.total > 5.0f && n.doing == NpcDo::Dock && n.close > 0.0 && n.until > g.clock + 6.0) f = &n;
+        }
+        CHECK(f != nullptr, "found a loaded freighter tied up and unloading (%s)", f ? f->name.c_str() : "none");
+        if (f) {
+            int fid = f->id;
+            g.player.ship.anchor = H; g.player.ship.pos = f->pos + DVec3{ 300.0 * KM_U, 0, 0 }; g.player.ship.vel = {};
+            Run(g, 0.05);
+            std::vector<InfoRow> rows = TargetInfo(g, g, TargetId::MakeShip(fid));
+            bool cargo = false;
+            for (const InfoRow &r : rows) if (r.label == "Cargo" && r.value.find("t,") != std::string::npos) cargo = true;
+            g.events.clear();
+            bool hailed = HailShip(g, g, fid);
+            Run(g, 3.0);
+            bool reply = false;
+            for (const GameEvent &e : g.events) if (e.text.find("Bound for") != std::string::npos) reply = true;
+            CHECK(rows.size() >= 6 && cargo && hailed && reply && TargetName(g, TargetId::MakeShip(fid)) == rows[0].value,
+                  "alongside the %s: its manifest can be read, and it answers a hail", rows.empty() ? "?" : rows[0].value.c_str());
+        }
+    }
+
+    // A pirate robs a freighter: the cargo never arrives
+    {
+        Npc *f = nullptr;
+        for (Npc &n : g.npcs) if (n.kind == NpcKind::Freighter && n.total > 20.0f && n.doing == NpcDo::Travel && !n.jumping) f = &n;
+        int clan = NO_FACTION;
+        for (const Faction &fa : fs.list) if (fa.kind == FactionKind::Clan) { clan = fa.id; break; }
+        if (f) {
+            int fid = f->id, to = f->to;
+            int bulk = 0;
+            for (int k = 0; k < GOOD_COUNT; k++) if (f->cargo[k] > f->cargo[bulk]) bulk = k;
+            float had = f->total, was = g.econ.afloat[(size_t)to * GOOD_COUNT + bulk], carried = f->cargo[bulk];
+            f->pos = RandomPointFarFromPorts(g);                   // (out in the open, a long way from help)
+            f->goal = f->pos; f->vel = {};
+            DVec3 at = f->pos;
+            g.npcs.erase(std::remove_if(g.npcs.begin(), g.npcs.end(), [](const Npc &n) { return n.kind == NpcKind::Patrol; }), g.npcs.end());
+            g.trafficZoned = g.clock;
+            Npc &p = PutShip(g, NpcKind::Pirate, H, at + DVec3{ 100.0 * KM_U, 0, 0 }, clan);
+            int pid = p.id;
+            size_t news = g.news.size();
+            g.trafficNews = -1e9;
+            for (int tries = 0; tries < 60 && g.news.size() == news; tries++) Run(g, 0.5);
+            const Npc *after = FindNpc(g, fid), *raider = FindNpc(g, pid);
+            (void)was; (void)to;
+            CHECK(after && fabs(after->total - 0.5f * had) < 0.01f * had && fabs(after->cargo[bulk] - 0.5f * carried) < 0.01f * carried + 0.01f &&
+                  g.news.size() == news + 1 && (!raider || raider->doing == NpcDo::Leave),
+                  "a raider caught the %s in the open: half its %.0f t gone for good  (\"%s\")", after ? after->name.c_str() : "?", had,
+                  g.news.empty() ? "" : g.news.back().text.c_str());
+        } else CHECK(false, "found a freighter for the raider to rob");
+    }
+
+    // Looked away from: everything in flight is settled at once
+    {
+        g.econ.Ship(hub, dest, gd, 40.0f, g.clock - 1000.0);
+        Run(g, 20.0);
+        size_t ships = g.npcs.size();
+        double afloatAll = 0.0;
+        for (float a : g.econ.afloat) afloatAll += a;
+        g.player.ship.anchor = H; g.player.ship.pos = g.systems[H].n * (0.9 * LY_U); g.player.ship.vel = {};
+        Run(g, 0.2);
+        double left = 0.0;
+        for (float a : g.econ.afloat) left += a;
+        CHECK(ships > 0 && afloatAll > 40.0 && g.loaded.index == NO_SYSTEM && g.npcs.empty() && g.traffic.empty() && left < 1e-3 * afloatAll + 0.5 &&
+              g.econ.state[dest].stock[gd] == s0 + 100.0f && g.econ.waiting.empty() && g.transits.empty(),
+              "out in interstellar space: the %d ships and %.0f t that were in flight have landed; nothing is flown, tracked or lost", (int)ships, afloatAll);
+    }
+
+    // Pirates and a captain: out in an empty system, with a hold worth taking
+    {
+        int clan = NO_FACTION;
+        for (const Faction &fa : fs.list) if (fa.kind == FactionKind::Clan) { clan = fa.id; break; }
+        const StarSystem *empty = nullptr;                          // (off the edge of the bubble)
+        for (int i = g.econ.Count() - 1; i >= 0 && !empty; i -= 5) {
+            std::vector<const StarSystem *> near;
+            g.systems.Nearby(base.defs[i].sys, {}, 9.0 * LY_U, near);
+            for (const StarSystem *sys : near) if (sys->develop <= 0.0f && !empty) empty = sys;
+        }
+        CHECK(empty != nullptr, "found an empty system (%s)", empty ? empty->name.c_str() : "none");
+        if (empty) {
+            auto setUp = [&]() {
+                g.npcs.clear();
+                g.player.ship.anchor = empty->id; g.player.ship.pos = empty->u * (3.0 * AU_U); g.player.ship.vel = {}; g.player.ship.throttle = 0.0f;
+                for (int k = 0; k < GOOD_COUNT; k++) g.player.cargo[k] = 0.0;
+                g.player.cargo[ORE_IRON] = 30.0; g.player.cargo[ORE_PRECIOUS] = 10.0;
+                g.pirateSafeUntil = 0.0; g.demandFrom = -1;
+                g.standing.assign(fs.Count(), 0.0f);
+                Run(g, 0.05);
+                g.npcs.clear();
+                g.trafficZoned = g.clock;
+                g.events.clear();
+                return PutShip(g, NpcKind::Pirate, empty->id, ShipLocal(g) + DVec3{ 3000.0 * KM_U, 0, 0 }, clan).id;
+            };
+            int pid = setUp();
+            Run(g, 1.5);
+            bool demanded = false;
+            for (const GameEvent &e : g.events) if (e.text.find("heave to") != std::string::npos) demanded = true;
+            const Npc *p = FindNpc(g, pid);
+            const Traffic *t = g.FindTraffic(pid);
+            CHECK(p && p->doing == NpcDo::Hunt && demanded && g.demandFrom == pid && g.demandTonnes == 10.0 && t && t->stance == STANCE_HOSTILE,
+                  "a raider 3,000 km off sees 40 t in the hold: it closes, demands 10 t, and shows hostile");
+            bool paid = PayPirates(g, g);
+            p = FindNpc(g, pid);
+            CHECK(paid && g.player.cargo[ORE_PRECIOUS] == 0.0 && g.player.cargo[ORE_IRON] == 30.0 && p && p->doing == NpcDo::Lurk && g.pirateSafeUntil > g.clock + 200.0,
+                  "handed over (the dearest 10 t): it turns away and leaves you be for a while");
+            pid = setUp();
+            double total = g.player.CargoTotal();
+            Run(g, 30.0);
+            bool boarded = false;
+            for (const GameEvent &e : g.events) if (e.text.find("boarded you") != std::string::npos) boarded = true;
+            CHECK(boarded && fabs(g.player.CargoTotal() - total * (1.0 - PIRATE_SHARE)) < 1e-6 && g.player.cargo[ORE_PRECIOUS] == 0.0,
+                  "sat still instead: boarded, and half the hold gone (%.0f t left of %.0f)", g.player.CargoTotal(), total);
+            pid = setUp();
+            g.standing[clan] = 30.0f;
+            Run(g, 5.0);
+            p = FindNpc(g, pid); t = g.FindTraffic(pid);
+            bool tolerated = p && p->doing == NpcDo::Lurk && t && t->stance == STANCE_NEUTRAL;
+            g.standing[clan] = 60.0f; Run(g, 0.05);
+            t = g.FindTraffic(pid);
+            CHECK(tolerated && t && t->stance == STANCE_ALLIED, "a captain the clan tolerates is left alone (neutral); a friend of the clan sees its ships as allies");
+            // Running: a captain's drive outpaces anything
+            pid = setUp();
+            Run(g, 1.5);
+            Controls run; run.hyper = true; run.throttle = 1.0f;
+            Face(g, empty->u);
+            Run(g, 25.0, run);
+            p = FindNpc(g, pid);
+            CHECK(g.player.CargoTotal() == total && (!p || p->doing != NpcDo::Hunt || Len(ShipLocal(g) - p->pos) > 0.5 * AU_U),
+                  "or run for it: 25 s under hyper drive and the hold is untouched");
+        }
+    }
+
+    // A patrol scans the hold: contraband is seized as at customs
+    {
+        g.player.ship.anchor = H; g.player.ship.pos = {};
+        UpdateLoadedSystem(g);
+        int state = NO_FACTION;
+        for (const Faction &f : fs.list) if (state == NO_FACTION && f.kind == FactionKind::Government && !f.contraband.empty()) state = f.id;
+        int gd2 = fs.list[state].contraband[0];
+        g.player.ship.pos = g.systems[H].u * (20.0 * AU_U) + g.systems[H].n * (1.0 * AU_U); g.player.ship.vel = {}; g.player.ship.throttle = 0.0f;
+        for (int k = 0; k < GOOD_COUNT; k++) g.player.cargo[k] = 0.0;
+        g.player.cargo[gd2] = 6.0; g.player.credits = 20000.0; g.scanSafeUntil = 0.0;
+        g.standing.assign(fs.Count(), 0.0f);
+        Run(g, 0.05);
+        Npc &p = PutShip(g, NpcKind::Patrol, H, ShipLocal(g) + DVec3{ 500.0 * KM_U, 0, 0 }, state);
+        p.doing = NpcDo::Inspect; p.prey = g.id; p.since = g.clock;
+        int pid = p.id;
+        Run(g, 0.05);
+        const Traffic *t = g.FindTraffic(pid);
+        bool alerted = t && t->stance == STANCE_ALERTED;
+        Run(g, 12.0);
+        CHECK(alerted && g.player.cargo[gd2] == 0.0 && g.player.credits < 20000.0 && g.standing[state] < 0.0f && g.scanSafeUntil > g.clock,
+              "a %s patrol closes (alerted), scans the hold and seizes 6 t of %s: fined %.0f cr", fs.Name(state).c_str(), GoodData(gd2).name, 20000.0 - g.player.credits);
+        g.standing[state] = -70.0f; Run(g, 0.05);
+        t = g.FindTraffic(pid);
+        CHECK(t && t->stance == STANCE_HOSTILE, "...and to an enemy of the state its ships show hostile");
+    }
+
+    // A save has no ships in flight: what was afloat is saved as landed
+    {
+        g.player.ship.anchor = H; g.player.ship.pos = {};
+        UpdateLoadedSystem(g);
+        Park(g, TradeWorld(g), 0.9); Run(g, 0.5);
+        g.econ.Ship(hub, dest, gd, 25.0f, g.clock);
+        float before = g.econ.state[dest].stock[gd];
+        SaveGame(g, "test_traffic.txt");
+        GameState h; NewGame(h);
+        bool ok = LoadGame(h, "test_traffic.txt");
+        CHECK(ok && h.econ.state[dest].stock[gd] == before + 25.0f && h.npcs.empty() && h.econ.waiting.empty(),
+              "saved with 25 t on a dock: loaded with it in stock at %s, and the lanes start afresh", base.defs[dest].name.c_str());
+        remove("test_traffic.txt");
+    }
+}
+
+// Thrust and mass, the reactor and its capacitors, the drives' power laws
+static void TestPower()
+{
+    GameState g; NewGame(g);
+    const SysId H = g.systems.home;
+    const StarSystem &home = g.systems[H];
+    Ship &ship = g.player.ship;
+    Player &p = g.player;
+    auto speed = [&]() { return (double)Vector3Length(ship.vel); };
+    auto open = [&]() {                                           // out in the open, at rest, everything charged
+        ship.anchor = H; ship.pos = home.n * (0.7 * LY_U); ship.vel = { 0, 0, 0 }; ship.throttle = 0.0f; ship.ftl = 1.0f;
+        Face(g, home.n);
+        p.fuel = p.spec.tank; p.power = PowerState();
+        Run(g, 0.05);
+    };
+    auto load = [&](double tonnes) { for (int k = 0; k < GOOD_COUNT; k++) p.cargo[k] = 0.0; p.cargo[ORE_IRON] = tonnes; };
+    auto timeTo = [&](double v) {
+        ship.throttle = 1.0f;
+        double t = 0.0;
+        while (speed() < v && t < 120.0) { Run(g, 0.05); t += 0.05; }
+        return t;
+    };
+    const double perMJ = 1.0 / (p.spec.reactorEff * p.spec.fuelMJ);
+
+    // Mass: the same engines push a full hold about half as hard, and the thrusters swing it half as fast
+    load(0.0); open();
+    double massLight = p.Mass(), light = timeTo(0.5 * LIGHT_SEC_U);
+    load(100.0); open();
+    double massHeavy = p.Mass(), heavy = timeTo(0.5 * LIGHT_SEC_U);
+    CHECK(fabs(massLight - (p.spec.dryMass + p.spec.tank)) < 0.5 && fabs(massHeavy - massLight - 100.0) < 0.5 && fabs(heavy / light - massHeavy / massLight) < 0.15,
+          "to half light speed at full throttle: %.2f s at %.0f t, %.2f s at %.0f t (thrust over mass)", light, massLight, heavy, massHeavy);
+    auto swing = [&]() {
+        open();
+        Vector3 before = ShipForward(ship);
+        Controls hard; hard.yaw = 600.0f / (float)SIM_HZ;         // (far more than any thrusters can give)
+        Run(g, 0.5, hard);
+        return acosf(Clamp(Vector3DotProduct(before, ShipForward(ship)), -1.0f, 1.0f)) * RAD2DEG;
+    };
+    load(0.0);   float swingLight = swing();
+    load(100.0); float swingHeavy = swing();
+    CHECK(fabsf(swingLight - 0.5f * (float)(p.spec.turn / massLight)) < 2.0f && fabsf(swingHeavy - 0.5f * (float)(p.spec.turn / massHeavy)) < 2.0f,
+          "hard over for half a second: %.0f degrees empty, %.0f with a full hold", swingLight, swingHeavy);
+    // The last of it is the slow part (a = F / gamma^3 m)
+    load(0.0); open();
+    double to50 = timeTo(0.5 * LIGHT_SEC_U), to90 = to50 + timeTo(0.9 * LIGHT_SEC_U), to99 = to90 + timeTo(0.989 * LIGHT_SEC_U);
+    CHECK(to90 > 2.5 * to50 && to99 > 2.5 * to90 && to99 > 17.0 && to99 < 23.0, "relativity: 0.5 c in %.1f s, 0.9 c in %.1f s, 0.99 c in %.1f s", to50, to90, to99);
+
+    // The reactor burns fuel for what's drawn: rate = P / (efficiency x specific energy)
+    open();
+    double f0 = p.fuel;
+    Run(g, 10.0);
+    double idle = f0 - p.fuel;
+    CHECK(fabs(idle - 10.0 * p.spec.idleMW * perMJ) < 1e-6 && fabs(g.flight.load - p.spec.idleMW) < 1e-9,
+          "sitting still: the reactor idles at %.0f MW, %.3f t of fuel in 10 s (%.0f%% of %.0f MJ/t)", g.flight.load, idle, p.spec.reactorEff * 100.0, p.spec.fuelMJ);
+    ship.throttle = 1.0f;
+    Run(g, 2.0);
+    CHECK(fabs(g.flight.load - (p.spec.idleMW + p.spec.engineMW)) < 0.01, "at full thrust it draws %.0f MW", g.flight.load);
+    ship.throttle = 0.5f;
+    Run(g, 0.5);
+    CHECK(g.flight.load < p.spec.idleMW + 0.01 * p.spec.engineMW && fabs(ThrottleThrust(0.5f) - 1e-3) < 1e-5,
+          "half throttle is a thousandth of the thrust, and of the engines' power (%.3f MW)", g.flight.load);
+
+    // Hyper: P = P0 + K m (v/c)^N. Run it slower and it draws far less.
+    load(0.0);
+    ship.anchor = H; ship.pos = home.u * (30.0 * AU_U) + home.n * (0.5 * AU_U); ship.vel = { 0, 0, 0 }; ship.throttle = 0.0f; ship.ftl = 1.0f;
+    UpdateLoadedSystem(g);
+    Face(g, home.v);
+    p.power = PowerState();
+    Controls hyper; hyper.hyper = true;
+    Run(g, 6.0, hyper);
+    double fullSpeed = speed(), fullDraw = g.flight.drivePower, law = p.spec.hyperP0 + p.spec.hyperK * p.Mass() * pow(fullSpeed / LIGHT_SEC_U, p.spec.hyperN);
+    CHECK(g.flight.drive.inField && fabs(fullSpeed - p.spec.hyperSpeed) < 1e-3 * fullSpeed && fabs(fullDraw - law) < 0.01 * law &&
+          p.power.driveCap > 0.99 * p.spec.driveCapMJ && g.flight.load < 0.5 * p.spec.reactorMW,
+          "hyper in a system: %.0f c takes %.0f MW to hold (the reactor has %.0f); the drive capacitor isn't touched", fullSpeed / LIGHT_SEC_U, fullDraw, p.spec.reactorMW);
+    Controls slower = hyper; slower.throttle = -1;
+    Run(g, 1.5, slower);
+    Run(g, 2.0, hyper);
+    double half = ship.ftl;
+    CHECK(half < 0.6f && half > 0.4f && fabs(speed() - half * p.spec.hyperSpeed) < 0.01 * speed() &&
+          fabs((g.flight.drivePower - p.spec.hyperP0) / (fullDraw - p.spec.hyperP0) - pow(half, 3.0)) < 0.01,
+          "S with the drive engaged sets it slower: at %.0f%% speed the field takes %.1f MW", half * 100.0f, g.flight.drivePower);
+    Controls faster = hyper; faster.throttle = 1;
+    Run(g, 3.0, faster);
+    // It gets there at a steady rate, not all at once
+    ship.vel = { 0, 0, 0 };
+    Run(g, 0.5);
+    Run(g, 1.0, hyper);
+    CHECK(fabs(speed() - p.spec.hyperAccel * LIGHT_SEC_U) < 0.03 * speed(), "from rest the drive gains %.0f c every second", speed() / LIGHT_SEC_U);
+    Run(g, 1.0);
+
+    // Warp: the capacitor's charge forms the bubble; the reactor holds the field from there
+    load(0.0); open();
+    double cap0 = p.power.driveCap, need = JumpCharge(p.spec, p.Mass());
+    Run(g, 0.1, hyper);
+    double spent = cap0 - p.power.driveCap;
+    Run(g, 8.0, hyper);
+    double top = speed(), capMid = p.power.driveCap, wlaw = p.spec.warpP0 + p.spec.warpK * p.Mass() * pow(top / LIGHT_SEC_U, p.spec.warpN);
+    double held = g.flight.drivePower;
+    Run(g, 30.0, hyper);
+    CHECK(fabs(spent - need) < 0.02 * need && fabs(need - p.spec.jumpMJ * massLight / p.spec.capOut) < 0.01 * need && p.power.warping &&
+          top > 0.99 * p.spec.warpSpeed && speed() > 0.99 * p.spec.warpSpeed && !g.flight.driveStarved && p.power.driveCap >= capMid && cap0 / need > 1.5 && cap0 / need < 3.0,
+          "empty hold: the jump to warp takes %.0f MJ from the capacitor (%.0f for the bubble, the rest lost getting it out): %.1f jumps to a charge",
+          spent, p.spec.jumpMJ * massLight, cap0 / need);
+    CHECK(fabs(held - wlaw) < 0.01 * wlaw && held > 0.45 * p.spec.reactorMW, "holding the field at %.1f million c takes %.0f MW of the reactor's %.0f", top / LIGHT_SEC_U / 1e6, held, p.spec.reactorMW);
+    load(100.0); open();
+    need = JumpCharge(p.spec, p.Mass());
+    Run(g, 12.0, hyper);
+    CHECK(p.power.warping && speed() > 0.9 * p.spec.warpSpeed && g.flight.drivePower > 0.9 * (p.spec.reactorMW - p.spec.idleMW) && p.spec.driveCapMJ / need > 1.0 && p.spec.driveCapMJ / need < 2.0,
+          "full hold: %.0f MJ a jump (%.1f to a charge), and the field takes all but all the reactor has (%.0f MW, for %.0f%% of the drive's speed)",
+          need, p.spec.driveCapMJ / need, g.flight.drivePower, 100.0 * speed() / p.spec.warpSpeed);
+    // Charging: what goes in is less than what the reactor sends
+    open();
+    p.power.driveCap = 0.0; p.power.bank = p.spec.bankMJ;
+    Run(g, 2.0);
+    CHECK(fabs(p.power.driveCap - 2.0 * (p.spec.reactorMW - p.spec.idleMW) * p.spec.capIn) < 2.0,
+          "an empty capacitor takes all the reactor can spare, and keeps %.0f%% of it (%.0f MJ in 2 s)", p.spec.capIn * 100.0, p.power.driveCap);
+    // Without the charge for a jump the drive holds at hyper speed until it has it
+    open();
+    p.power.driveCap = 0.0;
+    Run(g, 8.0, hyper);
+    bool waiting = g.flight.driveCharging && !p.power.warping && speed() <= 1.001 * p.spec.hyperSpeed && speed() > 0.5 * p.spec.hyperSpeed;
+    double t = 8.0;
+    while (g.flight.driveCharging && t < 180.0) { Run(g, 0.5, hyper); t += 0.5; }
+    Run(g, 8.0, hyper);
+    CHECK(waiting && t > 10.0 && t < 120.0 && p.power.warping && speed() > 0.9 * p.spec.warpSpeed,
+          "flat capacitor: the drive holds at hyper speed for %.0f s while it charges, then jumps", t);
+    // Short of power: the drive speeds up as fast as ever, but can't go as fast
+    load(100.0); open();
+    p.spec.reactorMW = 60.0;
+    Run(g, 1.0, hyper);
+    double gaining = speed();
+    Run(g, 11.0, hyper);
+    double limit = LIGHT_SEC_U * pow((p.spec.reactorMW - p.spec.idleMW - p.spec.warpP0) / (p.spec.warpK * p.Mass()), 1.0 / p.spec.warpN);
+    CHECK(g.flight.driveStarved && p.power.warping && fabs(speed() - limit) < 0.01 * limit && speed() < 0.7 * p.spec.warpSpeed &&
+          fabs(gaining - p.spec.warpAccel * LIGHT_SEC_U) < 0.05 * gaining,
+          "the same load on a 60 MW reactor: at warp, but held to %.0f%% of the drive's speed", 100.0 * speed() / p.spec.warpSpeed);
+    Refit(g);
+    ship.vel = { 0, 0, 0 };
+    Run(g, 1.0);
+    // Too much ship for the drive
+    ship.anchor = H; ship.pos = home.u * (30.0 * AU_U) + home.n * (0.5 * AU_U); ship.vel = { 0, 0, 0 };
+    UpdateLoadedSystem(g);
+    p.spec.hyperMaxMass = 100.0;
+    Run(g, 0.5);
+    Run(g, 2.0, hyper);
+    CHECK(g.flight.driveTooHeavy && speed() < 1.0, "a ship heavier than its drive can move doesn't go to hyper");
+    Refit(g);
+
+    // Power modes: where the spare output goes
+    load(0.0); open();
+    Controls cycle; cycle.cyclePower = true;
+    p.power.bank = p.power.driveCap = 0.0;
+    Run(g, 2.0);
+    double travelDrive = p.power.driveCap, travelBank = p.power.bank;
+    Run(g, 1.0 / SIM_HZ, cycle);
+    uint8_t second = p.power.mode;
+    p.power.bank = p.power.driveCap = 0.0;
+    Run(g, 2.0);
+    CHECK(second == POWER_COMBAT && travelDrive > 2.5 * travelBank && p.power.bank > 2.5 * p.power.driveCap &&
+          fabs(travelDrive / p.spec.capIn + travelBank - 2.0 * (p.spec.reactorMW - p.spec.idleMW)) < 5.0,
+          "X cycles the power mode: TRAVEL sends three quarters of the spare output to the drive capacitor, COMBAT to the bank");
+    Run(g, 1.0 / SIM_HZ, cycle); Run(g, 1.0 / SIM_HZ, cycle);
+    CHECK(p.power.mode == POWER_TRAVEL, "...and round again to TRAVEL");
+
+    // Out of fuel: emergency power, and a tanker if you want one
+    ship.anchor = H; ship.pos = home.u * (6.0 * AU_U) + home.n * (0.3 * AU_U); ship.vel = { 0, 0, 0 };
+    UpdateLoadedSystem(g);
+    Face(g, home.v);
+    p.fuel = 0.0; p.credits = 10000.0;
+    Run(g, 4.0, hyper);
+    CHECK(g.flight.drive.noFuel && g.flight.load == 0.0 && fabs(speed() - LIMP_SPEED) < 0.01 * LIMP_SPEED, "tank dry: the reactor is out, the drive limps on the emergency cell");
+    Run(g, 2.0);
+    g.events.clear();
+    bool called = CallTanker(g, g);
+    Run(g, 1.0);
+    const Npc *tanker = nullptr;
+    for (const Npc &n : g.npcs) if (n.kind == NpcKind::Tanker) tanker = &n;
+    bool onWay = tanker != nullptr;
+    t = 0.0;
+    while (p.fuel <= 0.0 && t < 600.0) { Run(g, 2.0); t += 2.0; }
+    double bill = TANKER_CALLOUT + TANKER_LOAD * 3.0 * GoodData(p.spec.fuelGood).basePrice;
+    CHECK(called && onWay && fabs(p.fuel - TANKER_LOAD) < 0.5 && fabs(10000.0 - p.credits - bill) < 1.0,
+          "called a tanker: alongside %.0f s later with %.0f t, for %.0f cr", t, p.fuel, 10000.0 - p.credits);
+    CHECK(!CallTanker(g, g), "...and it won't come out for a ship with fuel in the tank");
+
+    // NPC ships fly by the same rules: no faster than their drives, around what's in the way, burning fuel
+    {
+        GameState h; NewGame(h);
+        Run(h, 120.0);
+        int over = 0, inside = 0, burned = 0, flying = 0;
+        for (int i = 0; i < 240; i++) {
+            Run(h, 0.25);
+            for (const Npc &n : h.npcs) {
+                if (Len(n.vel) > 1.02 * n.spec.hyperSpeed * n.ship.ftl) over++;
+                if (n.fuel < n.tank - 1e-6) burned++;
+                if (Len(n.vel) > MAX_SPEED) flying++;
+                for (const Body &b : h.loaded.bodies) if (Len(n.pos - b.local) < 0.98 * b.radius) inside++;
+            }
+        }
+        CHECK(flying > 100 && over == 0 && inside == 0 && burned > 100,
+              "a minute of home traffic, sampled 4 times a second: nobody over the speed their drive is set to (%d), nobody inside a planet or the star (%d); %d ship-samples in hyper, %d with fuel burned",
+              over, inside, flying, burned);
+    }
+}
+
+static bool base_target(const GameState &g, int market, int good)
+{
+    return market >= 0 && g.econ.base->defs[market].target[good] > 0.0f;
+}
+
+// Ships built from parts: what they add up to, the yard, and the tachyons a warp exit gives off
+static Part MakePart(PartType type, int size, int grade = 0, int variant = 0)
+{
+    Part p;
+    p.type = type; p.size = (uint8_t)size; p.grade = (uint8_t)grade; p.variant = (uint8_t)variant;
+    return p;
+}
+
+static void TestShips()
+{
+    GameState g; NewGame(g);
+    Run(g, 0.5);
+    EnsureEconomy(g);
+    const FactionSet &fs = g.systems.factions;
+    Player &p = g.player;
+
+    // The starter ship is the sum of its parts
+    ShipSpec d, s = SpecOf(StarterBuild());
+    CHECK(fabs(s.dryMass - d.dryMass) < 0.01 && s.thrust == d.thrust && s.turn == d.turn && s.reactorMW == d.reactorMW && s.reactorEff == d.reactorEff &&
+          s.fuelGood == REF_REACTOR_FUEL && d.fuelGood == REF_REACTOR_FUEL && fabs(s.idleMW - d.idleMW) < 1e-9 && s.engineMW == d.engineMW && s.bankMJ == d.bankMJ && s.driveCapMJ == d.driveCapMJ &&
+          s.hyperSpeed == d.hyperSpeed && s.hyperP0 == d.hyperP0 && s.hyperMaxMass == d.hyperMaxMass && s.warpSpeed == d.warpSpeed && s.warpP0 == d.warpP0 &&
+          s.jumpMJ == d.jumpMJ && s.tank == FUEL_CAPACITY && s.hold == CARGO_CAPACITY && s.laserRate == d.laserRate && s.scoopRate == d.scoopRate &&
+          s.skimRate == d.skimRate && s.scan == d.scan,
+          "the starter ship: a %s with %d parts, %.1f t dry, %.0f MW, %.0f t of fuel, %.0f t of cargo", Hull(p.build.hull).name, (int)p.build.parts.size(),
+          s.dryMass, s.reactorMW, s.tank, s.hold);
+    CHECK(fabs(VolumeUsed(p.build) - 330.0) < 0.01 && BuildVolume(p.build) == 400.0 && HardpointsUsed(p.build) == 4 && BuildHardpoints(p.build) == 6,
+          "it uses %.0f of its %.0f m3 and %d of its %d hardpoints", VolumeUsed(p.build), BuildVolume(p.build), HardpointsUsed(p.build), BuildHardpoints(p.build));
+    // Size doubles a part; grade makes it lighter, better and much dearer
+    {
+        PartInfo a = Describe(MakePart(PartType::Reactor, 2)), b2 = Describe(MakePart(PartType::Reactor, 3)), c3 = Describe(MakePart(PartType::Reactor, 2, 3));
+        ShipBuild one; one.parts = { MakePart(PartType::Reactor, 2, 3) };
+        ShipSpec elite = SpecOf(one);
+        CHECK(b2.mass == 2.0 * a.mass && b2.volume == 2.0 * a.volume && b2.cost == 2.0 * a.cost && c3.mass < 0.75 * a.mass && c3.volume == a.volume &&
+              c3.cost == 15.0 * a.cost && elite.reactorMW > 1.4 * s.reactorMW && elite.reactorEff > s.reactorEff + 0.1,
+              "a size 3 reactor is twice a size 2; an elite one is %.0f%% lighter, gives %.0f MW at %.0f%%, and costs 15 times as much",
+              100.0 * (1.0 - c3.mass / a.mass), elite.reactorMW, elite.reactorEff * 100.0);
+    }
+
+    // Away from a yard nothing can be done
+    CHECK(!Shipyard(g) && !FitPart(g, g, MakePart(PartType::Hold, 1)) && p.build.parts.size() == 13, "fitting out needs a shipyard or a starbase");
+    int yardIndex = -1;
+    for (int i = 0; i < (int)g.loaded.bodies.size(); i++) if (g.loaded.bodies[i].settlement == Settlement::Shipyard) { yardIndex = i; break; }
+    CHECK(yardIndex >= 0, "the home system has a shipyard (%s)", yardIndex >= 0 ? g.loaded.bodies[yardIndex].name.c_str() : "none");
+    if (yardIndex < 0) return;
+    Park(g, yardIndex, 0.9); Run(g, 0.5);
+    const Body *yard = Shipyard(g);
+    CHECK(yard != nullptr, "docked at the yard");
+    if (!yard) return;
+    int market = g.econ.MarketOf(yard->id);
+    for (int k = 0; k < GOOD_COUNT; k++) if (base_target(g, market, k)) g.econ.state[market].stock[k] = 500.0f;      // (well stocked)
+    p.credits = 1e6;
+    g.standing.assign(fs.Count(), 0.0f);
+
+    // A cargo bay: paid for, built out of the yard's stock, and the ship is the heavier and roomier for it
+    {
+        Part bay = MakePart(PartType::Hold, 1);
+        PartInfo info = Describe(bay);
+        double price = PartPrice(g, g, *yard, bay), cr = p.credits, mass = p.spec.dryMass;
+        float plating = g.econ.state[market].stock[GOOD_HULL_PLATING];
+        bool fitted = FitPart(g, g, bay);
+        CHECK(fitted && price > 0.0 && fabs(cr - p.credits - price) < 1e-6 && p.spec.hold == 125.0 && fabs(p.spec.dryMass - mass - info.mass) < 1e-9 &&
+              fabs(VolumeUsed(p.build) - 360.0) < 0.01 && (!base_target(g, market, GOOD_HULL_PLATING) || fabs(plating - g.econ.state[market].stock[GOOD_HULL_PLATING] - info.tonnes) < 1e-3),
+              "fitted a %s for %.0f cr: 125 t of hold now, %.1f t heavier, %.0f m3 used", info.name.c_str(), price, info.mass, VolumeUsed(p.build));
+        // No room for a big one; no hardpoint for a third thing outside
+        bool big = FitPart(g, g, MakePart(PartType::Hold, 4));
+        bool laser = FitPart(g, g, MakePart(PartType::MiningLaser, 1)), scoop = FitPart(g, g, MakePart(PartType::Scoop, 1));
+        bool another = FitPart(g, g, MakePart(PartType::MiningLaser, 1));
+        CHECK(!big && laser && scoop && !another && p.spec.laserRate == 4.0 && p.spec.scoopRate == 1.0 && HardpointsUsed(p.build) == 6,
+              "no room for a size 4 bay; a second mining laser and a scoop take the last two hardpoints, and a third thing has nowhere to go");
+        // Taken out again: sold at a loss
+        cr = p.credits;
+        int last = (int)p.build.parts.size() - 1;
+        bool removed = RemovePart(g, g, last);
+        CHECK(removed && fabs(p.credits - cr - RESALE * Describe(MakePart(PartType::Scoop, 1)).cost) < 1e-6 && p.spec.scoopRate == 0.0,
+              "taken out again: it fetches %.0f%% of its price", RESALE * 100.0);
+        p.fuel = p.spec.tank;
+        int tank = -1;
+        for (int i = 0; i < (int)p.build.parts.size(); i++) if (p.build.parts[i].type == PartType::Tank && p.build.parts[i].size == 3) tank = i;
+        CHECK(tank >= 0 && !RemovePart(g, g, tank) && p.spec.tank == 50.0, "a tank with fuel in it stays where it is");
+    }
+
+    // Stretching the hull: dearer every time, and only so far
+    {
+        double first = StretchCost(p.build, false), room = BuildVolume(p.build), dry = p.spec.dryMass;
+        bool ok = StretchHull(g, g, false);
+        double second = StretchCost(p.build, false);
+        bool mount = StretchHull(g, g, true);
+        int done = 1;
+        while (StretchHull(g, g, false)) done++;
+        CHECK(ok && mount && fabs(BuildVolume(p.build) / room - (1.0 + 0.12 * MAX_STRETCH)) < 1e-9 && second > 1.6 * first && done == MAX_STRETCH &&
+              BuildHardpoints(p.build) == 7 && p.spec.dryMass > dry && first > 0.2 * Hull(p.build.hull).cost,
+              "stretched %d times for %.0f m3 (the first cost %.0f cr, the second %.0f), and a seventh hardpoint welded on; then no more",
+              done, BuildVolume(p.build), first, second);
+    }
+
+    // The three reactors: fission on reactor fuel (the starter's), deuterium fusion, the helium-3 fusor. Each gets more
+    // from a tonne of its fuel and more power from the same room.
+    {
+        ShipBuild one;
+        one.parts = { MakePart(PartType::Reactor, 2, 0, BURNS_REACTOR_FUEL) }; ShipSpec fis = SpecOf(one);
+        one.parts = { MakePart(PartType::Reactor, 2, 0, BURNS_DEUTERIUM) };    ShipSpec deu = SpecOf(one);
+        one.parts = { MakePart(PartType::Reactor, 2, 0, BURNS_HELIUM3) };      ShipSpec he3 = SpecOf(one);
+        double costF = Describe(MakePart(PartType::Reactor, 2, 0, BURNS_REACTOR_FUEL)).cost, costD = Describe(MakePart(PartType::Reactor, 2, 0, BURNS_DEUTERIUM)).cost,
+               costH = Describe(MakePart(PartType::Reactor, 2, 0, BURNS_HELIUM3)).cost;
+        auto perMJ = [](const ShipSpec &r) { return GoodData(r.fuelGood).basePrice / r.fuelMJ; };
+        CHECK(fis.fuelGood == REF_REACTOR_FUEL && deu.fuelGood == REF_FUEL && he3.fuelGood == RAW_HELIUM3 && std::string(GoodData(REF_FUEL).name) == "Deuterium" &&
+              fis.reactorMW < deu.reactorMW && deu.reactorMW < he3.reactorMW && fis.fuelMJ < deu.fuelMJ && deu.fuelMJ < he3.fuelMJ && costF < costD && costD < costH &&
+              perMJ(he3) < perMJ(deu) && perMJ(deu) < perMJ(fis),
+              "size 2 reactors: fission %.0f MW on %.0f MJ/t (%.0f cr), deuterium fusion %.0f MW on %.0f MJ/t (%.0f cr), helium-3 fusor %.0f MW on %.0f MJ/t (%.0f cr)",
+              fis.reactorMW, fis.fuelMJ, costF, deu.reactorMW, deu.fuelMJ, costD, he3.reactorMW, he3.fuelMJ, costH);
+        const GoodInfo &d2 = GoodData(REF_FUEL);
+        CHECK(d2.recipe[0].good == REF_WATER && d2.recipe[0].tonnes >= 3.0f && d2.recipe[1].good == REF_CHEMICALS && GoodData(REF_REACTOR_FUEL).recipe[0].good == ORE_URANIUM,
+              "deuterium is made from water, %.0f t of it and a little of the exchange towers' chemicals to the tonne; reactor fuel from uranium", d2.recipe[0].tonnes);
+
+        int reactor = -1;
+        for (int i = 0; i < (int)p.build.parts.size(); i++) if (p.build.parts[i].type == PartType::Reactor) reactor = i;
+        bool mixed = FitPart(g, g, MakePart(PartType::Reactor, 1, 0, BURNS_DEUTERIUM));
+        double perTonne = p.spec.reactorEff * p.spec.fuelMJ;
+        p.fuel = 0.0;
+        RemovePart(g, g, reactor);
+        bool dead = p.spec.reactorMW == 0.0;
+        bool fusion = FitPart(g, g, MakePart(PartType::Reactor, 2, 0, BURNS_DEUTERIUM));
+        CHECK(!mixed && dead && fusion && p.spec.fuelGood == REF_FUEL && fabs(p.spec.reactorEff * p.spec.fuelMJ / perTonne - 3.2) < 1e-9 && p.spec.reactorMW == 260.0,
+              "reactors aboard must share a fuel; swapped the fission reactor for a deuterium one: %.0f MW, and a tonne of %s goes 3.2 times as far",
+              p.spec.reactorMW, GoodData(p.spec.fuelGood).name);
+        g.econ.state[market].stock[REF_FUEL] = 100.0f;
+        p.fuel = 0.0;
+        bool fuelled = base_target(g, market, REF_FUEL) ? BuyFuel(g, 5.0) : (p.fuel = 5.0, true);
+        CHECK(fuelled && p.fuel == 5.0, "...and it's %s the fuel pump sells this ship now", GoodData(p.spec.fuelGood).name);
+        // With a scoop, that's what a star gives
+        GameState h; NewGame(h);
+        Run(h, 0.2);
+        h.player.build = p.build;
+        h.player.build.parts.push_back(MakePart(PartType::Scoop, 1));
+        Refit(h);
+        const Body &star = h.loaded.bodies[0];
+        h.player.ship.pos = star.local + h.systems[h.systems.home].u * (star.radius * 2.0); h.player.ship.vel = { 0, 0, 0 };
+        h.player.fuel = 1.0;
+        Run(h, 2.0);
+        bool scooped = h.flight.scooping && h.player.fuel > 2.5;
+        GameState f; NewGame(f);
+        Run(f, 0.2);
+        f.player.ship.pos = f.loaded.bodies[0].local + f.systems[f.systems.home].u * (f.loaded.bodies[0].radius * 2.0); f.player.ship.vel = { 0, 0, 0 };
+        f.player.fuel = 1.0;
+        Run(f, 2.0);
+        CHECK(scooped && !f.flight.scooping && f.player.fuel < 1.0, "a scoop takes deuterium off a star for a ship that burns it; the starter's fission reactor has no use for one");
+    }
+
+    // Grades: what a yard sells depends on whose it is, and how well it knows you
+    {
+        int best = YardGrade(g, g, *yard, PartType::Engine);
+        bool tooGood = best < PART_GRADES - 1 && FitPart(g, g, MakePart(PartType::Scanner, 1, PART_GRADES - 1));
+        int company = NO_FACTION;
+        for (const Faction &f : fs.list) if (f.kind == FactionKind::Conglomerate && Specialises(f.slant, PartType::Reactor) && company == NO_FACTION) company = f.id;
+        Body theirs = *yard;
+        theirs.owner = company;
+        int stranger = YardGrade(g, g, theirs, PartType::Reactor), other = YardGrade(g, g, theirs, PartType::Scanner);
+        g.standing[company] = 30.0f;
+        int known = YardGrade(g, g, theirs, PartType::Reactor);
+        CHECK(best >= 1 && !tooGood && company != NO_FACTION && stranger == 2 && known == 3 && other == 2 && YardMaker(g, theirs, PartType::Reactor) == company &&
+              YardMaker(g, theirs, PartType::Scanner) == NO_FACTION,
+              "%s sells up to %s grade; a yard of %s sells its own reactors up to %s, and %s to a customer it knows", yard->name.c_str(), GradeName(best),
+              fs.Name(company).c_str(), GradeName(stranger), GradeName(known));
+        // Out of what it's made of, a yard can't build it
+        if (base_target(g, market, GOOD_SHIP_COMPONENTS)) {
+            g.econ.state[market].stock[GOOD_SHIP_COMPONENTS] = 0.0f;
+            CHECK(PartPrice(g, g, *yard, MakePart(PartType::Thrusters, 1)) < 0.0 && !FitPart(g, g, MakePart(PartType::Thrusters, 1)),
+                  "with no ship components in stock the yard can't build thrusters");
+            g.econ.state[market].stock[GOOD_SHIP_COMPONENTS] = 500.0f;
+        }
+    }
+
+    // A bigger hull: what's fitted moves across, the old one is traded in; a smaller one won't take it all
+    {
+        size_t parts = p.build.parts.size();
+        double cr = p.credits, quoted = HullPrice(g, g, *yard, HULL_FREIGHTER);
+        bool small = BuyHull(g, g, HULL_COURIER);
+        bool bought = BuyHull(g, g, HULL_FREIGHTER);
+        CHECK(!small && bought && p.build.hull == HULL_FREIGHTER && p.build.parts.size() == parts && p.build.stretch == 0 && BuildVolume(p.build) == 1800.0 &&
+              fabs(cr - p.credits - quoted) < 1e-6 && quoted < Hull(HULL_FREIGHTER).cost * 2.0 && p.spec.dryMass > 100.0,
+              "a courier is too small for all this; traded up to a freighter for %.0f cr with the old hull's value off: %.0f t dry", quoted, p.spec.dryMass);
+        while (FitPart(g, g, MakePart(PartType::Hold, 4))) {}
+        double full = p.spec.dryMass + p.spec.tank + p.spec.hold;
+        CHECK(p.spec.hold >= 1000.0 && full > p.spec.hyperMaxMass, "filled with cargo bays: %.0f t of hold, and at %.0f t full she's too much for the old drive (good to %.0f t)",
+              p.spec.hold, full, p.spec.hyperMaxMass);
+    }
+
+    // The mining laser is a part like any other
+    {
+        GameState h; NewGame(h);
+        Run(h, 0.2);
+        for (size_t i = 0; i < h.player.build.parts.size();) if (h.player.build.parts[i].type == PartType::MiningLaser) h.player.build.parts.erase(h.player.build.parts.begin() + i); else i++;
+        Refit(h);
+        Controls fire; fire.fire = true;
+        Run(h, 0.1, fire);
+        CHECK(h.player.spec.laserRate == 0.0 && h.flight.miningStatus == "NO MINING LASER FITTED", "without a mining laser fitted: \"%s\"", h.flight.miningStatus.c_str());
+    }
+
+    // NPC ships are built from the same parts
+    {
+        ShipSpec bulk = SpecOf(NpcBuild(NpcKind::Freighter, 3000.0)), small = SpecOf(NpcBuild(NpcKind::Freighter, 60.0)), raider = SpecOf(NpcBuild(NpcKind::Pirate, 0.0));
+        double full = bulk.dryMass + bulk.tank + 3000.0, crew = 0.45 * bulk.hyperSpeed;
+        CHECK(bulk.hold >= 3000.0 && small.hold >= 60.0 && small.hold <= 100.0 && bulk.hyperMaxMass >= full && bulk.thrust > 0.0 &&
+              DrivePower(bulk, crew, full, false) < bulk.reactorMW - bulk.idleMW && raider.hyperSpeed > 0.0 && raider.dryMass < 0.5 * small.dryMass + 30.0,
+              "a 3,000 t freighter: %.0f t dry, a %.0f MW reactor, a drive good for %.0f t; a raider: %.0f t dry", bulk.dryMass, bulk.reactorMW, bulk.hyperMaxMass, raider.dryMass);
+    }
+
+    // Saved and loaded
+    {
+        CHECK(SaveGame(g, "test_ship.txt"), "saved with the refitted ship");
+        GameState h; NewGame(h);
+        bool loaded = LoadGame(h, "test_ship.txt");
+        CHECK(loaded && h.player.build.hull == p.build.hull && h.player.build.parts == p.build.parts && h.player.build.mounts == p.build.mounts &&
+              h.player.spec.hold == p.spec.hold && h.player.spec.fuelGood == p.spec.fuelGood && fabs(h.player.spec.dryMass - p.spec.dryMass) < 1e-9,
+              "the ship round-trips: a %s with %d parts", Hull(h.player.build.hull).name, (int)h.player.build.parts.size());
+        remove("test_ship.txt");
+    }
+
+    // Tachyons: a warp bubble's collapse can be picked up, the nearer and the better the scanner the likelier
+    {
+        GameState h; NewGame(h);
+        Run(h, 0.5);
+        const StarSystem &home = h.systems[h.systems.home];
+        h.player.ship.pos = home.u * (20.0 * AU_U) + home.n * (0.5 * AU_U); h.player.ship.vel = { 0, 0, 0 };
+        Run(h, 0.5);
+        auto heard = [&](double au, int tries) {
+            int n = 0;
+            for (int i = 0; i < tries; i++) {
+                h.events.clear();
+                h.bursts.push_back({ h.systems.home, ShipLocal(h) + home.u * (au * AU_U), 3000.0, 424242 });
+                Run(h, 2.0 / SIM_HZ);
+                for (const GameEvent &e : h.events) if (e.text.find("Tachyon burst") != std::string::npos) n++;
+            }
+            return n;
+        };
+        int near = heard(1.0, 40), mid = heard(6.0, 200), far = heard(120.0, 40);
+        h.player.spec.scan = 4.0;
+        int better = heard(6.0, 200);
+        CHECK(near == 40 && far == 0 && mid > 40 && mid < 160 && better > mid + 20,
+              "a ship dropping out of warp 1 AU off is always noticed, 120 AU off never; at 6 AU, %d times in 200 with the basic scanner and %d with a far better one",
+              mid, better);
+        // Your own arrival is noticed too: a raider that picks it up comes to look
+        h.player.spec = ShipSpec();
+        h.npcs.clear();
+        h.trafficZoned = h.clock;
+        int clan = NO_FACTION;
+        for (const Faction &f : h.systems.factions.list) if (f.kind == FactionKind::Clan) { clan = f.id; break; }
+        DVec3 here = ShipLocal(h);
+        Npc &raider = PutShip(h, NpcKind::Pirate, h.systems.home, here + home.v * (2.0 * AU_U), clan);
+        int rid = raider.id;
+        h.bursts.push_back({ h.systems.home, here, 3000.0, h.id });
+        for (int k = 0; k < GOOD_COUNT; k++) h.player.cargo[k] = 0.0;
+        Run(h, 0.1);
+        const Npc *r = FindNpc(h, rid);
+        CHECK(r && Len(r->goal - here) < 0.02 * AU_U, "a raider 2 AU away picks up the captain's own arrival and makes for the spot");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Multiplayer: the wire format and the reliable channel, without sockets
 // ---------------------------------------------------------------------------
@@ -1913,7 +2660,7 @@ static void TestNetwork()
     CHECK(alice.Heard("Welcome aboard") && bob.Heard("1 other captain"), "welcome messages: \"%s\"", bob.said.empty() ? "" : bob.said[0].c_str());
     const Traffic *seen = Sees(alice, "Bob");
     double gap = seen ? Len(FromShip(alice.g.systems, alice.g.player.ship, seen->ship.anchor, seen->ship.pos)) : -1.0;
-    CHECK(seen && Sees(bob, "Alice") && alice.g.traffic.size() == 1, "each sees the other (spawned %.0f m apart)", gap * METERS_PER_UNIT);
+    CHECK(seen && Sees(bob, "Alice") && std::count_if(alice.g.traffic.begin(), alice.g.traffic.end(), [](const Traffic &t) { return !t.npc; }) == 1, "each sees the other (spawned %.0f m apart)", gap * METERS_PER_UNIT);
     Pump(srv, { &alice, &bob }, 0.1);
     CHECK(Sees(bob, "Alice") && Sees(bob, "Alice")->shipName == "Tachi" && Sees(alice, "Bob")->shipName.empty(),
           "Bob sees that Alice's ship is the Tachi; Bob never named his");
@@ -1958,6 +2705,36 @@ static void TestNetwork()
     Pump(srv, { &alice, &bob }, 0.3, false);
     CHECK(Len(OnServer(srv, "Bob")->player.ship.pos - bob.g.player.ship.pos) < 1.0,
           "after 12 s of hyper Bob's client and the server agree (%d corrections)", bob.net.corrections);
+
+    // --- Space traffic: flown on the server, seen (and named) on the clients ---
+    {
+        Pump(srv, { &alice, &bob }, 3.0);
+        int ships = 0, named = 0;
+        for (const Traffic &t : alice.g.traffic) if (t.npc) { ships++; if (t.name != "Unknown ship" && !t.name.empty()) named++; }
+        CHECK(!srv.world.npcs.empty() && ships > 0 && named == ships && alice.g.npcs.empty() && ships <= SNAPSHOT_MAX_SHIPS,
+              "the server flies %d NPC ships; Alice's client sees the nearest %d, each by name", (int)srv.world.npcs.size(), ships);
+        const Traffic *first = nullptr;
+        for (const Traffic &t : alice.g.traffic) if (t.npc) { first = &t; break; }
+        if (first) {
+            int id = first->id;
+            alice.said.clear();
+            alice.net.SendCommand({ Command::HailShip, id });
+            Pump(srv, { &alice, &bob }, 0.3);
+            CHECK(alice.Heard("Hailing ") && TargetName(alice.g, TargetId::MakeShip(id)) == first->name && !TargetInfo(alice.g, TargetId::MakeShip(id)).empty(),
+                  "she can pick one out (%s) and hail it", first->name.c_str());
+        }
+    }
+
+    // --- A captain's ship is the server's to change; the client is told what it is now ---
+    {
+        Captain *sv = OnServer(srv, "Alice");
+        sv->player.build.parts.push_back(MakePart(PartType::Hold, 1));
+        Refit(*sv);
+        Pump(srv, { &alice, &bob }, 0.5);
+        CHECK(alice.g.player.build.parts == sv->player.build.parts && alice.g.player.spec.hold == sv->player.spec.hold && alice.g.player.spec.hold == CARGO_CAPACITY + 25.0 &&
+              bob.g.player.spec.hold == CARGO_CAPACITY, "Alice's ship gained a cargo bay on the server: her client knows (%.0f t of hold), and Bob's ship is as it was",
+              alice.g.player.spec.hold);
+    }
 
     // --- Trading: a command, applied on the server, results back by snapshot and message ---
     sa = OnServer(srv, "Alice");
@@ -2155,7 +2932,7 @@ int RunHeadlessTests(const char *only)
     struct T { const char *name; void (*fn)(); };
     const T tests[] = {
         { "fuel", TestFuel }, { "flight", TestFlight }, { "trade", TestTrade }, { "stations", TestStations }, { "hz", TestHabitableZone },
-        { "skimming", TestSkimming }, { "comms", TestComms }, { "galaxy", TestGalaxy }, { "systems", TestSystems }, { "maps", TestMaps }, { "factions", TestFactions }, { "economy", TestEconomy }, { "contracts", TestContracts },
+        { "skimming", TestSkimming }, { "comms", TestComms }, { "galaxy", TestGalaxy }, { "systems", TestSystems }, { "maps", TestMaps }, { "factions", TestFactions }, { "economy", TestEconomy }, { "contracts", TestContracts }, { "traffic", TestTraffic }, { "power", TestPower }, { "ships", TestShips },
         { "targeting", TestTargeting }, { "mining", TestMining }, { "save", TestSaveLoad },
         { "protocol", TestProtocol }, { "net", TestNetwork }, { "host", TestHosting },
     };
@@ -2450,6 +3227,66 @@ std::unique_ptr<ScriptedInput> MakeScript(const std::string &name)
             if (f == 478) in.Press(KEY_C);
             if (f == 490) s.screenshot = "contracts_list.png";
             if (f == 495) s.done = true;
+        };
+        return s;
+    }
+    if (name == "traffic") {                                                 // other ships, in the colours of how they look at you
+        s->body = [](ScriptedInput &s, InputFrame &in) {
+            GameState &g = *s.game;
+            int f = s.frame;
+            if (f == 60) {                                                    // one of each, in a row: allied, neutral, alerted, hostile
+                const StarSystem &sys = g.systems[g.loaded.index];
+                const FactionSet &fs = g.systems.factions;
+                int clan = NO_FACTION, state = NO_FACTION;
+                for (const Faction &fa : fs.list) {
+                    if (clan == NO_FACTION && fa.kind == FactionKind::Clan) clan = fa.id;
+                    if (state == NO_FACTION && fa.kind == FactionKind::Government) state = fa.id;
+                }
+                g.player.ship.pos = sys.u * (12.0 * AU_U) + sys.n * (1.0 * AU_U); g.player.ship.vel = {}; g.player.ship.throttle = 0.0f;
+                Face(g, sys.v);
+                g.standing.assign(fs.Count(), 0.0f);
+                g.standing[0] = 60.0f;
+                g.npcs.clear();
+                DVec3 mid = ShipLocal(g) + sys.v * 26.0 - sys.n * 4.0;
+                struct { NpcKind kind; int faction; double x; } row[] = { { NpcKind::Freighter, 0, -15.0 }, { NpcKind::Freighter, NO_FACTION, -5.0 },
+                                                                          { NpcKind::Patrol, state, 5.0 }, { NpcKind::Pirate, clan, 15.0 } };
+                for (auto &r : row) {
+                    Npc &n = PutShip(g, r.kind, g.loaded.index, mid + sys.u * r.x, r.faction);
+                    n.rot = QuaternionFromMatrix(MatrixInvert(MatrixLookAt({ 0, 0, 0 }, ToF(Norm(sys.v * -1.0 + sys.n * 0.9)), ToF(sys.u))));
+                    n.until = 1e18; n.look = 1e18;
+                    if (r.kind == NpcKind::Patrol) { n.doing = NpcDo::Inspect; n.prey = g.id; n.since = g.clock; n.name = fs.Name(state) + " patrol 12"; }
+                    if (r.kind == NpcKind::Pirate) { n.doing = NpcDo::Flee; n.name = fs.Name(clan) + " raider 7"; }
+                }
+                g.trafficZoned = g.clock;
+                s.snap = true;
+            }
+            if (f == 80) s.screenshot = "traffic_colours.png";
+            if (f == 90) s.done = true;
+            (void)in;
+        };
+        return s;
+    }
+    if (name == "ships") {                                                   // fitting out at the yard
+        s->body = [](ScriptedInput &s, InputFrame &in) {
+            GameState &g = *s.game;
+            int f = s.frame;
+            if (f == 10) {
+                for (int i = 0; i < (int)g.loaded.bodies.size(); i++)
+                    if (g.loaded.bodies[i].settlement == Settlement::Shipyard) { Park(g, i, 0.9); s.snap = true; break; }
+                g.player.credits = 60000;
+            }
+            if (f == 20)  in.Press(KEY_F);
+            if (f == 200) in.Press(KEY_FIVE);
+            if (f == 215) s.screenshot = "ships_reactors.png";
+            if (f == 220 || f == 224 || f == 228 || f == 232 || f == 236 || f == 240 || f == 244 || f == 248) in.Press(KEY_D);     // to the cargo bays
+            if (f == 252) in.Press(KEY_ENTER);
+            if (f == 260) s.screenshot = "ships_bays.png";
+            if (f == 264) in.Press(KEY_A);                                    // round to the hulls page
+            if (f >= 266 && f < 284 && f % 2 == 0) in.Press(KEY_A);
+            if (f == 290) s.screenshot = "ships_hulls.png";
+            if (f == 294) in.Press(KEY_ESCAPE);
+            if (f == 300) s.screenshot = "ships_hud.png";
+            if (f == 305) s.done = true;
         };
         return s;
     }

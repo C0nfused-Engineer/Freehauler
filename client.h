@@ -59,6 +59,7 @@ private:
         float    retargetCooldown = 0.0f;
     };
     struct Sample { uint32_t tick; Traffic t; };
+    std::unordered_map<int, Traffic> npcInfo;   // who the NPC ships are (MSG_NPC), by id
 
     void HandleMessage(GameState &g, const std::vector<uint8_t> &msg);
     void HandleSnapshot(GameState &g, const Snapshot &s, double now);

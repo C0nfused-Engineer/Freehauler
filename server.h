@@ -45,6 +45,8 @@ public:
         uint32_t              newsSent = 0;  // the last headline sent
         uint64_t              jobsSent = 0;  // a signature of the contracts last sent (sent again when it changes)
         std::vector<uint8_t>  papersSent;
+        std::vector<uint8_t>  buildSent;     // the MSG_BUILD last sent
+        std::unordered_map<int, float> npcTold;   // NPC ships this client has been told about (and the cargo it was told)
         std::vector<std::pair<TargetId, std::vector<uint8_t>>> commsSent;   // the last MSG_COMMS sent for each open channel
         uint32_t              echoTimeMs = 0;
     };

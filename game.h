@@ -25,7 +25,9 @@
 #include "contract.h"
 #include "econ.h"
 #include "goods.h"
+#include "npc.h"
 #include "ship.h"
+#include "shipparts.h"
 #include "targets.h"
 #include <string>
 #include <unordered_set>
@@ -57,8 +59,12 @@ struct Player {
     double fuel    = FUEL_CAPACITY;
     double credits = START_CREDITS;
     double cargo[GOOD_COUNT] = {};           // tonnes of each ore and good in the hold
+    ShipBuild  build = StarterBuild();       // saved: the hull and what's fitted in it (shipparts.h)
+    ShipSpec   spec = SpecOf(build);         // ...and what that adds up to (shipyard.h's Refit keeps it so)
+    PowerState power;                        // its capacitors and power mode
 
     double CargoTotal() const { double t = 0; for (double c : cargo) t += c; return t; }
+    double Mass() const { return spec.dryMass + fuel + CargoTotal(); }   // tonnes, all up
 };
 
 // Changes players made to the generated world
@@ -121,6 +127,12 @@ struct FlightState {
 
     DriveInfo drive;
     double    burn = 0.0;                // fuel burn this step (t/s)
+    double    load = 0.0;                // megawatts the reactor is putting out
+    bool      driveCharging = false;     // the drive was asked for, but its capacitor hasn't the charge to engage
+    bool      driveTooHeavy = false;     // ...or the ship is too heavy for it
+    bool      driveStarved = false;      // the reactor can't hold the field at the speed set
+    bool      driveNone = false;         // no hyper drive fitted
+    double    drivePower = 0.0;          // megawatts the FTL field is taking
     bool      scooping = false;
     bool      skimming = false;          // in a gas giant's upper atmosphere, collecting helium-3
     bool      skimFull = false;          // ...but the hold is full
@@ -169,6 +181,15 @@ struct Traffic {
     bool        hyper = false;
     bool        mining = false;          // mining beam...
     uint64_t    miningRock = 0;          // ...on this rock
+
+    // NPC ships (id >= NPC_ID_BASE)
+    bool        npc = false;
+    NpcKind     kind = NpcKind::Freighter;
+    int         faction = NO_FACTION;
+    Stance      stance = STANCE_NEUTRAL; // towards whoever is looking
+    std::string from, dest;              // where its cargo came from and is going (may be empty)
+    int         good = -1;               // the bulk of its cargo...
+    float       tonnes = 0.0f;           // ...and how much it carries in all
 };
 
 // ---------------------------------------------------------------------------
@@ -186,7 +207,16 @@ struct World {
     std::unordered_map<uint64_t, double> boardMade;   // saved: when each board (a market's, a faction's) was last drawn up
     double                  contractsChecked = 0.0;
     double                  clock = 0.0; // saved: game seconds since the start
-    std::vector<Traffic>    traffic;     // other captains' ships (never includes your own)
+    std::vector<Traffic>    traffic;     // every other ship in sight: captains' and NPCs' (never your own)
+    std::vector<Npc>        npcs;        // the ships flown around the captains (npcs.h); not saved
+    std::vector<Transit>    transits;    // lane freighters under way between systems near them
+    int                     npcSeq = 0;
+    uint64_t                npcDice = 1;
+    double                  trafficZoned = -1e9, trafficNews = -1e9;
+    std::vector<SysId>      liveSystems; // where ships are flown just now
+    // Warp bubbles that have just collapsed (a ship dropped out of warp): tachyons others may pick up (npcs.cpp)
+    struct Burst { SysId sys; DVec3 pos; double mj; int source; };
+    std::vector<Burst>      bursts;
     MinedMap                minedChanged;// rocks mined since the last time someone looked (the server syncs these)
     std::vector<GameEvent>  events;      // this frame's events (the main loop clears them)
 
@@ -221,6 +251,12 @@ struct Captain {
     void    SetPaper(int faction, uint8_t bits) { if (faction < 0) return; if ((int)papers.size() <= faction) papers.resize(faction + 1, 0); papers[faction] |= bits; }
     std::vector<uint64_t> boardsToSend;  // (the server: boards read since it last told the client)
     uint64_t      dockedAt = 0;          // the body last seen in docking range (contracts.cpp: customs, reminders)
+    double        pirateSafeUntil = 0.0; // pirates have had their share for now
+    double        scanSafeUntil = 0.0;   // a patrol has just been through the hold
+    bool          tankerCalled = false;  // (a tanker has been asked for: sent out on the next traffic step)
+    int           demandFrom = -1;       // the pirate (an NPC id) that has named its price...
+    double        demandTonnes = 0.0;    // ...this many tonnes
+    std::vector<std::pair<double, std::string>> shipReplies;   // what other ships have said, by when it gets here
     LoadedSystem  loaded;                // generated around this ship
     AsteroidField field;                 // generated around this ship
 };
@@ -252,6 +288,7 @@ void StepCaptain(World &w, Captain &c, const Controls &in, const Aim &aim, float
 
 void UpdateEconomy(World &w);                    // economy.cpp: runs the economy up to the clock (whoever owns the world calls it)
 void UpdateContracts(World &w);                  // contracts.cpp: lapses old offers (likewise)
+void StepTraffic(World &w, Captain *const *captains, int count, float dt);   // npcs.cpp: the other ships (likewise)
 
 // Single player: advance the clock and the economy, step your captain
 inline void StepGame(GameState &g, const Controls &in, const Aim &aim, float dt)
@@ -259,6 +296,8 @@ inline void StepGame(GameState &g, const Controls &in, const Aim &aim, float dt)
     g.clock += dt;
     UpdateEconomy(g);
     UpdateContracts(g);
+    Captain *me = &g;
+    StepTraffic(g, &me, 1, dt);
     StepCaptain(g, g, in, aim, dt);
 }
 

@@ -1,5 +1,6 @@
 // client.cpp - connecting, prediction and reconciliation, smoothing other ships
 #include "client.h"
+#include "shipyard.h"
 #include <algorithm>
 #include <cmath>
 
@@ -218,6 +219,27 @@ void NetClient::HandleMessage(GameState &g, const std::vector<uint8_t> &msg)
         if (r.ok) g.papers = papers;
         return;
     }
+    case MSG_BUILD: {
+        ShipBuild b;
+        b.hull = r.I32(); b.stretch = r.U8(); b.mounts = r.U8();
+        uint8_t n = r.U8();
+        for (int i = 0; i < n && r.ok; i++) { Part p = UnpackPart(r.I32()); p.maker = r.I16(); b.parts.push_back(p); }
+        if (!r.ok || b.hull < 0 || b.hull >= HULL_COUNT) return;
+        g.player.build = b;
+        Refit(g);
+        return;
+    }
+    case MSG_NPC: {
+        Traffic t;
+        t.id = r.I32(); t.npc = true;
+        uint8_t kind = r.U8();
+        t.faction = r.I32(); t.name = r.Str(); t.from = r.Str(); t.dest = r.Str(); t.good = r.I32(); t.tonnes = r.F32();
+        if (!r.ok || kind >= (uint8_t)NpcKind::Count || t.good >= GOOD_COUNT) return;
+        t.kind = (NpcKind)kind;
+        if (npcInfo.size() > 4000) npcInfo.clear();
+        npcInfo[t.id] = t;
+        return;
+    }
     case MSG_STANDING: {
         uint8_t n = r.U8();
         std::vector<float> s;
@@ -298,7 +320,7 @@ void NetClient::HandleSnapshot(GameState &g, const Snapshot &s, double now)
 
     // Ships that dropped out of the snapshot (left, or no longer among the nearest)
     for (auto it = samples.begin(); it != samples.end();)
-        it = !it->second.empty() && s.tick > it->second.back().tick + 120 ? samples.erase(it) : std::next(it);
+        it = !it->second.empty() && s.tick > it->second.back().tick + (it->first >= NPC_ID_BASE ? 30 : 120) ? samples.erase(it) : std::next(it);
 
     if (s.lastProcessed > reconciledTo) Reconcile(g, s);
 }
@@ -352,6 +374,7 @@ void NetClient::Reconcile(GameState &g, const Snapshot &s)
     // Rewind to what the server says we were after step S, then replay what we've done since
     g.player.ship = s.player.ship;
     g.player.fuel = s.player.fuel;
+    g.player.power = s.player.power;
     FlightState &f = g.flight;
     f.selected = s.selected; f.lock = s.lock; f.lockSuppressed = s.lockSuppressed;
     f.lockBreak = s.lockBreak; f.retargetCooldown = s.retargetCooldown;
@@ -438,6 +461,16 @@ void NetClient::UpdateTraffic(GameState &g, float frameDt)
             double u = (renderTick - a.tick) / (double)(b.tick - a.tick);
             t = b.t;
             t.ship = InterpolateShip(g.systems, a.t.ship, b.t.ship, u);
+        }
+        if (t.npc) {                                              // (who it is came separately)
+            auto info = npcInfo.find(entry.first);
+            t.name = "Unknown ship";
+            if (info != npcInfo.end()) {
+                const Traffic &i = info->second;
+                t.name = i.name; t.kind = i.kind; t.faction = i.faction; t.from = i.from; t.dest = i.dest; t.good = i.good; t.tonnes = i.tonnes;
+            }
+            g.traffic.push_back(t);
+            continue;
         }
         auto nm = names.find(entry.first);
         t.name = nm != names.end() ? nm->second : "Captain " + std::to_string(entry.first);

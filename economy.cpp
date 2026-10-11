@@ -26,10 +26,11 @@ static void Industry(MarketDef &d, const Body &b, const Body *ground, const Fact
     float metals = res[RES_METALS], precious = res[RES_PRECIOUS], minerals = res[RES_MINERALS], ices = res[RES_ICES], bio = res[RES_BIOMASS];
     if (!ground && b.kind == Kind::Station) { metals = minerals = 0.5f; precious = 0.15f; ices = 0.3f; }
 
-    // Everybody eats, drinks and burns fuel; people on worlds also shop
-    if (b.kind == Kind::Station) { need(REF_FOOD, 0.10); need(REF_WATER, 0.04); need(REF_FUEL, 0.06); need(GOOD_LIQUOR, 0.01); }
+    // Everybody eats, drinks and burns fuel (fission fuel mostly: most ships and most power plants run on it; the
+    // better ones on deuterium); people on worlds also shop
+    if (b.kind == Kind::Station) { need(REF_FOOD, 0.10); need(REF_WATER, 0.04); need(REF_REACTOR_FUEL, 0.04); need(REF_FUEL, 0.02); need(GOOD_LIQUOR, 0.01); }
     else { need(REF_FOOD, 0.25); need(REF_WATER, 0.08); need(GOOD_CONSUMER, 0.06); need(GOOD_MEDICINES, 0.02);
-           need(GOOD_LIQUOR, 0.015); need(REF_FUEL, 0.03); need(GOOD_ELECTRONICS, 0.012); need(GOOD_LUXURY, 0.002); }
+           need(GOOD_LIQUOR, 0.015); need(REF_REACTOR_FUEL, 0.02); need(REF_FUEL, 0.01); need(GOOD_ELECTRONICS, 0.012); need(GOOD_LUXURY, 0.002); }
     if (b.settlement == Settlement::MiningOutpost || b.settlement == Settlement::OreRefinery || b.settlement == Settlement::UndergroundColony ||
         b.settlement == Settlement::OreTerminal) { need(GOOD_ROBOTICS, 0.006); need(GOOD_ELECTRONICS, 0.01); }
 
@@ -38,12 +39,14 @@ static void Industry(MarketDef &d, const Body &b, const Body *ground, const Fact
         make(GOOD_ELECTRONICS, 0.10); make(GOOD_ROBOTICS, 0.04); make(GOOD_INSTRUMENTS, 0.03); make(GOOD_MEDICINES, 0.06);
         make(GOOD_CONSUMER, 0.14); make(GOOD_LUXURY, 0.02); make(GOOD_SHIP_COMPONENTS, 0.03); make(GOOD_MACHINERY, 0.05);
         make(GOOD_WEAPONS, 0.015); make(GOOD_REACTOR_CORES, 0.015); make(REF_CHEMICALS, 0.05); make(REF_FERTILIZER, 0.04);
-        make(REF_WATER, 0.06);
+        make(REF_WATER, 0.06); make(REF_FUEL, 0.02);                // (an ocean to draw deuterium from)
+        need(RAW_HELIUM3, 0.003);
         make(RAW_GRAIN, 0.18); make(RAW_LIVESTOCK, 0.045); make(REF_FOOD, 0.20);     // (it feeds itself, mostly)
         need(GOOD_LUXURY, 0.006);
         break;
     case Settlement::SettledWorld:
         make(RAW_GRAIN, 0.55); make(RAW_LIVESTOCK, 0.15); make(REF_FOOD, 0.45); make(GOOD_LIQUOR, 0.05); make(REF_WATER, 0.12);
+        make(REF_FUEL, 0.03);
         make(RAW_FLORA, 0.012 * (0.3 + bio));
         need(REF_FERTILIZER, 0.05); need(GOOD_MACHINERY, 0.02);
         break;
@@ -52,7 +55,8 @@ static void Industry(MarketDef &d, const Body &b, const Body *ground, const Fact
         need(GOOD_HABITAT_MODULES, 0.02); need(GOOD_MACHINERY, 0.02);
         break;
     case Settlement::OrbitalHabitats: case Settlement::SkimmerStation:
-        make(RAW_HELIUM3, 0.10); make(REF_FUEL, 0.60);
+        // (helium-3 from the giant; and deuterium, from water brought in: the giant's own hydrogen is poor in it)
+        make(RAW_HELIUM3, 0.30); make(REF_FUEL, 0.10);
         need(GOOD_MACHINERY, 0.02);
         break;
     case Settlement::MiningOutpost: case Settlement::OreTerminal:
@@ -66,7 +70,7 @@ static void Industry(MarketDef &d, const Body &b, const Body *ground, const Fact
         // (its own miners work the belt around it)
         make(ORE_IRON, 0.30); make(ORE_SILICATES, 0.20); make(ORE_CARBON, 0.20); make(ORE_COPPER, 0.10); make(ORE_WATER_ICE, 0.10);
         make(REF_STEEL, 0.30); make(REF_ALLOYS, 0.12); make(REF_CONDUCTORS, 0.12); make(REF_SILICON, 0.10); make(REF_CERAMICS, 0.15);
-        make(REF_POLYMERS, 0.10); make(REF_WATER, 0.08);
+        make(REF_POLYMERS, 0.10); make(REF_WATER, 0.08); make(REF_FUEL, 0.04);       // (deuterium out of the belt's ice)
         need(GOOD_MACHINERY, 0.03);
         break;
     case Settlement::UndergroundColony:
@@ -92,10 +96,11 @@ static void Industry(MarketDef &d, const Body &b, const Body *ground, const Fact
         break;
     case Settlement::Starbase:
         // A state's ships are armed and fuelled here; the more warlike the state, the more so
-        need(GOOD_WEAPONS, 0.010 * (owner ? 1.0 + owner->axis[AX_FORCE] : 1.0)); need(GOOD_MUNITIONS, 0.03); need(REF_FUEL, 0.10);
+        need(GOOD_WEAPONS, 0.010 * (owner ? 1.0 + owner->axis[AX_FORCE] : 1.0)); need(GOOD_MUNITIONS, 0.03);
+        need(REF_FUEL, 0.06); need(RAW_HELIUM3, 0.02); need(REF_REACTOR_FUEL, 0.02);       // (a fleet's best ships burn the best fuel)
         break;
     default:
-        need(REF_FUEL, 0.06);                                      // ports, waystations, freeports: traffic
+        need(REF_REACTOR_FUEL, 0.04); need(REF_FUEL, 0.02);        // ports, waystations, freeports: traffic
         break;
     }
 }
@@ -241,8 +246,10 @@ static double RaidAt(const Economy &e, const FactionSet &fs, DVec3 ly)
 // Goods move from a to b (or back) wherever the price gap is worth the trip.
 // 'costAB': what it costs to bring a good into b from a, as a share of its price (tariffs).
 // (prices as they stood at the start of the round: 'pa' and 'pb', a row of GOOD_COUNT each)
+// 'ships': the goods go onto the dock for a ship (Economy::Ship) instead of straight into the other market's stock.
 static void Trade(const MarketDef &da, MarketState &sa, const MarketDef &db, MarketState &sb, double capacity,
-                  double costAB, double costBA, const float *pricesA, const float *pricesB)
+                  double costAB, double costBA, const float *pricesA, const float *pricesB,
+                  Economy *ships = nullptr, int ia = -1, int ib = -1, double clock = 0.0)
 {
     for (int g = 0; g < GOOD_COUNT; g++) {
         if (da.target[g] <= 0.0f || db.target[g] <= 0.0f) continue;
@@ -256,7 +263,8 @@ static void Trade(const MarketDef &da, MarketState &sa, const MarketDef &db, Mar
         if (spare <= 0.0) continue;
         double q = fmin(fmin(1.5 * capacity * gap, spare), 0.3 * src.stock[g]);
         src.stock[g] -= (float)q;
-        dst.stock[g] += (float)q;
+        if (ships) ships->Ship(toB ? ia : ib, toB ? ib : ia, g, (float)q, clock);
+        else       dst.stock[g] += (float)q;
     }
 }
 
@@ -273,6 +281,7 @@ static void RunDays(Economy &e, const EconBase &base, const FactionSet &fs, doub
         i++;
     }
     auto boost = [&](int faction) { return faction >= 0 && faction < (int)e.output.size() && e.outputUntil[faction] > clock ? e.output[faction] : 1.0f; };
+    const bool flown = (int)e.zone.size() == N;                    // (somewhere, ships are carrying the trade)
 
     // Use, then make (raw goods first, so a day's ore can become a day's steel)
     for (int i = 0; i < N; i++) {
@@ -292,7 +301,9 @@ static void RunDays(Economy &e, const EconBase &base, const FactionSet &fs, doub
             for (const Ingredient &in : GoodData(g).recipe) if (in.tonnes > 0.0f) q = fminf(q, s.stock[in.good] / in.tonnes);
             if (q <= 0.0f) continue;
             for (const Ingredient &in : GoodData(g).recipe) if (in.tonnes > 0.0f) s.stock[in.good] -= q * in.tonnes;
-            s.stock[g] += q;
+            if (flown && e.zone[i] == 2 && g <= RAW_HELIUM3) {             // (dug or skimmed: it comes in when the miners do)
+                e.yield[(size_t)i * GOOD_COUNT + g] += q; e.afloat[(size_t)i * GOOD_COUNT + g] += q;
+            } else s.stock[g] += q;
         }
     }
     // Everyone's prices, now that the day's making and using is done
@@ -308,7 +319,8 @@ static void RunDays(Economy &e, const EconBase &base, const FactionSet &fs, doub
         const MarketDef &d = base.defs[i];
         if (d.hub == i || d.hub < 0) continue;
         const MarketDef &h = base.defs[d.hub];
-        Trade(d, e.state[i], h, e.state[d.hub], 2.0 * d.scale * days, 0.0, 0.0, row(i), row(d.hub));
+        Trade(d, e.state[i], h, e.state[d.hub], 2.0 * d.scale * days, 0.0, 0.0, row(i), row(d.hub),
+              flown && e.zone[i] == 2 ? &e : nullptr, i, d.hub, clock);
     }
     // ...and hubs with each other, along the lanes: less with distance, less still through raiders, not at all across an embargo
     const int F = fs.Count();
@@ -316,11 +328,13 @@ static void RunDays(Economy &e, const EconBase &base, const FactionSet &fs, doub
         const MarketDef &a = base.defs[l.a], &b = base.defs[l.b];
         bool borders = a.ruler != b.ruler && a.ruler >= 0 && b.ruler >= 0;
         if (borders && (e.embargoUntil[a.ruler * F + b.ruler] > clock || e.embargoUntil[b.ruler * F + a.ruler] > clock)) continue;
-        double raids = fmax(RaidAt(e, fs, a.ly), RaidAt(e, fs, b.ly));
+        bool byShip = flown && (e.zone[l.a] || e.zone[l.b]);
+        // (where the ships are flown, so are the pirates: what they take is taken from real holds, not off the top)
+        double raids = flown && (e.zone[l.a] == 2 || e.zone[l.b] == 2) ? 0.0 : fmax(RaidAt(e, fs, a.ly), RaidAt(e, fs, b.ly));
         // (a big port sends its own ships to a small one: the lane carries more than the small one could alone)
         double capacity = sqrt((double)a.traffic * b.traffic) * 1.5 / (1.0 + l.ly / 10.0) * (1.0 - 0.85 * raids) * days;
         double intoB = a.ruler != b.ruler && b.ruler >= 0 ? e.tariff[b.ruler] : 0.0, intoA = a.ruler != b.ruler && a.ruler >= 0 ? e.tariff[a.ruler] : 0.0;
-        Trade(a, e.state[l.a], b, e.state[l.b], capacity, intoB, intoA, row(l.a), row(l.b));
+        Trade(a, e.state[l.a], b, e.state[l.b], capacity, intoB, intoA, row(l.a), row(l.b), byShip ? &e : nullptr, l.a, l.b, clock);
     }
     // Raiders left alone drift back to their usual level
     for (const Faction &f : fs.list)
@@ -350,6 +364,10 @@ static void InitState(Economy &e, const EconBase &base, const FactionSet &fs)
     e.nextAct.assign(F, 0.0);
     e.lastAct.assign(F, -1);
     e.shocks.clear();
+    e.zone.assign(N, 0);
+    e.waiting.clear();
+    e.yield.assign((size_t)N * GOOD_COUNT, 0.0f);
+    e.afloat.assign((size_t)N * GOOD_COUNT, 0.0f);
 }
 
 // A new galaxy's markets have been trading for a while: run it in until stocks stop lurching
@@ -571,6 +589,8 @@ void UpdateEconomy(World &w)
     w.econ.simulated = w.clock;
 }
 
+double RaidLevel(const World &w, DVec3 ly) { return w.econ.Built() ? RaidAt(w.econ, w.systems.factions, ly) : 0.0; }
+
 double MarketPrice(const World &w, int market, int good)
 {
     if (market < 0 || market >= w.econ.Count()) return 0.0;
@@ -638,7 +658,7 @@ static Market LiveAt(const World &w, const Captain &c, int i)
     m.owner = s.owner; m.ruler = d.ruler;
     m.tariff = d.ruler >= 0 ? w.econ.tariff[d.ruler] : 0.0;
     m.edge = Edge(c, s.owner);
-    m.fuelPrice = m.Sells(REF_FUEL) ? m.BuyPrice(REF_FUEL) : 0.0;
+    m.fuelPrice = m.Sells(c.player.spec.fuelGood) ? m.BuyPrice(c.player.spec.fuelGood) : 0.0;      // (the fuel this captain's reactor burns)
     return m;
 }
 
@@ -659,7 +679,7 @@ bool KnownMarket(const Captain &c, const Body &b, Market &m, double *at)
     }
     m.owner = r.owner; m.ruler = r.ruler; m.tariff = r.tariff;
     m.edge = Edge(c, r.owner);
-    m.fuelPrice = m.Sells(REF_FUEL) ? m.BuyPrice(REF_FUEL) : 0.0;
+    m.fuelPrice = m.Sells(c.player.spec.fuelGood) ? m.BuyPrice(c.player.spec.fuelGood) : 0.0;
     if (at) *at = r.at;
     return true;
 }
@@ -774,7 +794,7 @@ bool BuyGoods(World &w, Captain &c, int good, double qty)
     Player &p = c.player;
     Market m = LiveAt(w, c, i);
     if (!m.Sells(good)) { Tell(w, c, b->name + " has no " + GoodData(good).name + " for sale"); return false; }
-    double room = CARGO_CAPACITY - p.CargoTotal();
+    double room = p.spec.hold - p.CargoTotal();
     if (room <= 1e-6) { Tell(w, c, "Cargo hold full"); return false; }
     double cost, got = Purchase(w, c, i, good, fmin(qty, room), p.credits, cost);
     if (got <= 1e-6)  { Tell(w, c, "Not enough credits"); return false; }
@@ -793,16 +813,17 @@ bool BuyFuel(World &w, Captain &c, double qty)
     int i = Docked(w, c, b);
     if (i < 0) return false;
     Player &p = c.player;
-    if (!LiveAt(w, c, i).Sells(REF_FUEL)) { Tell(w, c, b->name + " has no fuel to sell"); return false; }
-    double room = FUEL_CAPACITY - p.fuel;
+    const int fuel = p.spec.fuelGood;
+    if (!LiveAt(w, c, i).Sells(fuel)) { Tell(w, c, b->name + " has no " + GoodData(fuel).name + " for your reactor"); return false; }
+    double room = p.spec.tank - p.fuel;
     if (room <= 1e-6)  { Tell(w, c, "Tank already full");  return false; }
-    double cost, got = Purchase(w, c, i, REF_FUEL, fmin(qty, room), p.credits, cost);
+    double cost, got = Purchase(w, c, i, fuel, fmin(qty, room), p.credits, cost);
     if (got <= 1e-6)   { Tell(w, c, "Not enough credits"); return false; }
     p.fuel    += got;
     p.credits -= cost;
     GoodCustomer(w, c, i, cost);
     RecordAt(w, c, i);
-    w.Emit(EventType::BoughtFuel, TextFormat("Bought %.1f t fuel for %s cr", got, Thousands(cost).c_str()),
+    w.Emit(EventType::BoughtFuel, TextFormat("Bought %.1f t %s for %s cr", got, GoodData(fuel).name, Thousands(cost).c_str()),
            TargetId::MakeBody(c.loaded.index, c.flight.nearBody), -1, got, cost, c.id);
     return true;
 }
@@ -838,7 +859,8 @@ void WriteEconomy(const World &w, std::string &out)
     for (int i = 0; i < e.Count(); i++) {
         const MarketDef &d = e.base->defs[i];
         std::string line = TextFormat("stock %llu", (unsigned long long)d.bodyId);
-        for (int g = 0; g < GOOD_COUNT; g++) line += TextFormat(" %.6g", e.state[i].stock[g]);
+        for (int g = 0; g < GOOD_COUNT; g++)                       // (with what's on its way there: a save has no ships in flight)
+            line += TextFormat(" %.6g", e.state[i].stock[g] + (e.afloat.empty() ? 0.0f : e.afloat[(size_t)i * GOOD_COUNT + g]));
         out += line + "\n";
         if (e.state[i].owner != d.owner) out += TextFormat("owner %llu %d\n", (unsigned long long)d.bodyId, e.state[i].owner);
     }

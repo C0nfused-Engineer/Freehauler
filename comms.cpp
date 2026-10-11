@@ -75,7 +75,9 @@ static std::vector<std::string> MarketReport(const World &w, const Captain &c, c
     int ex = list("Selling cheap:", Role::Export, true);
     int im = list("Paying well for:", Role::Import, false);
     if (!ex && !im) list("Trading:", Role::Trade, true);
-    out.push_back(m.fuelPrice > 0.0 ? TextFormat("Prices in cr/t. Fuel is %.0f cr/t.", m.fuelPrice) : "Prices in cr/t. No fuel to spare.");
+    const char *burns = GoodData(c.player.spec.fuelGood).name;     // (what this captain's reactor burns)
+    out.push_back(m.fuelPrice > 0.0 ? TextFormat("Prices in cr/t. %s for your tank is %.0f cr/t.", burns, m.fuelPrice)
+                                    : TextFormat("Prices in cr/t. No %s to spare for your tank.", burns));
     if (m.tariff > 0.0) out.push_back(TextFormat("%.0f%% tariff on what you sell here.", m.tariff * 100.0));
     return out;
 }
