@@ -11,6 +11,7 @@ static const double DISPATCH_WAIT = 90.0;        // a dock's goods wait this lon
 static const double DISPATCH_GAP  = 30.0;        // ...but ships for the same place don't leave closer together than this
 static const double SIGHT = 1.5 * AU_U;          // how far pirates and patrols notice things
 // (at hyper speeds two ships holding station on each other are still hundreds of km apart: that's alongside)
+static const double BOARD_RANGE = 200.0 * KM_U, BOARD_SECONDS = 4.0;       // a captain boards a ship held this close for this long
 static const double ROB_RANGE = 1000.0 * KM_U, CATCH_RANGE = 10.0 * KM_U, SCAN_RANGE = 1000.0 * KM_U;
 
 static double Roll(World &w) { w.npcDice = Mix64(w.npcDice + 0x9E3779B97F4A7C15ull); return (double)(w.npcDice >> 11) * (1.0 / 9007199254740992.0); }
@@ -130,9 +131,21 @@ static void Fit(Npc &n, double load)
     n.power.radar = n.kind != NpcKind::Pirate;                     // (raiders don't announce themselves)
     n.tank = n.spec.tank;
     n.fuel = n.tank;
-    n.power.bank = n.spec.bankMJ; n.power.driveCap = n.spec.driveCapMJ;
+    n.power.bank = n.spec.bankTJ; n.power.driveCap = n.spec.driveCapTJ;
     n.ship.ftl = n.kind == NpcKind::Freighter ? 0.45f : n.kind == NpcKind::Miner ? 0.40f : n.kind == NpcKind::Pirate ? 0.65f
                : n.kind == NpcKind::Patrol ? 0.80f : 0.70f;
+}
+
+// ...and the freighters are their owners' own designs for the job (fleet.h)
+static void FitDesign(Npc &n, const ShipDesign &d)
+{
+    n.spec = d.spec;
+    n.hull = (uint8_t)d.build.hull;
+    n.power.radar = true;
+    n.tank = n.spec.tank;
+    n.fuel = n.tank;
+    n.power.bank = n.spec.bankTJ; n.power.driveCap = n.spec.driveCapTJ;
+    n.ship.ftl = (float)d.cruise;
 }
 
 // Around a port, ships fly on their engines, and no faster than this for each unit they are from it: a freighter
@@ -208,10 +221,11 @@ static void Auto(Npc &n, DVec3 goal, const Body *body, DVec3 goalVel, float dt)
         s.vel = ToF(ToD(s.vel) + change);
         s.pos = s.pos + ToD(s.vel) * (double)dt;
         n.power.engaged = n.power.warping = false;
-        double engineMW = n.spec.engineMW * fmin(1.0, ask / fmax(most, 1e-9));
-        double load = n.spec.idleMW + (RadarOn(n.spec, n.power) ? n.spec.radarMW : 0.0) + engineMW;
-        n.fuel = fmax(0.0, n.fuel - load / (n.spec.reactorEff * n.spec.fuelMJ) * dt);
-        n.power.heat = (float)(load * (1.0 - n.spec.reactorEff) / n.spec.reactorEff + PLUME_HEAT * engineMW);
+        double engineTW = n.spec.engineTW * fmin(1.0, ask / fmax(most, 1e-9));
+        double load = n.spec.idleTW + (RadarOn(n.spec, n.power) ? n.spec.radarTW : 0.0) + engineTW;
+        double burn = ReactorBurnFor(n.spec, load);
+        n.fuel = fmax(0.0, n.fuel - burn * dt);
+        n.power.heat = (float)(fmax(0.0, burn * n.spec.fuelTJ - load) + PLUME_HEAT * engineTW);
     } else {
         r = FlyShip(s, n.spec, n.power, n.fuel, mass, in, dt, w.systems, l.eye->loaded, !body && !detour && !there ? &lock : nullptr);
     }
@@ -263,12 +277,6 @@ static Npc &Spawn(World &w, NpcKind kind, const Live &l, DVec3 pos, int faction)
     Fit(n, 0.0);
     w.npcs.push_back(n);
     return w.npcs.back();
-}
-
-// Whose colours a freighter flies: whoever runs the place it loaded at
-static int Carrier(const World &w, int market)
-{
-    return market >= 0 && market < w.econ.Count() ? w.econ.state[market].owner : NO_FACTION;
 }
 
 static int BulkGood(const float *cargo)
@@ -329,7 +337,7 @@ static void Populate(World &w, const Live &l)
     for (int m : markets) {
         const MarketDef &d = base.defs[m];
         bool digs = false;
-        for (int g = 0; g <= RAW_HELIUM3; g++) if (d.out[g] > 0.0f) digs = true;
+        for (int g = 0; g <= RAW_HELIUM3; g++) if (w.econ.state[m].out[g] > 0.0f) digs = true;
         const Body *b = BodyOf(w, l, m);
         if (!digs || !b) continue;
         int want = std::max(1, std::min(3, (int)(d.scale / 80.0f + 0.5f)));
@@ -396,6 +404,7 @@ static void Rezone(World &w, std::vector<Live> &live)
         if (LiveAt(live, n.sys)) { i++; continue; }
         int dest = n.kind == NpcKind::Miner ? n.from : n.to;
         if (dest >= 0 && n.total > 0.0f) e.Land(dest, n.cargo);
+        if (n.credits > 0.0 && n.to >= 0) LandSpecie(e, n.to, n.payee, n.credits);
         w.npcs.erase(w.npcs.begin() + i);
     }
     for (size_t i = 0; i < e.waiting.size();) {
@@ -409,7 +418,14 @@ static void Rezone(World &w, std::vector<Live> &live)
         const Transit &t = w.transits[i];
         if (e.zone[t.from] || e.zone[t.to]) { i++; continue; }
         e.Land(t.to, t.cargo);
+        LandSpecie(e, t.to, t.payee, t.credits);
         w.transits.erase(w.transits.begin() + i);
+    }
+    for (size_t i = 0; i < e.specie.size();) {
+        const Specie &s = e.specie[i];
+        if (e.zone[s.from] || e.zone[s.to]) { i++; continue; }
+        LandSpecie(e, s.to, s.faction, s.credits);
+        e.specie.erase(e.specie.begin() + i);
     }
     for (int i = 0; i < N; i++) {
         if (e.zone[i] == 2) continue;
@@ -429,11 +445,60 @@ static void Rezone(World &w, std::vector<Live> &live)
 // Freight: from the docks into ships, and lane ships arriving
 // ---------------------------------------------------------------------------
 static double LaneTime(const MarketDef &a, const MarketDef &b) { return 20.0 + 6.0 * Len(a.ly - b.ly); }
+static const int SHIPS_A_GO = 3;                 // the most ships that cast off from one dock for one place together
+
+// The job a load is: about the system, or between systems dry or in tanks
+static int RoleFor(const MarketDef &a, const MarketDef &b, const float *cargo, float total)
+{
+    if (a.hub == b.hub) return ROLE_HAULER;
+    float tanked = 0.0f;
+    for (int g = 0; g < GOOD_COUNT; g++) if (GoesByTanker(g)) tanked += cargo[g];
+    return tanked > 0.5f * total ? ROLE_TANKER : ROLE_BULK;
+}
+
+// Whose ship takes it: one of those based at the hub it leaves from, by how many each owner has there
+static int ShipOwner(World &w, int from, int role)
+{
+    const Economy &e = w.econ;
+    int hub = e.base->defs[from].hub, owner = NO_FACTION;
+    if (hub < 0 || hub >= (int)e.fleets.size()) return owner;
+    double all = 0.0;
+    for (const FleetAt &f : e.fleets[hub]) all += f.ships[role];
+    double pick = Roll(w) * all;
+    for (const FleetAt &f : e.fleets[hub]) {
+        if (f.ships[role] <= 0.0f) continue;
+        owner = f.owner; pick -= f.ships[role];
+        if (pick <= 0.0) break;
+    }
+    return owner;
+}
 
 static void Dispatch(World &w, const std::vector<Live> &live)
 {
     Economy &e = w.econ;
     const EconBase &base = *e.base;
+    // Money on its way home (econ.h): a paymaster's ship for each run, one of its owner's own
+    for (const Specie &s : e.specie) {
+        const MarketDef &a = base.defs[s.from], &b = base.defs[s.to];
+        const Live *here = LiveAt(live, a.sys);
+        const Body *dock = here ? BodyOf(w, *here, s.from) : nullptr;
+        std::string name = w.systems.factions.Name(s.faction) + TextFormat(" paymaster %d", 10 + (int)(Roll(w) * 90.0));
+        if (dock) {
+            Npc &n = Spawn(w, NpcKind::Freighter, *here, Beside(w, *dock), s.faction);
+            n.name = name; n.from = s.from; n.to = s.to; n.total = 0.0f; n.credits = s.credits; n.payee = s.faction;
+            FitDesign(n, FleetDesign(base, s.faction, a.hub == b.hub ? ROLE_HAULER : ROLE_TANKER));
+            n.jumping = a.hub != b.hub;
+            n.doing = NpcDo::Dock; n.until = w.clock + 10.0 + 15.0 * Roll(w);       // casting off
+            n.left = dock->local; n.leftClear = dock->radius;
+        } else {
+            Transit t;
+            t.from = s.from; t.to = s.to; t.faction = s.faction; t.credits = s.credits; t.payee = s.faction;
+            t.arrive = w.clock + LaneTime(a, b) + 40.0;
+            t.name = name;
+            w.transits.push_back(t);
+        }
+    }
+    e.specie.clear();
     for (size_t i = 0; i < e.waiting.size();) {
         Shipment &s = e.waiting[i];
         const MarketDef &a = base.defs[s.from], &b = base.defs[s.to];
@@ -448,24 +513,45 @@ static void Dispatch(World &w, const std::vector<Live> &live)
         const Body *dock = here ? BodyOf(w, *here, s.from) : nullptr;
         if (s.total < 2.0f) {
             e.Land(s.to, s.cargo);                                 // (not worth a ship: it goes in someone's spare corner)
-        } else if (dock) {
-            Npc &n = Spawn(w, NpcKind::Freighter, *here, Beside(w, *dock), Carrier(w, s.from));
-            n.from = s.from; n.to = s.to; n.total = s.total;
-            for (int g = 0; g < GOOD_COUNT; g++) n.cargo[g] = s.cargo[g];
-            Fit(n, n.total);
-            n.jumping = a.hub != b.hub;
-            n.doing = NpcDo::Dock; n.until = w.clock + 10.0 + 15.0 * Roll(w);       // casting off
-            n.left = dock->local; n.leftClear = dock->radius;
-        } else {
-            Transit t;
-            t.from = s.from; t.to = s.to; t.total = s.total; t.faction = Carrier(w, s.from);
-            for (int g = 0; g < GOOD_COUNT; g++) t.cargo[g] = s.cargo[g];
-            t.arrive = w.clock + LaneTime(a, b) + 40.0;
-            t.name = ShipName(w, NpcKind::Freighter, nullptr);
-            w.transits.push_back(t);
+            for (int g = 0; g < GOOD_COUNT; g++) s.cargo[g] = 0.0f;
+            s.total = 0.0f; s.since = w.clock;
+            i++;
+            continue;
         }
-        for (int g = 0; g < GOOD_COUNT; g++) s.cargo[g] = 0.0f;
-        s.total = 0.0f; s.since = w.clock;
+        // Into ships of the fleet based here: as many as it takes (a few at a time), each fuelled from the port's
+        // stock for the run (or the far end's, if this one has none to spare). No fuel, and it waits on the dock.
+        const int role = RoleFor(a, b, s.cargo, s.total);
+        for (int ship = 0; ship < SHIPS_A_GO && s.total >= 2.0f; ship++) {
+            int owner = ShipOwner(w, s.from, role);
+            const ShipDesign *d = &FleetDesign(base, owner, role);
+            if (role == ROLE_HAULER && s.total > d->cargo && FleetDesign(base, owner, ROLE_BULK).cargo > d->cargo) d = &FleetDesign(base, owner, ROLE_BULK);
+            // (a part load between systems goes by tramp, not in a quarter-full bulk carrier)
+            if (role != ROLE_HAULER && s.total < 0.25 * d->cargo && FleetDesign(base, NO_FACTION, role).cargo < d->cargo) { owner = NO_FACTION; d = &FleetDesign(base, owner, role); }
+            // (what the run burns goes by what the ship weighs, and it's lighter part loaded)
+            double fuel = (role == ROLE_HAULER ? d->localFuel : d->Fuel(Len(a.ly - b.ly))) * (d->mass - d->cargo + fmin((double)s.total, d->cargo)) / d->mass;
+            if (!Bunker(e, s.from, d->fuelGood, fuel) && !Bunker(e, s.to, d->fuelGood, fuel)) break;
+            float share = d->cargo < s.total ? (float)(d->cargo / s.total) : 1.0f, load[GOOD_COUNT], total = 0.0f;
+            for (int g = 0; g < GOOD_COUNT; g++) { load[g] = s.cargo[g] * share; total += load[g]; s.cargo[g] -= load[g]; }
+            s.total = share < 1.0f ? s.total - total : 0.0f;
+            if (dock) {
+                Npc &n = Spawn(w, NpcKind::Freighter, *here, Beside(w, *dock), owner);
+                n.from = s.from; n.to = s.to; n.total = total;
+                for (int g = 0; g < GOOD_COUNT; g++) n.cargo[g] = load[g];
+                FitDesign(n, *d);
+                n.jumping = a.hub != b.hub;
+                n.doing = NpcDo::Dock; n.until = w.clock + 10.0 + 15.0 * Roll(w) + 8.0 * ship;       // casting off
+                n.left = dock->local; n.leftClear = dock->radius;
+            } else {
+                Transit t;
+                t.from = s.from; t.to = s.to; t.total = total; t.faction = owner;
+                for (int g = 0; g < GOOD_COUNT; g++) t.cargo[g] = load[g];
+                t.arrive = w.clock + LaneTime(a, b) + 40.0 + 8.0 * ship;
+                t.name = ShipName(w, NpcKind::Freighter, w.systems.factions.Get(owner));
+                w.transits.push_back(t);
+            }
+            s.since = w.clock;
+        }
+        if (s.total < 2.0f && s.total > 0.0f) { e.Land(s.to, s.cargo); for (int g = 0; g < GOOD_COUNT; g++) s.cargo[g] = 0.0f; s.total = 0.0f; }     // (the sweepings)
         i++;
     }
     for (size_t i = 0; i < w.transits.size();) {
@@ -476,12 +562,14 @@ static void Dispatch(World &w, const std::vector<Live> &live)
         if (here && BodyOf(w, *here, t.to)) {                      // drops out of warp at the edge, inbound
             Npc &n = Spawn(w, NpcKind::Freighter, *here, JumpPoint(w, *here, a.sys) + RandomDir(w) * (5000.0 * KM_U), t.faction);
             n.name = t.name;
-            n.from = t.from; n.to = t.to; n.total = t.total;
+            n.from = t.from; n.to = t.to; n.total = t.total; n.credits = t.credits; n.payee = t.payee;
             for (int g = 0; g < GOOD_COUNT; g++) n.cargo[g] = t.cargo[g];
-            Fit(n, n.total);
-            w.bursts.push_back({ n.sys, n.pos, 25.0 * (n.spec.dryMass + n.total), n.id });
+            const ShipDesign &d = FleetDesign(base, t.faction, RoleFor(a, b, t.cargo, t.total));
+            if (t.total <= d.cargo * 1.01) FitDesign(n, d); else Fit(n, n.total);       // (a load from before there were fleets: whatever will carry it)
+            w.bursts.push_back({ n.sys, n.pos, n.spec.jumpTJ * (n.spec.dryMass + n.total), n.id });
         } else {
             e.Land(t.to, t.cargo);
+            LandSpecie(e, t.to, t.payee, t.credits);
         }
         w.transits.erase(w.transits.begin() + i);
     }
@@ -586,9 +674,26 @@ static bool StepNpc(World &w, Npc &n, const Live &l, Captain *const *caps, int c
     switch (n.kind) {
     // ---------------- Freighters: there, and done ----------------
     case NpcKind::Freighter: {
+        // A paymaster's ship, and a captain alongside who means to have what it carries: held there long enough, they do
+        if (n.credits > 0.0)
+            for (int k = 0; k < count; k++) {
+                Captain &c = *caps[k];
+                if (c.boardTarget != n.id || c.loaded.index != n.sys) continue;
+                c.boardTime = n.doing != NpcDo::Dock && Len(ShipLocal(w, c) - n.pos) < BOARD_RANGE ? c.boardTime + dt : 0.0;
+                if (c.boardTime < BOARD_SECONDS) continue;
+                const FactionSet &fs = w.systems.factions;
+                c.player.marked += n.credits;
+                if ((int)c.standing.size() < fs.Count()) c.standing.resize(fs.Count(), 0.0f);
+                if (n.payee >= 0 && n.payee < fs.Count()) c.standing[n.payee] = fmaxf(-100.0f, c.standing[n.payee] - 35.0f);
+                Tell(w, c, TextFormat("Boarded the %s: %s cr in marked credits brought across. %s won't forget it", n.name.c_str(), Thousands(n.credits).c_str(), fs.Name(n.payee).c_str()));
+                News(w, n.payee, n.sys, TextFormat("The %s has been boarded in the %s system and robbed of %s cr", n.name.c_str(), l.star->name.c_str(), Thousands(n.credits).c_str()));
+                n.credits = 0.0;
+                c.boardTarget = -1; c.boardTime = 0.0;
+                break;
+            }
         if (n.doing == NpcDo::Dock) {                              // casting off, or tied up and unloading
             if (now < n.until) return true;
-            if (n.close > 0.0) { e.Land(n.to, n.cargo); return false; }               // (unloaded)
+            if (n.close > 0.0) { e.Land(n.to, n.cargo); LandSpecie(e, n.to, n.payee, n.credits); return false; }               // (unloaded)
             n.doing = NpcDo::Travel;
         }
         if (n.jumping) {
@@ -596,14 +701,14 @@ static bool StepNpc(World &w, Npc &n, const Live &l, Captain *const *caps, int c
             Fly(n, out, {}, dt);
             if (!n.arrived) return true;
             Transit t;                                             // gone to warp: it arrives when it arrives
-            t.from = n.from; t.to = n.to; t.total = n.total; t.faction = n.faction; t.name = n.name;
+            t.from = n.from; t.to = n.to; t.total = n.total; t.faction = n.faction; t.name = n.name; t.credits = n.credits; t.payee = n.payee;
             for (int g = 0; g < GOOD_COUNT; g++) t.cargo[g] = n.cargo[g];
             t.arrive = now + LaneTime(base.defs[n.from], base.defs[n.to]);
             w.transits.push_back(t);
             return false;
         }
         const Body *dest = BodyOf(w, l, n.to);
-        if (!dest) { e.Land(n.to, n.cargo); return false; }
+        if (!dest) { e.Land(n.to, n.cargo); LandSpecie(e, n.to, n.payee, n.credits); return false; }
         FlyTo(n, *dest, dt);
         if (n.arrived) { n.doing = NpcDo::Dock; n.until = now + 30.0 + 30.0 * Roll(w); n.close = 1.0; n.vel = {}; n.fuel = n.tank; }       // tied up, unloading
         return true;
@@ -615,8 +720,7 @@ static bool StepNpc(World &w, Npc &n, const Live &l, Captain *const *caps, int c
         if (n.doing == NpcDo::Dock) {
             if (now < n.until) return true;
             // Where the work is: a belt if the system has one, the giant it skims, or just off its own world
-            const MarketDef &d = base.defs[n.from];
-            bool skims = d.out[RAW_HELIUM3] > 0.0f && home->parent >= 0 && home->parent < (int)l.eye->loaded.bodies.size() &&
+            bool skims = e.state[n.from].out[RAW_HELIUM3] > 0.0f && home->parent >= 0 && home->parent < (int)l.eye->loaded.bodies.size() &&
                          l.eye->loaded.bodies[home->parent].giant;
             n.goal = home->local + RandomDir(w) * (fmax(home->radius * 4.0, 30000.0 * KM_U));
             if (skims) { const Body &g = l.eye->loaded.bodies[home->parent]; n.goal = g.local + RandomDir(w) * (g.radius * 1.3); }
@@ -756,7 +860,7 @@ static bool StepNpc(World &w, Npc &n, const Live &l, Captain *const *caps, int c
             bool safe = port && !p->jumping && Len(p->pos - port->local) < Standoff(*port) + 20000.0 * KM_U;
             DVec3 to, toVel;
             bool  held = false;
-            if (!p || p->sys != n.sys || p->total < 1.0f || safe || now - n.since > 200.0 ||
+            if (!p || p->sys != n.sys || (p->total < 1.0f && p->credits <= 0.0) || safe || now - n.since > 200.0 ||
                 !Chase(w, n, p->id, p->was, p->vel, SignatureOf(p->spec, p->power), to, toVel, held)) { n.doing = NpcDo::Lurk; n.goal = n.pos; n.prey = -1; return true; }
             n.close = held && Len(p->was - n.was) < ROB_RANGE ? n.close + dt : 0.0;
             Fly(n, to, toVel, dt);
@@ -767,6 +871,15 @@ static bool StepNpc(World &w, Npc &n, const Live &l, Captain *const *caps, int c
                 p->total -= taken;
                 e.Land(p->kind == NpcKind::Miner ? p->from : p->to, lost, true);
                 const Faction *clan = w.systems.factions.Get(n.faction);
+                if (p->credits > 0.0) {                            // (a paymaster's ship: the money, which is worth something to them once it's been passed on)
+                    double coin = p->credits * PIRATE_SHARE;
+                    p->credits -= coin;
+                    FenceLoot(e, n.faction, coin);
+                    News(w, n.faction, n.sys, (clan ? clan->name : std::string("Pirates")) + TextFormat(" have taken %s cr from the %s in the %s system", Thousands(coin).c_str(),
+                                                                                                        p->name.c_str(), l.star->name.c_str()));
+                    SlinkOff(w, n, l);
+                    return true;
+                }
                 News(w, n.faction, n.sys, (clan ? clan->name : std::string("Pirates")) + TextFormat(" have robbed the %s of %.0f t in the %s system",
                                                                                                     p->name.c_str(), taken, l.star->name.c_str()));
                 SlinkOff(w, n, l);
@@ -819,7 +932,7 @@ static bool StepNpc(World &w, Npc &n, const Live &l, Captain *const *caps, int c
         }
         Npc *best = nullptr; double bestD = 3.0 * AU_U;
         for (Npc &p : w.npcs) {
-            if (p.sys != n.sys || (p.kind != NpcKind::Freighter && p.kind != NpcKind::Miner) || p.total < 5.0f || p.doing == NpcDo::Dock) continue;
+            if (p.sys != n.sys || (p.kind != NpcKind::Freighter && p.kind != NpcKind::Miner) || (p.total < 5.0f && p.credits <= 0.0) || p.doing == NpcDo::Dock) continue;
             double d = Len(p.pos - n.pos);
             if (d < bestD && HoldsNpc(w, n, p)) { bestD = d; best = &p; }
         }
@@ -1117,6 +1230,16 @@ void StepTraffic(World &w, Captain *const *caps, int count, float dt)
 // ---------------------------------------------------------------------------
 // Dealing with them
 // ---------------------------------------------------------------------------
+bool BoardShip(World &w, Captain &c, int id)
+{
+    const Npc *n = FindNpc(w, id);
+    if (!n || n->sys != c.loaded.index) return false;
+    if (n->kind != NpcKind::Freighter || n->credits <= 0.0) { Tell(w, c, n->name + " carries nothing worth boarding her for: it's the paymasters' ships that carry coin"); return false; }
+    c.boardTarget = id; c.boardTime = 0.0;
+    Tell(w, c, TextFormat("Closing to board the %s: hold within %.0f km of her for %.0f seconds, under way", n->name.c_str(), BOARD_RANGE / KM_U, BOARD_SECONDS));
+    return true;
+}
+
 bool HailShip(World &w, Captain &c, int id)
 {
     const Npc *n = FindNpc(w, id);
@@ -1131,6 +1254,7 @@ bool HailShip(World &w, Captain &c, int id)
         int g = BulkGood(n->cargo);
         const std::string to = n->to >= 0 ? base.defs[n->to].name : std::string("nowhere in particular");
         if (stance == STANCE_HOSTILE) say = "We've nothing to say to you.";
+        else if (n->credits > 0.0) say = "Paymaster's business for " + fs.Name(n->payee) + ", bound for " + to + ". Keep your distance, captain.";
         else if (g < 0) say = "Running light to " + to + ". Fly safe, captain.";
         else say = TextFormat("Bound for %s with %.0f t, mostly %s. They're paying about %.0f for it there.", to.c_str(), n->total, GoodData(g).name,
                               MarketPrice(w, n->to, g));

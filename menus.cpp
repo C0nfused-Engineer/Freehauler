@@ -15,6 +15,15 @@
 
 namespace fs = std::filesystem;
 
+void ShowBusy(const char *text)
+{
+    if (!IsWindowReady()) return;
+    BeginDrawing();
+    ClearBackground(BLACK);
+    DrawText(text, (GetScreenWidth() - MeasureText(text, 24)) / 2, GetScreenHeight() / 2 - 12, 24, HUD);
+    EndDrawing();
+}
+
 namespace {
 
 // ---------------------------------------------------------------------------
@@ -839,6 +848,7 @@ private:
         if (iSeed >= 0) c.seed = fields[iSeed].value;
         ui.settings.shipName = c.ship;
         if (solo) {
+            ShowBusy("CHARTING A NEW GALAXY...");
             NewGame(g, SeedFromText(c.seed, (uint64_t)(GetTime() * 1e6)));
             g.shipName = c.ship;
             SaveSettings(ui.settings);

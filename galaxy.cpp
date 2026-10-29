@@ -912,8 +912,8 @@ static void GenerateStations(const StarSystem &sys, LoadedSystem &out)
             Body s;
             // Three around the plane, a third of a turn apart; a fourth, where there is one, high over the star
             double a = a0 + k * (2 * PI / 3.0) + og.uni(-0.15, 0.15);
-            s.local = k < 3 ? (sys.u * cos(a) + sys.v * sin(a)) * (OUTPOST_ORBIT * sys.fieldR) + sys.n * (og.uni(-0.2, 0.2) * sys.fieldH)
-                            : sys.n * (0.8 * sys.fieldH) + (sys.u * cos(a) + sys.v * sin(a)) * (0.03 * sys.fieldR);
+            s.local = k < 3 ? (sys.u * cos(a) + sys.v * sin(a)) * (OUTPOST_ORBIT * sys.fieldR) + sys.n * (og.uni(-0.02, 0.02) * sys.fieldR)
+                            : sys.n * (OUTPOST_ORBIT * sys.fieldR) + (sys.u * cos(a) + sys.v * sin(a)) * (0.03 * sys.fieldR);
             s.name = sys.name + TextFormat(" Sensor Outpost %c", 'A' + k);
             s.kind = Kind::Station; s.parent = 0; s.id = Mix64(sys.seed ^ (0x5E4500ull + k));
             s.radius = og.uni(320.0, 440.0); s.orbit = Len(s.local - out.bodies[0].local);     // (about two kilometres across)
@@ -1195,6 +1195,22 @@ static StarSystem MakeSystem(unsigned seed, int cx, int cy, int cz, uint64_t has
 
     GenerateStars(s);
     SizeField(s);
+    // A government's space is where it has people. A system inside its borders with nobody living in it is unclaimed:
+    // open to whoever settles it, and to whoever hides there.
+    s.claim = s.ruler;
+    if (s.ruler != NO_FACTION) {
+        // (finding out means building the system: once for each, however often the galaxy is asked for it again)
+        static std::unordered_map<uint64_t, bool> known;
+        auto it = known.find(s.seed);
+        if (it == known.end()) {
+            LoadedSystem within;
+            GenerateSystemContents(s, within, true);
+            bool lived = false;
+            for (const Body &b : within.bodies) if (b.population > 0) lived = true;
+            it = known.insert({ s.seed, lived }).first;
+        }
+        if (!it->second) s.ruler = NO_FACTION;
+    }
     return s;
 }
 

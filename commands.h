@@ -8,10 +8,10 @@
 
 struct Command {
     enum Type : uint8_t { SellGoods, BuyFuel, Hail, MarketReport, LocalInfo, HangUp, BuyGoods, BuyData,
-                          Contracts, FactionBoard, Accept, Advance, Abandon, JoinGuild, BuyLicence, HailShip, PayPirates, CallTanker,
-                          FitPart, RemovePart, BuyHull, StretchHull, Count };
+                          Contracts, FactionBoard, Accept, Advance, Abandon, JoinGuild, BuyLicence, HailShip, PayPirates, CallTanker, Board,
+                          FitPart, RemovePart, BuyHull, StretchHull, Invest, WorldReport, Count };
     Type     type = SellGoods;
-    int32_t  arg  = 0;        // SellGoods / BuyGoods: which good (goods.h); the comms ones (and Contracts): body index in the loaded
+    int32_t  arg  = 0;        // Invest: which of the world's industries (its place in the list); WorldReport: body index. SellGoods / BuyGoods: which good (goods.h); the comms ones (and Contracts): body index in the loaded
                               // system; Accept / Advance / Abandon: the contract's id; FactionBoard / JoinGuild / BuyLicence: the faction;
                               // HailShip: the ship's id; FitPart: the part (PackPart); RemovePart: which of those fitted; BuyHull: the hull; StretchHull: 0 room, 1 a hardpoint
     double   qty  = 0.0;      // tonnes (1e30 = all you can); BuyLicence: which paper (contract.h)

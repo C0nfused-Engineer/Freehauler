@@ -20,7 +20,7 @@
 #include <string>
 #include <vector>
 
-enum class WindowKind { Info, Market, Comms, SystemMap, SectorMap, Factions, TradeLog, News, Contracts, Outfit, Pause, SaveMenu, LoadMenu, SettingsMenu, ConfirmExit,
+enum class WindowKind { Info, Market, Comms, SystemMap, SectorMap, Factions, TradeLog, News, Contracts, Outfit, World, Pause, SaveMenu, LoadMenu, SettingsMenu, ConfirmExit,
                         MainMenu, SinglePlayerMenu, MultiplayerMenu, JoinMenu, HostMenu, NewGameMenu };
 
 // What the main menu decided
@@ -118,6 +118,7 @@ std::unique_ptr<Window> MakeContractsWindow(TargetId station = {}, int faction =
 
 // Fitting out the ship, in dock at a shipyard or starbase (shipyardui.cpp)
 std::unique_ptr<Window> MakeOutfitWindow();
+std::unique_ptr<Window> MakeWorldWindow(TargetId body);     // worldui.cpp: a world's people and industries (6 on its channel)
 
 // One line of the system map's list: a star, world, belt, moon or station (indented under its world)
 struct MapRow {
@@ -135,3 +136,5 @@ std::unique_ptr<Window> MakePauseMenu(bool online = false);
 
 // The main menu: Single Player (new game, load), Multiplayer (host, join), Settings, Exit
 std::unique_ptr<Window> MakeMainMenu();
+// One frame that says what's keeping us (a new galaxy takes some seconds to build: its economy is run in first). Not from inside a frame.
+void ShowBusy(const char *text);

@@ -50,7 +50,7 @@ const int    NAMED_CELLS        = 32;       // systems within this many cells of
 const double NAV_RANGE_LY       = 30.0;     // stars within this of the ship are on the scope
 
 const double FIELD_EDGE_MARGIN   = 1.35;    // field radius = outermost orbit * this
-const double FIELD_HEIGHT_RATIO  = 0.10;    // field half-thickness = radius * this
+const double FIELD_HEIGHT_RATIO  = 0.50;    // field half-thickness = radius * this: half as tall as it is wide, so there's no quick way out over the pole
 const double LOAD_DISTANCE_LY    = 0.5;     // load a system's planets within this of its star...
 const double UNLOAD_DISTANCE_LY  = 0.6;     // ...unload beyond this (hysteresis)
 const double OUTPOST_ORBIT       = 0.22;    // sensor outposts sit well inside the system: this far out, as a share of the gravity field's radius
@@ -195,7 +195,8 @@ struct StarSystem {
     double   age = 4.5;              // billions of years
     double   metal = 0.0;            // heavy elements, [Fe/H]: 0 = the Sun's, -1 = a tenth of it
     float    develop = 0.0f;         // human presence: 1 at home, 0 outside the bubble
-    int      ruler = NO_FACTION;     // the government whose space this is (NO_FACTION: unclaimed)
+    int      ruler = NO_FACTION;     // the government whose space this is: it has people here (NO_FACTION: unclaimed)
+    int      claim = NO_FACTION;     // the government whose territory it stands in, whether or not anyone lives here
     bool     named = false;          // has a proper name (otherwise a catalogue number)
 };
 

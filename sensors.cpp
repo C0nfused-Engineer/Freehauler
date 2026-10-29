@@ -33,8 +33,8 @@ TachyonSensor PortDetector()
     return s;
 }
 
-double TachyonDecayAU(double mj) { return TACH_L0_AU * pow(fmax(mj, 1.0) / TACH_E0_MJ, TACH_L_EXP); }
-double TachyonCount(double mj)   { return TACH_ETA * fmax(mj, 0.0) * 1.0e6 / TACH_EPS_J; }
+double TachyonDecayAU(double mj) { return TACH_L0_AU * pow(fmax(mj, 1.0) / TACH_E0_TJ, TACH_L_EXP); }
+double TachyonCount(double tj)   { return TACH_ETA * fmax(tj, 0.0) * 1.0e12 / TACH_EPS_J; }
 
 double TachyonExpected(const TachyonSensor &s, double mj, double au)
 {
@@ -171,7 +171,7 @@ Signature SignatureOf(const ShipSpec &spec, const PowerState &power)
 {
     Signature s;
     s.size = fmax(0.05, spec.hullSize);
-    s.heat = fmax(0.2, (double)power.heat);
+    s.heat = fmax(6.4, (double)power.heat);
     s.radar = RadarOn(spec, power);
     s.radarPower = spec.radar;
     return s;

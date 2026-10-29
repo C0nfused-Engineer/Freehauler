@@ -63,6 +63,8 @@ struct Npc {
     double      close = 0.0;               // seconds it has been within reach of its prey
     double      since = 0.0;               // when it took up the chase
     bool        demanded = false;          // pirates: it has told its prey what it wants
+    double      credits = 0.0;             // a paymaster's ship: the money aboard, on its way to its owner's capital...
+    int         payee = NO_FACTION;        // ...and whose it is
     double      look = 0.0;                // when it next looks around
     uint8_t     hull = 1;                  // which hull it's built on (shipparts.h)
     // What it knows of what it's after (sensors.h): it flies at the quarry while its sensors hold it, and at the
@@ -78,6 +80,8 @@ struct Transit {
     int         from = -1, to = -1;        // hub markets
     float       cargo[GOOD_COUNT] = {};
     float       total = 0.0f;
+    double      credits = 0.0;             // a paymaster's run: money aboard...
+    int         payee = NO_FACTION;        // ...and whose
     double      arrive = 0.0;
     int         faction = NO_FACTION;
     std::string name;

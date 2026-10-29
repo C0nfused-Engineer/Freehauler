@@ -7,8 +7,8 @@
 
 #include <string>
 
-const int SAVE_VERSION = 4;           // 2: the galaxy at full size. 3: the economy, and the goods redrawn. 4: sensors
-const int SAVE_OLDEST  = 2;           // saves from the old twelve-star galaxy can't be placed in this one
+const int SAVE_VERSION = 5;           // 2: the galaxy at full size. 3: the economy, and the goods redrawn. 4: sensors. 5: industries
+const int SAVE_OLDEST  = 5;           // older saves hold an economy (and goods) that no longer exist
 const int SAVE_SENSORS = 4;           // ships carry radar, an infrared array and a tachyon detector: older saves' ships are given the basic ones
 const int SAVE_GOODS   = 3;           // cargo is stored by good number: older saves' holds can't be read, and load empty
 

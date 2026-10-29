@@ -65,6 +65,7 @@ bool SaveGame(const GameState &g, const char *path, const std::string &name)
             s.pos.x, s.pos.y, s.pos.z, s.vel.x, s.vel.y, s.vel.z, s.rot.x, s.rot.y, s.rot.z, s.rot.w, s.dampeners ? 1 : 0, s.throttle);
     fprintf(f, "fuel %.17g\n", p.fuel);
     fprintf(f, "credits %.17g\n", p.credits);
+    if (p.marked > 0.0) fprintf(f, "marked %.17g\n", p.marked);
     for (int o = 0; o < GOOD_COUNT; o++)
         if (p.cargo[o] > 0.0) fprintf(f, "cargo %d %.17g\n", o, p.cargo[o]);
     for (const auto &m : g.deltas.mined)
@@ -116,6 +117,7 @@ bool LoadGame(GameState &g, const char *path)
         else if (!strcmp(key, "clock"))   sscanf(rest, "%lf", &clock);
         else if (!strcmp(key, "fuel"))    sscanf(rest, "%lf", &p.fuel);
         else if (!strcmp(key, "credits")) sscanf(rest, "%lf", &p.credits);
+        else if (!strcmp(key, "marked")) sscanf(rest, "%lf", &p.marked);
         else if (!strcmp(key, "ship")) {
             Ship &s = p.ship;
             int damp = 1;
@@ -134,7 +136,7 @@ bool LoadGame(GameState &g, const char *path)
             long long sys;
             if (sscanf(rest, "%lld", &sys) == 1) know.charted.insert(sys);
         } else if (ReadPriceLine(scratch, key, rest) || ReadCaptainContractLine(scratch, key, rest) || ReadBuildLine(scratch, key, rest)) {
-        } else if (!strcmp(key, "econ") || !strcmp(key, "stock") || !strcmp(key, "owner") || !strcmp(key, "faction") ||
+        } else if (!strcmp(key, "econ") || !strcmp(key, "stock") || !strcmp(key, "owner") || !strcmp(key, "people") || !strcmp(key, "industry") || !strcmp(key, "border") || !strcmp(key, "fleet") || !strcmp(key, "clanships") || !strcmp(key, "money") || !strcmp(key, "coffer") || !strcmp(key, "faction") ||
                    !strcmp(key, "embargo") || !strcmp(key, "shock") || !strcmp(key, "news") || !strcmp(key, "contractseq") ||
                    !strcmp(key, "boardmade") || !strcmp(key, "contract")) {
             econ.push_back({ key, rest });
@@ -162,6 +164,7 @@ bool LoadGame(GameState &g, const char *path)
             if (!ReadEconomyLine(fresh, l.first.c_str(), l.second.c_str())) ReadContractLine(fresh, l.first.c_str(), l.second.c_str());
     }
     fresh.know.prices   = std::move(scratch.know.prices);
+    fresh.stakes        = std::move(scratch.stakes);
     fresh.jobs          = std::move(scratch.jobs);
     fresh.offers        = std::move(scratch.offers);
     fresh.boards        = std::move(scratch.boards);
@@ -176,7 +179,7 @@ bool LoadGame(GameState &g, const char *path)
         }
     fresh.player        = p;
     Refit(fresh);
-    fresh.player.power.bank = fresh.player.spec.bankMJ; fresh.player.power.driveCap = fresh.player.spec.driveCapMJ;
+    fresh.player.power.bank = fresh.player.spec.bankTJ; fresh.player.power.driveCap = fresh.player.spec.driveCapTJ;
     fresh.deltas.mined  = std::move(mined);
     fresh.shipName      = shipName;
     fresh.know.charted.insert(know.charted.begin(), know.charted.end());   // (on top of home, which a new game already has)

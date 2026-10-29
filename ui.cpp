@@ -30,6 +30,7 @@ Controls ReadFlightControls(const InputFrame &in, float frameDt, const Settings 
     c.toggleDampeners = in.Pressed(KEY_CAPS_LOCK);
     c.cyclePower = in.Pressed(KEY_X);                  // travel / combat / defence / silent
     c.toggleRadar = in.Pressed(KEY_G);                 // radar on / off
+    c.toggleReactor = in.Pressed(KEY_Z);               // reactor down (run on the bank) / light it again
     return c;
 }
 
@@ -267,11 +268,15 @@ public:
                     ui.Say(g.loaded.bodies[focus.index].name + " has no yard: try a shipyard or a starbase");
                 else ui.Say("Get into docking range of " + g.loaded.bodies[focus.index].name + " to fit out");
             }
+            if (in.Pressed(KEY_SIX) || in.Pressed(KEY_KP_6)) {                 // its economy: people, labour, power, industries
+                if (focus.index == g.flight.nearBody || CommsAnswered(g, g, focus)) { ui.Do(g, { Command::WorldReport, focus.index }); ui.Open(MakeWorldWindow(focus)); }
+                else ui.Say("Wait for " + g.loaded.bodies[focus.index].name + " to answer");
+            }
             if (in.Pressed(KEY_BACKSPACE)) { if (open) ui.Do(g, { Command::HangUp, focus.index }); focus = {}; }
             if (in.Pressed(KEY_LEFT) || in.Pressed(KEY_TAB)) focus = {};       // back to the list; the channel stays open
         }
         for (int k : { KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_TAB, KEY_ENTER, KEY_KP_ENTER, KEY_ONE, KEY_KP_1, KEY_TWO, KEY_KP_2,
-                       KEY_THREE, KEY_KP_3, KEY_FOUR, KEY_KP_4, KEY_FIVE, KEY_KP_5, KEY_BACKSPACE })
+                       KEY_THREE, KEY_KP_3, KEY_FOUR, KEY_KP_4, KEY_FIVE, KEY_KP_5, KEY_SIX, KEY_KP_6, KEY_BACKSPACE })
             in.Consume(k);
     }
 
@@ -370,7 +375,7 @@ public:
         const char *t = trade ? "3 TRADE  " : "3 trade (dock first)  ";
         DrawText(t, tx, py + ph - 24, 16, trade ? HUD : Fade(HUD_DIM, 0.6f));
         bool yardHere = who.settlement == Settlement::Shipyard || who.settlement == Settlement::Starbase;
-        DrawText(yardHere ? "4 work  5 YARD  LEFT  BKSP" : "4 work  LEFT: others  BKSP hang up", tx + MeasureText(t, 16), py + ph - 24, 16, HUD_DIM);
+        DrawText(yardHere ? "4 work  5 YARD  6 economy  LEFT  BKSP" : "4 work  6 economy  LEFT: others  BKSP", tx + MeasureText(t, 16), py + ph - 24, 16, HUD_DIM);
     }
 
 private:
@@ -498,6 +503,8 @@ void Ui::HandleInput(InputFrame &in, GameState &g)
         in.Consume(KEY_SPACE);
     }
     if (in.Pressed(KEY_H)) Do(g, { Command::PayPirates });         // (hand over what a pirate has demanded)
+    if (in.Pressed(KEY_Y) && g.flight.selected.type == TargetId::Ship && g.flight.selected.index >= NPC_ID_BASE)
+        Do(g, { Command::Board, g.flight.selected.index });        // (board the ship the nose is on: a paymaster's, for what it carries)
     if (in.Pressed(KEY_K)) Do(g, { Command::CallTanker });         // (nearly out of fuel: call for a tanker)
     if (in.Pressed(KEY_F)) {
         int who = HailTarget(g);

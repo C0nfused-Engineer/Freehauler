@@ -362,7 +362,7 @@ void StepCaptain(World &w, Captain &c, const Controls &input, const Aim &aim, fl
     FlightReport flown = FlyShip(ship, p.spec, p.power, p.fuel, p.Mass(), in, dt, w.systems, c.loaded, haveLock ? &lock : nullptr, f.miningActive);
     f.drive = flown.drive; f.burn = flown.burn; f.load = flown.load;
     f.driveCharging = flown.charging; f.driveTooHeavy = flown.tooHeavy; f.driveStarved = flown.starved;
-    f.driveNone = flown.noDrive; f.drivePower = flown.drivePower;
+    f.driveNone = flown.noDrive; f.drivePower = flown.drivePower; f.efficiency = flown.efficiency; f.driveCold = flown.cold;
     in.hyper = p.power.engaged;                               // (what the drive did, not what was asked)
     f.last = in;
     if (authoritative && flown.collapse > 0.0 && c.loaded.index >= 0)          // out of warp: the bubble's collapse can be picked up
@@ -417,8 +417,13 @@ void StepCaptain(World &w, Captain &c, const Controls &input, const Aim &aim, fl
 
     // Docked: the captain's record of this market stays current (to the second)
     if (authoritative && f.nearBody >= 0 && c.loaded.bodies[f.nearBody].population > 0 && w.econ.Built()) {
-        auto rec = c.know.prices.find(c.loaded.bodies[f.nearBody].id);
-        if (rec == c.know.prices.end() || w.clock - rec->second.at >= 1.0) RecordPrices(w, c, c.loaded.bodies[f.nearBody]);
+        const Body &port = c.loaded.bodies[f.nearBody];
+        auto rec = c.know.prices.find(EconomyBody(c, port));
+        if (rec == c.know.prices.end() || w.clock - rec->second.at >= 1.0) {
+            RecordPrices(w, c, port);
+            CollectStakes(w, c, port);                         // (what the captain's shares in its industry have earned is paid over)
+            RecordWorld(w, c, port);
+        }
     }
 
     // Things that vanished (mined out, unloaded) can't stay selected

@@ -23,20 +23,22 @@ static void Bump(const World &w, Captain &c, int faction, double by)
 }
 
 static bool IssuersCargo(ContractKind k) { return k == ContractKind::Haulage || k == ContractKind::Smuggling; }
-static bool Collected(ContractKind k)    { return IssuersCargo(k) || k == ContractKind::Courier; }   // starts at the issuer's dock
+static bool People(ContractKind k)       { return k == ContractKind::Passage || k == ContractKind::Refugees; }
+static bool Collected(ContractKind k)    { return IssuersCargo(k) || k == ContractKind::Courier || People(k); }   // starts at the issuer's dock
 
 // ---------------------------------------------------------------------------
 // Words
 // ---------------------------------------------------------------------------
 const char *ContractKindName(ContractKind k)
 {
-    static const char *names[] = { "Haulage", "Supply order", "Smuggling", "Survey", "Courier" };
+    static const char *names[] = { "Haulage", "Supply order", "Smuggling", "Survey", "Courier", "Passage", "Refugees" };
     return names[(int)k < (int)ContractKind::Count ? (int)k : 0];
 }
 
 std::string ContractLabel(const Contract &k)
 {
     if (k.law == NO_FACTION) return ContractKindName(k.kind);
+    if (People(k.kind)) return "Smuggling (people)";
     return k.kind == ContractKind::Supply ? "Smuggling (supply order)" : "Smuggling";
 }
 
@@ -48,6 +50,8 @@ std::string ContractTitle(const Contract &k)
     case ContractKind::Supply:    return TextFormat(k.law != NO_FACTION ? "Supply %.0f t %s to %s, quietly" : "Supply %.0f t %s to %s", k.tonnes, good, k.toName.c_str());
     case ContractKind::Smuggling: return TextFormat("Run %.0f t %s to %s, quietly", k.tonnes, good, k.toName.c_str());
     case ContractKind::Survey:    return TextFormat("Survey %d worlds of %s", k.need, k.surveyName.c_str());
+    case ContractKind::Passage:   return TextFormat("Carry %.0f passengers to %s", k.tonnes, k.toName.c_str());
+    case ContractKind::Refugees:  return TextFormat(k.law != NO_FACTION ? "Slip %.0f refugees into %s, quietly" : "Take %.0f refugees to %s", k.tonnes, k.toName.c_str());
     default:                      return TextFormat("Courier run to %s", k.toName.c_str());
     }
 }
@@ -75,14 +79,24 @@ std::string ContractBar(const World &w, const Captain &c, const Contract &k)
     }
     if (k.licence != NO_FACTION && !(c.Papers(k.licence) & PAPER_CARRIER)) return "Needs a bonded carrier's licence from " + fs.Name(k.licence);
     if (c.player.credits < k.collateral) return TextFormat("Needs a deposit of %s cr", Thousands(k.collateral).c_str());
+    if (k.kind == ContractKind::Passage && c.player.spec.berths < k.tonnes) return TextFormat("Needs %.0f berths: fit passenger cabins at a yard", k.tonnes);
+    if (k.kind == ContractKind::Refugees && c.player.spec.berths + c.player.spec.hold / PERSON_HOLD < k.tonnes) return TextFormat("Needs room for %.0f people", k.tonnes);
     if (!k.wide && c.loaded.index != k.fromSys) return "Be in the " + (w.systems.Exists(k.fromSys) ? w.systems[k.fromSys].name : std::string("its")) + " system to accept";
     return "";
+}
+
+// (a station over a world people live on is that world's port: contracts are with the world)
+void SyncPeople(Captain &c)
+{
+    double cabins = 0.0, hold = 0.0;
+    for (const Contract &k : c.jobs) if (People(k.kind) && k.loaded) { cabins += k.tonnes - k.need; hold += k.need; }
+    c.player.passengers = cabins; c.player.steerage = hold;
 }
 
 static uint64_t DockedAt(const Captain &c)
 {
     const Body *b = TradePartner(c);
-    return b ? b->id : 0;
+    return b ? EconomyBody(c, *b) : 0;
 }
 
 std::string JobStatus(const World &w, const Captain &c, const Contract &k, bool *here)
@@ -91,14 +105,14 @@ std::string JobStatus(const World &w, const Captain &c, const Contract &k, bool 
     if (here) *here = false;
     if (!k.loaded) {
         if (here) *here = at == k.fromBody;
-        return (k.kind == ContractKind::Courier ? "Collect the dispatches at " : "Collect the cargo at ") + k.fromName;
+        return (k.kind == ContractKind::Courier ? "Collect the dispatches at " : People(k.kind) ? "Take them aboard at " : "Collect the cargo at ") + k.fromName;
     }
     if (k.kind == ContractKind::Survey) {
         if (k.Scanned() < k.need) return TextFormat("Scan %d more worlds of %s", k.need - k.Scanned(), k.surveyName.c_str());
         if (here) *here = at == k.fromBody;
         return "Bring the survey back to " + k.fromName;
     }
-    if (k.kind != ContractKind::Courier && c.player.cargo[k.good] + 1e-6 < k.tonnes) {
+    if (k.kind != ContractKind::Courier && !People(k.kind) && c.player.cargo[k.good] + 1e-6 < k.tonnes) {
         (void)w;
         return TextFormat("Find %.0f t more %s, for %s", k.tonnes - c.player.cargo[k.good], GoodData(k.good).name, k.toName.c_str());
     }
@@ -265,6 +279,43 @@ static bool MakeCourier(const World &w, int m, int to, Contract &k)
     return true;
 }
 
+// Passengers with somewhere to be, and the fare for it
+static bool MakePassage(const World &w, int m, int to, Dice &dice, Contract &k)
+{
+    const MarketDef &a = w.econ.base->defs[m], &b = w.econ.base->defs[to];
+    if (w.econ.state[m].pop < 1000.0 || w.econ.state[to].pop < 1000.0 || m == to) return false;
+    double ly = Ly(a, b), people = 2.0 + floor(7.0 * dice());
+    k = Contract();
+    k.kind = ContractKind::Passage;
+    From(k, a); To(k, b);
+    k.issuer = IssuerAt(w, m);
+    k.tonnes = (float)people;
+    k.pay = (float)(people * (45.0 + 30.0 * ly));
+    k.allowed = 0.9 * TimeFor(ly);
+    return true;
+}
+
+// People leaving, for somewhere that will have them ('barred' false) or somewhere that won't. They pay what they can,
+// which isn't much; a government short of hands pays to get them; and getting them past a shut border pays best of all.
+static bool MakeRefugees(const World &w, int m, int to, double people, bool barred, Contract &k)
+{
+    const MarketDef &a = w.econ.base->defs[m], &b = w.econ.base->defs[to];
+    const MarketState &t = w.econ.state[to];
+    if (people < 2.0 || m == to) return false;
+    double ly = Ly(a, b);
+    bool wanted = !barred && t.employed > 0.85f * t.labour && w.systems.factions.Get(b.ruler);
+    k = Contract();
+    k.kind = ContractKind::Refugees;
+    From(k, a); To(k, b);
+    k.issuer = wanted ? b.ruler : IssuerAt(w, m);
+    k.tonnes = (float)floor(people);
+    double each = barred ? 70.0 + 20.0 * ly : 10.0 + 5.0 * ly + (wanted ? 25.0 : 0.0);
+    if (barred) { k.law = b.ruler; k.against = b.ruler; }
+    k.pay = (float)(k.tonnes * each);
+    k.allowed = 1.5 * TimeFor(ly);
+    return true;
+}
+
 // An empty system not far off, with worlds worth the trip
 static bool MakeSurvey(const World &w, int m, Dice &dice, Contract &k)
 {
@@ -307,8 +358,8 @@ static std::vector<int> Shortages(const World &w, int m, double below)
     const MarketState &s = w.econ.state[m];
     std::vector<int> goods;
     for (int g = 0; g < GOOD_COUNT; g++)
-        if (d.role[g] == Role::Import && !d.banned[g] && s.stock[g] < below * d.target[g]) goods.push_back(g);
-    auto worth = [&](int g) { return (d.target[g] - s.stock[g]) * GoodData(g).basePrice; };
+        if (s.role[g] == Role::Import && !d.banned[g] && s.stock[g] < below * s.target[g]) goods.push_back(g);
+    auto worth = [&](int g) { return (s.target[g] - s.stock[g]) * GoodData(g).basePrice; };
     std::sort(goods.begin(), goods.end(), [&](int a, int b) { return worth(a) > worth(b); });
     return goods;
 }
@@ -327,7 +378,7 @@ static bool GuildJob(World &w, int m, const Faction &guild, Dice &dice, Contract
         for (int tries = 0; tries < 24; tries++) {
             int g = (int)(dice() * GOOD_COUNT) % GOOD_COUNT, to = abroad[(size_t)(dice() * abroad.size()) % abroad.size()];
             const MarketDef &t = base.defs[to];
-            if (d.target[g] <= 0.0f || t.target[g] <= 0.0f || t.banned[g] || d.banned[g] || s.stock[g] < 30.0f) continue;
+            if (s.target[g] <= 0.0f || w.econ.state[to].target[g] <= 0.0f || t.banned[g] || d.banned[g] || s.stock[g] < 30.0f) continue;
             double gain = MarketPrice(w, to, g) - MarketPrice(w, m, g);
             if (gain > bestGain) { bestGain = gain; bestG = g; bestTo = to; }
         }
@@ -342,8 +393,8 @@ static bool GuildJob(World &w, int m, const Faction &guild, Dice &dice, Contract
         for (int tries = 0; tries < 16 && !all.empty() && !found; tries++) {
             int to = all[(size_t)(dice() * all.size()) % all.size()], g = needs[(int)(dice() * 5.0) % 5];
             const MarketDef &t = base.defs[to];
-            if (t.scale > 400.0f || t.target[g] <= 0.0f || t.banned[g] || t.out[g] > 0.0f) continue;
-            if (!MakeSupply(w, to, g, fmin((double)t.target[g], 10.0 + 40.0 * dice()), 1.5, k)) continue;
+            if (t.scale > 400.0f || w.econ.state[to].target[g] <= 0.0f || t.banned[g] || w.econ.state[to].out[g] > 0.0f) continue;
+            if (!MakeSupply(w, to, g, fmin((double)w.econ.state[to].target[g], 10.0 + 40.0 * dice()), 1.5, k)) continue;
             From(k, d);                                            // (posted here; wanted there)
             k.allowed += TimeFor(Ly(d, t));
             found = true;
@@ -374,7 +425,7 @@ static void MakeBoard(World &w, int m)
     std::vector<int> shorts = Shortages(w, m, 0.7);
     for (int i = 0; i < (int)shorts.size() && i < 2; i++) {
         int g = shorts[i];
-        double want = fmin(d.target[g] - s.stock[g], 15.0 + 60.0 * dice());
+        double want = fmin(s.target[g] - s.stock[g], 15.0 + 60.0 * dice());
         if (!MakeSupply(w, m, g, want, shock ? 1.5 : 1.25, k)) continue;
         if (shock) k.effect = ContractEffect::Relief;
         post(k, !shock);
@@ -382,16 +433,16 @@ static void MakeBoard(World &w, int m)
     // A glut of something it makes: haul it to wherever nearby is paying most
     int hauls = 0;
     for (int g = 0; g < GOOD_COUNT && hauls < 2; g++) {
-        if (d.role[g] != Role::Export || s.stock[g] < 1.15f * d.target[g]) continue;
+        if (s.role[g] != Role::Export || s.stock[g] < 1.15f * s.target[g]) continue;
         int best = -1; double bestP = MarketPrice(w, m, g) * 1.15;
         for (int to : all) {
             const MarketDef &t = base.defs[to];
-            if (t.target[g] <= 0.0f || t.banned[g]) continue;
+            if (w.econ.state[to].target[g] <= 0.0f || t.banned[g]) continue;
             double p = MarketPrice(w, to, g);
             if (p > bestP) { bestP = p; best = to; }
         }
         if (best < 0) continue;
-        double tonnes = fmin(0.3 * (s.stock[g] - d.target[g]) + 10.0, 15.0 + 70.0 * dice());
+        double tonnes = fmin(0.3 * (s.stock[g] - s.target[g]) + 10.0, 15.0 + 70.0 * dice());
         if (MakeHaulage(w, m, best, g, tonnes, 1.0, k)) { post(k); hauls++; }
     }
     // Dispatches and passengers
@@ -425,6 +476,12 @@ static void MakeBoard(World &w, int m)
             post(k, false);
         }
     }
+    // People who want out: passage to wherever is taking them, and (for a price) to wherever isn't
+    if (s.leaving + s.stuck > 3.0f && s.pop > 200.0) {
+        double people = 6.0 + floor(dice() * fmin(40.0, (double)(s.leaving + s.stuck)));
+        if (s.bestTo >= 0 && MakeRefugees(w, m, s.bestTo, people, false, k)) post(k, false);
+        if (s.barredTo >= 0 && MakeRefugees(w, m, s.barredTo, people, true, k)) post(k, false);
+    }
     // The guilds, where they keep a chapter: for members only
     for (const Faction &guild : fs.list)
         if (Chapter(d.settlement, d.bodyId, d.sys == w.systems.home, guild) && GuildJob(w, m, guild, dice, k)) post(k);
@@ -438,9 +495,10 @@ static void MakeBoard(World &w, int m)
         int to = all[(size_t)(dice() * all.size()) % all.size()], g = (int)(dice() * GOOD_COUNT) % GOOD_COUNT;
         const MarketDef &t = base.defs[to];
         double r = dice();
-        if (r < 0.3)       { if (MakeCourier(w, m, to, k)) post(k); }
-        else if (r < 0.65) { if (d.use[g] > 0.0f && !d.banned[g] && MakeSupply(w, m, g, 8.0 + 30.0 * dice(), 1.12, k)) post(k); }
-        else if (d.target[g] > 0.0f && t.target[g] > 0.0f && !t.banned[g] && !d.banned[g] && s.stock[g] > 25.0f &&
+        if (r < 0.15)      { if (MakeCourier(w, m, to, k)) post(k); }
+        else if (r < 0.3)  { if (MakePassage(w, m, to, dice, k)) post(k); }
+        else if (r < 0.65) { if (s.use[g] > 0.0f && !d.banned[g] && MakeSupply(w, m, g, 8.0 + 30.0 * dice(), 1.12, k)) post(k); }
+        else if (s.target[g] > 0.0f && w.econ.state[to].target[g] > 0.0f && !t.banned[g] && !d.banned[g] && s.stock[g] > 25.0f &&
                  MakeHaulage(w, m, to, g, fmin(0.4 * s.stock[g], 10.0 + 40.0 * dice()), 1.0, k)) post(k);
     }
 }
@@ -482,7 +540,7 @@ static int MarketNear(const World &w, int faction, DVec3 ly, int want, bool star
         const MarketDef &d = base.defs[i];
         bool owned = w.econ.state[i].owner == faction;
         if (!owned && d.ruler != faction) continue;
-        if (want >= 0 && (d.target[want] <= 0.0f || d.banned[want])) continue;
+        if (want >= 0 && (w.econ.state[i].target[want] <= 0.0f || d.banned[want])) continue;
         double dist = Len(d.ly - ly) * (owned ? 1.0 : 2.0) * (starbase && d.settlement != Settlement::Starbase ? 3.0 : 1.0) + (owned ? 0.0 : 5.0);
         if (dist < bestD) { bestD = dist; best = i; }
     }
@@ -539,7 +597,7 @@ static void MakeFactionBoard(World &w, const Faction &f)
         if (to < 0) continue;
         for (int tries = 0; tries < 20; tries++) {
             int g = (int)(dice() * GOOD_COUNT) % GOOD_COUNT;
-            if (base.defs[from].role[g] != Role::Export || base.defs[to].target[g] <= 0.0f || base.defs[to].banned[g]) continue;
+            if (w.econ.state[from].role[g] != Role::Export || w.econ.state[to].target[g] <= 0.0f || base.defs[to].banned[g]) continue;
             if (!MakeHaulage(w, from, to, g, 20.0 + 50.0 * dice(), 2.0, k)) continue;
             k.issuer = f.id; k.against = o;
             post(k);
@@ -560,12 +618,12 @@ static void MakeFactionBoard(World &w, const Faction &f)
         std::vector<int> goods = Shortages(w, i, 0.5);
         if (goods.empty()) continue;
         int g = goods[0];
-        shorts.push_back({ (base.defs[i].target[g] - e.state[i].stock[g]) * GoodData(g).basePrice, { i, g } });
+        shorts.push_back({ (e.state[i].target[g] - e.state[i].stock[g]) * GoodData(g).basePrice, { i, g } });
     }
     std::sort(shorts.begin(), shorts.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
     for (int i = 0; i < (int)shorts.size() && posted < 6; i++) {
         int m = shorts[i].second.first, g = shorts[i].second.second;
-        double want = fmin(base.defs[m].target[g] - e.state[m].stock[g], 40.0 + 60.0 * dice());
+        double want = fmin(e.state[m].target[g] - e.state[m].stock[g], 40.0 + 60.0 * dice());
         if (!MakeSupply(w, m, g, want, 1.35, k)) continue;
         k.issuer = f.id;
         if (f.kind == FactionKind::Guild) k.guild = f.id;
@@ -732,10 +790,21 @@ bool AdvanceContract(World &w, Captain &c, uint32_t id)
             int m = e.MarketOf(k.fromBody);
             if (m >= 0 && k.kind == ContractKind::Haulage) e.state[m].stock[k.good] = fmaxf(0.0f, e.state[m].stock[k.good] - k.tonnes);
             Tell(w, c, TextFormat("Loaded %.0f t %s for %s", k.tonnes, GoodData(k.good).name, k.toName.c_str()));
+        } else if (People(k.kind)) {
+            // Passengers want a berth each; refugees take berths while there are any, and the hold after that
+            Player &p = c.player;
+            double berths = fmax(0.0, p.spec.berths - p.passengers), inHold = k.kind == ContractKind::Passage ? 0.0 : fmax(0.0, k.tonnes - berths);
+            if (k.kind == ContractKind::Passage && berths + 1e-6 < k.tonnes) { Tell(w, c, TextFormat("Needs %.0f free berths: you have %.0f", k.tonnes, berths)); return false; }
+            if (inHold * PERSON_HOLD > p.spec.hold - p.CargoTotal() + 1e-6) { Tell(w, c, TextFormat("Needs room for %.0f people: %.0f berths free, and %.0f t of hold for the rest", k.tonnes, berths, inHold * PERSON_HOLD)); return false; }
+            k.need = (int)(inHold + 0.5);
+            int m = e.MarketOf(k.fromBody);
+            if (m >= 0) e.state[m].pop = fmax(e.state[m].pop - k.tonnes, fmin(e.state[m].pop, SKELETON_CREW));
+            Tell(w, c, k.need > 0 ? TextFormat("%.0f aboard for %s: %d of them in the hold", k.tonnes, k.toName.c_str(), k.need) : TextFormat("%.0f aboard for %s", k.tonnes, k.toName.c_str()));
         } else {
             Tell(w, c, "Dispatches aboard for " + k.toName);
         }
         k.loaded = true;
+        SyncPeople(c);
         return true;
     }
     if (k.kind == ContractKind::Survey) {
@@ -743,7 +812,10 @@ bool AdvanceContract(World &w, Captain &c, uint32_t id)
         if (at != k.fromBody) { Tell(w, c, "Dock at " + k.fromName + " to hand the survey in"); return false; }
     } else {
         if (at != k.toBody) { Tell(w, c, "Dock at " + k.toName + " to deliver"); return false; }
-        if (k.kind != ContractKind::Courier) {
+        if (People(k.kind)) {
+            int m = e.MarketOf(k.toBody);
+            if (m >= 0) { e.state[m].pop += k.tonnes; if (k.kind == ContractKind::Refugees) e.state[m].refugees += k.tonnes; }
+        } else if (k.kind != ContractKind::Courier) {
             if (c.player.cargo[k.good] + 1e-6 < k.tonnes) {
                 Tell(w, c, TextFormat("Needs %.0f t %s: you have %.1f t", k.tonnes, GoodData(k.good).name, c.player.cargo[k.good]));
                 return false;
@@ -751,11 +823,12 @@ bool AdvanceContract(World &w, Captain &c, uint32_t id)
             c.player.cargo[k.good] -= k.tonnes;
             if (c.player.cargo[k.good] < 1e-6) c.player.cargo[k.good] = 0.0;
             int m = e.MarketOf(k.toBody);
-            if (m >= 0 && e.base->defs[m].target[k.good] > 0.0f) e.state[m].stock[k.good] += k.tonnes;
+            if (m >= 0 && e.state[m].target[k.good] > 0.0f) e.state[m].stock[k.good] += k.tonnes;
         }
     }
     Contract done = k;
     Drop(c, id);
+    SyncPeople(c);
     Done(w, c, done);
     return true;
 }
@@ -777,6 +850,17 @@ bool AbandonContract(World &w, Captain &c, uint32_t id)
     Contract *job = Job(c, id);
     if (!job) return false;
     Contract k = *job;
+    if (People(k.kind) && k.loaded) {
+        // They can only be put off in port: wherever that is, that's where they are now
+        const Body *port = TradePartner(c);
+        int m = port && w.econ.Built() ? w.econ.MarketOf(port->id) : -1;
+        if (m < 0) { Tell(w, c, "Dock somewhere to put them off: they can't be left out here"); return false; }
+        w.econ.state[m].pop += k.tonnes; w.econ.state[m].refugees += k.tonnes;
+        Drop(c, id);
+        SyncPeople(c);
+        Fail(w, c, k, "Contract abandoned");
+        return true;
+    }
     Drop(c, id);
     if (IssuersCargo(k.kind) && k.loaded) { Fail(w, c, k, "Contract abandoned"); return true; }
     // Nothing of theirs aboard: it goes back on the board, and they think a little less of you
@@ -826,10 +910,46 @@ bool BuyLicence(World &w, Captain &c, int faction, int paper)
 // Docking at a lawful port with what its government bans
 static void Customs(World &w, Captain &c, const Body &b)
 {
-    int m = w.econ.MarketOf(b.id);
+    int m = w.econ.MarketOf(EconomyBody(c, b));           // (a station over a world is that world's market)
     if (m < 0) return;
     const MarketDef &d = w.econ.base->defs[m];
     const Faction *law = w.systems.factions.Get(d.ruler);
+    // People being slipped past a border this government has shut: if its customs look, they're held, and so is the captain's good name
+    const Faction *owner = w.systems.factions.Get(w.econ.state[m].owner);
+    // Stolen credits: a clan's haven or a free port has someone who'll take them, for half; anywhere lawful, customs may find them
+    if (c.player.marked > 0.0) {
+        if (owner && (owner->kind == FactionKind::Clan || owner->kind == FactionKind::FreePort)) {
+            double got = MARKED_FENCE * c.player.marked;
+            Tell(w, c, TextFormat("A fence at %s takes your %s marked credits off you: %s cr, clean", b.name.c_str(), Thousands(c.player.marked).c_str(), Thousands(got).c_str()));
+            c.player.credits += got; c.player.marked = 0.0;
+        } else if (law && law->policing > 0.0f) {
+            Dice look{ Mix64(w.seed ^ b.id ^ (uint64_t)(w.clock * 10.0) ^ 0x6D61726Bull) };
+            if (look() < 0.3 + 0.6 * law->policing) {
+                double fine = fmin(c.player.credits, 0.1 * c.player.marked);
+                Tell(w, c, TextFormat("%s customs found %s cr in marked credits aboard: seized, and you're fined %s cr", b.name.c_str(), Thousands(c.player.marked).c_str(), Thousands(fine).c_str()));
+                c.player.credits -= fine; c.player.marked = 0.0;
+                Bump(w, c, law->id, -15.0);
+            }
+        }
+    }
+    if (law && !(owner && owner->kind == FactionKind::Clan))
+        for (size_t i = 0; i < c.jobs.size(); i++) {
+            Contract &k = c.jobs[i];
+            if (!People(k.kind) || !k.loaded || k.law != law->id) continue;
+            Dice look{ Mix64(w.seed ^ b.id ^ (uint64_t)(w.clock * 10.0) ^ ((uint64_t)k.id << 32)) };
+            // (people in the hold are easier to find than a few more faces in the cabins)
+            if (look() > (0.15 + 0.5 * law->policing) * (k.need > 0 ? 1.3 : 0.6)) continue;
+            double fine = fmin(c.player.credits, 120.0 * k.tonnes);
+            c.player.credits -= fine;
+            Bump(w, c, law->id, -fmin(12.0, 4.0 + k.tonnes / 8.0));
+            w.econ.state[m].refugees += k.tonnes;                    // (held at the port: its problem now)
+            w.econ.state[m].pop += k.tonnes;
+            Tell(w, c, TextFormat("%s customs found %.0f people you were bringing in against its border law: they're held, and you're fined %s cr", b.name.c_str(), k.tonnes,
+                                  Thousands(fine).c_str()));
+            c.jobs.erase(c.jobs.begin() + i);
+            SyncPeople(c);
+            break;
+        }
     if (!law || (c.Papers(law->id) & PAPER_PERMIT)) return;
     double tonnes = 0.0;
     for (int g = 0; g < GOOD_COUNT; g++) if (d.banned[g] && c.player.cargo[g] > 0.05) tonnes += c.player.cargo[g];
@@ -856,6 +976,7 @@ bool SearchHold(World &w, Captain &c, int lawId, const std::string &who)
 
 void StepContracts(World &w, Captain &c)
 {
+    SyncPeople(c);
     // Just come into dock somewhere
     int near = c.flight.nearBody;
     uint64_t at = DockedAt(c);
@@ -886,7 +1007,7 @@ void StepContracts(World &w, Captain &c)
     // Deadlines: half pay once it's late, failed once it's half as late again
     for (size_t i = 0; i < c.jobs.size();) {
         Contract &k = c.jobs[i];
-        if (w.clock > k.deadline + 0.5 * k.allowed) {
+        if (w.clock > k.deadline + 0.5 * k.allowed && !(People(k.kind) && k.loaded)) {       // (people aboard are still owed their passage, however late)
             Contract gone = k;
             c.jobs.erase(c.jobs.begin() + i);
             gone.loaded = gone.loaded && IssuersCargo(gone.kind);  // (a deposit never collected against comes back)
@@ -920,7 +1041,7 @@ static bool Parse(const char *rest, Contract &k)
                &fromSys, &toSys, &surveySys, &k.need, &mask, &k.good, &k.tonnes, &k.pay, &k.collateral, &k.expires, &k.allowed, &k.deadline,
                &loaded, &key, &used) != 26) return false;
     if (kind < 0 || kind >= (int)ContractKind::Count || effect < 0 || effect >= (int)ContractEffect::Count || k.good >= GOOD_COUNT) return false;
-    if (k.good < 0 && kind != (int)ContractKind::Survey && kind != (int)ContractKind::Courier) return false;
+    if (k.good < 0 && kind != (int)ContractKind::Survey && kind != (int)ContractKind::Courier && kind != (int)ContractKind::Passage && kind != (int)ContractKind::Refugees) return false;
     k.kind = (ContractKind)kind; k.effect = (ContractEffect)effect; k.wide = wide != 0; k.loaded = loaded != 0;
     k.fromBody = from; k.toBody = to; k.scanMask = mask; k.listKey = key;
     k.fromSys = fromSys; k.toSys = toSys; k.surveySys = surveySys;

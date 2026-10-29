@@ -15,6 +15,7 @@
 //   --admin-key K       the game may ask it to stop (when the host leaves)
 //   --pause-on-error    if it can't start, wait for Enter so the window stays readable
 #include "server_console.h"
+#include "partsdata.h"
 #include "process.h"
 #include "server.h"
 #include "raylib.h"
@@ -24,6 +25,8 @@
 
 int RunServerConsole(int argc, char **argv, int first)
 {
+    std::string partsProblem = LoadPartsBesideExe();
+    if (!partsProblem.empty()) fprintf(stderr, "parts.txt was not used (the built-in parts are): %s\n", partsProblem.c_str());
     ServerConfig cfg;
     bool pauseOnError = false;
     for (int i = first; i < argc; i++) {

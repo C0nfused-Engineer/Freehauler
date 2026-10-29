@@ -26,11 +26,20 @@ bool ApplyCommand(World &w, Captain &c, const Command &cmd)
     case Command::BuyLicence:   return BuyLicence(w, c, cmd.arg, (int)cmd.qty);
     case Command::HailShip:     return HailShip(w, c, cmd.arg);
     case Command::PayPirates:   return PayPirates(w, c);
+    case Command::Board:        return BoardShip(w, c, cmd.arg);
     case Command::CallTanker:   return CallTanker(w, c);
     case Command::FitPart:      return FitPart(w, c, UnpackPart(cmd.arg));
     case Command::RemovePart:   return RemovePart(w, c, cmd.arg);
     case Command::BuyHull:      return BuyHull(w, c, cmd.arg);
     case Command::StretchHull:  return StretchHull(w, c, cmd.arg != 0);
+    case Command::Invest:       return InvestIn(w, c, cmd.arg);
+    case Command::WorldReport: {
+        // A world's people and industries: on record for a captain docked there, or one it has answered over comms
+        if (cmd.arg < 0 || cmd.arg >= (int)c.loaded.bodies.size() || c.loaded.bodies[cmd.arg].population <= 0) return false;
+        if (cmd.arg != c.flight.nearBody && !CommsAnswered(w, c, TargetId::MakeBody(c.loaded.index, cmd.arg))) return false;
+        RecordWorld(w, c, c.loaded.bodies[cmd.arg]);
+        return true;
+    }
     default:                    return false;
     }
 }

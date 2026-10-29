@@ -6,6 +6,7 @@
 #include "economy.h"
 #include "format.h"
 #include "shipyard.h"
+#include "partsdata.h"
 #include "theme.h"
 #include "sensors.h"
 #include <algorithm>
@@ -35,7 +36,7 @@ public:
             for (int grade = 0; grade <= best; grade++) {
                 Offer o;
                 o.part.type = type; o.part.size = (uint8_t)size; o.part.grade = (uint8_t)grade;
-                o.part.variant = type == PartType::Reactor ? (uint8_t)fuel : 0;
+                o.part.variant = (uint8_t)(model[page] < ModelCount(type) ? model[page] : 0);
                 o.part.maker = (int16_t)YardMaker(g, yard, type);
                 out.push_back(o);
             }
@@ -50,7 +51,10 @@ public:
         if (in.Pressed(KEY_TAB)) shop = !shop;
         if (in.Pressed(KEY_D) || in.Pressed(KEY_RIGHT)) { page = (page + 1) % PAGES; row[1] = top[1] = 0; shop = true; }
         if (in.Pressed(KEY_A) || in.Pressed(KEY_LEFT))  { page = (page + PAGES - 1) % PAGES; row[1] = top[1] = 0; shop = true; }
-        if (in.Pressed(KEY_Q) || in.Pressed(KEY_E)) fuel = (fuel + (in.Pressed(KEY_E) ? 1 : REACTOR_FUELS - 1)) % REACTOR_FUELS;
+        if ((in.Pressed(KEY_Q) || in.Pressed(KEY_E)) && page < PAGES - 1) {            // (the next model of this kind of part)
+            int kinds = std::max(1, ModelCount((PartType)page));
+            model[page] = (model[page] + (in.Pressed(KEY_E) ? 1 : kinds - 1)) % kinds;
+        }
         std::vector<Offer> offers = Offers(g, *yard);
         int n = shop ? (int)offers.size() : (int)g.player.build.parts.size();
         int &r = row[shop ? 1 : 0], &t = top[shop ? 1 : 0];
@@ -118,7 +122,11 @@ public:
         const char *title = page == PAGES - 1 ? "Hulls and hull work" : PartTypeName((PartType)page);
         std::string head = std::string("<  ") + title + "  >";
         DrawText(head.c_str(), x, y, 18, shop ? WHITE : HUD_LABEL);
-        if (page == (int)PartType::Reactor) DrawText(TextFormat("burning %s   [Q/E]", GoodData(FuelGoodOf(fuel)).name), x + 260, y + 2, 16, GoodData(FuelGoodOf(fuel)).color);
+        if (page < PAGES - 1 && ModelCount((PartType)page) > 1) {
+            const PartModel &md = PartModelOf((PartType)page, model[page]);
+            DrawText(TextFormat("%s   [Q/E]  %d of %d", md.name.c_str(), model[page] + 1, ModelCount((PartType)page)), x + 260, y + 2, 16,
+                     page == (int)PartType::Reactor ? GoodData(md.fuel).color : HUD);
+        }
         y += 24;
         if (page < PAGES - 1) {
             int maker = YardMaker(g, *yard, (PartType)page), best = YardGrade(g, g, *yard, (PartType)page);
@@ -180,28 +188,28 @@ public:
         line(c1, by + 22, s.thrust > 0.0 ? TextFormat("0.99 c in %.0f s  (%.0f s full)", to99(mass), to99(full)) : std::string("NO ENGINES"), s.thrust > 0.0 ? LIGHTGRAY : ORANGE);
         line(c1, by + 44, TextFormat("TURN  %.0f deg/s  (%.0f full)", s.turn / mass, s.turn / full), s.turn > 0.0 ? LIGHTGRAY : ORANGE);
         line(c1, by + 66, TextFormat("TANK %.0f t %s   HOLD %.0f t", s.tank, GoodData(s.fuelGood).name, s.hold));
-        line(c2, by, s.reactorMW > 0.0 ? TextFormat("REACTOR  %.0f MW at %.0f%%  (idles at %.1f)", s.reactorMW, s.reactorEff * 100.0, s.idleMW) : std::string("NO REACTOR"),
-             s.reactorMW > 0.0 ? LIGHTGRAY : ORANGE);
-        double burn = s.reactorMW > 0.0 ? s.reactorMW / (s.reactorEff * s.fuelMJ) : 0.0;
+        line(c2, by, s.reactorTW > 0.0 ? TextFormat("REACTOR  %.0f TW at %.0f%%  (idling: %.0f TW, %.3f t/s)", s.reactorTW, s.reactorEff * 100.0, s.idleTW, ReactorBurnFor(s, s.idleTW)) : std::string("NO REACTOR"),
+             s.reactorTW > 0.0 ? LIGHTGRAY : ORANGE);
+        double burn = s.reactorBurn;
         line(c2, by + 22, TextFormat("flat out it burns %.2f t/s: %.0f min on a tank", burn, burn > 0.0 ? s.tank / burn / 60.0 : 0.0));
-        line(c2, by + 44, TextFormat("CAPACITORS  bank %.0f MJ, drive %.0f MJ", s.bankMJ, s.driveCapMJ));
-        line(c2, by + 66, TextFormat("GEAR  laser %.1f t/s  scoop %.1f  skim %.2f", s.laserRate, s.scoopRate, s.skimRate));
+        line(c2, by + 44, TextFormat("CAPACITORS  bank %.0f TJ, drive %.0f TJ", s.bankTJ, s.driveCapTJ));
+        line(c2, by + 66, TextFormat("GEAR  laser %.1f t/s  scoop %.1f  skim %.2f  berths %.0f", s.laserRate, s.scoopRate, s.skimRate, s.berths));
         // (how far each sensor finds a hauler going about its business; and how far off this ship is found the same way)
         line(c1, by + 88, TextFormat("SENSORS  radar %.2f AU   infrared %.2f AU   telescope %.2f AU   tachyon detector %.0f m3 at %.0f%%      SEEN  by radar at %.2f AU, by eye at %.2f AU",
                                      RadarRange(s.radar, 1.0) / AU_U, IrRange(s.ir, HEAT_REF) / AU_U, ScopeRange(s.scan, 1.0) / AU_U, s.tachArea * s.tachDepth, s.tachEff * 100.0,
                                      RadarRange(1.0, s.hullSize) / AU_U, ScopeRange(1.0, s.hullSize) / AU_U));
-        double spare = s.reactorMW - s.idleMW;
+        double spare = s.reactorTW - s.idleTW;
         if (s.hyperSpeed > 0.0) {
             double need = DrivePower(s, s.hyperSpeed, full, false);
-            line(c3, by, TextFormat("HYPER  %.0f c, %.0f MW full%s", s.hyperSpeed / LIGHT_SEC_U, need, full > s.hyperMaxMass ? "  - TOO HEAVY" : need > spare ? "  - short of power" : ""),
+            line(c3, by, TextFormat("HYPER  %.0f c, %.0f TW full%s", s.hyperSpeed / LIGHT_SEC_U, need, full > s.hyperMaxMass ? "  - TOO HEAVY" : need > spare ? "  - short of power" : ""),
                  full > s.hyperMaxMass || need > spare ? ORANGE : LIGHTGRAY);
         } else line(c3, by, "NO HYPER DRIVE", ORANGE);
         if (s.warpSpeed > 0.0) {
             double need = DrivePower(s, s.warpSpeed, full, true), jump = JumpCharge(s, full);
-            line(c3, by + 22, TextFormat("WARP  %.1fM c, %.0f MW full%s", s.warpSpeed / LIGHT_SEC_U / 1e6, need, full > s.warpMaxMass ? "  - TOO HEAVY" : need > spare ? "  - short of power" : ""),
+            line(c3, by + 22, TextFormat("WARP  %.1fM c, %.0f TW full%s", s.warpSpeed / LIGHT_SEC_U / 1e6, need, full > s.warpMaxMass ? "  - TOO HEAVY" : need > spare ? "  - short of power" : ""),
                  full > s.warpMaxMass || need > spare ? ORANGE : LIGHTGRAY);
-            line(c3, by + 44, TextFormat("a jump takes %.0f MJ full: %.1f to a charge", jump, jump > 0.0 ? s.driveCapMJ / jump : 0.0), s.driveCapMJ >= jump ? LIGHTGRAY : ORANGE);
-            double perLy = need / (s.reactorEff * s.fuelMJ) * LY_U / fmin(s.warpSpeed, fmax(1.0, DriveSpeedFor(s, spare, full, true)));
+            line(c3, by + 44, TextFormat("a jump takes %.0f TJ full: %.1f to a charge", jump, jump > 0.0 ? s.driveCapTJ / jump : 0.0), s.driveCapTJ >= jump ? LIGHTGRAY : ORANGE);
+            double perLy = ReactorBurnFor(s, fmin(need, spare) + s.idleTW) * LY_U / fmin(s.warpSpeed, fmax(1.0, DriveSpeedFor(s, spare, full, true)));
             line(c3, by + 66, TextFormat("about %.2f t of fuel a light year, full", perLy));
         } else line(c3, by + 22, "NO WARP DRIVE: this ship stays in its system", ORANGE);
         DrawText("TAB: your ship / the yard   A/D: another kind of part   W/S or wheel: pick   ENTER: buy and fit   BACKSPACE: take out and sell   F / ESC: close",
@@ -212,7 +220,7 @@ private:
     static const int ROW_H = 38, VISIBLE = 12;
     bool shop = true;                // which list the keys work on: the yard's (true) or what's fitted
     int  page = 0;                   // a PartType, or the hulls page
-    int  fuel = 0;                   // the fuel the reactors on show burn
+    int  model[PAGES] = {};          // which model of each kind of part is on show (Q/E): the fuel a reactor burns, the kind of drive...
     int  row[2] = { 0, 0 }, top[2] = { 0, 0 };
 };
 

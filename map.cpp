@@ -419,8 +419,10 @@ public:
             Color stem = { 255, 140, 40, 255 };
             if (rel.y >= 0.0f) DrawLineV(foot, p, Fade(stem, 0.8f));
             else               DrawDotted(foot, p, Fade(stem, 0.9f));
-            if (const Faction *ruler = g.systems.factions.Get(s->ruler))                   // whose space it stands in
+            if (const Faction *ruler = g.systems.factions.Get(s->ruler))                   // whose space it is: who has people there
                 DrawRectangle((int)foot.x - 3, (int)foot.y - 3, 7, 7, ruler->color);
+            else if (s->develop > 0.0f)                                                    // (in human space, and nobody's)
+                DrawRectangleLines((int)foot.x - 3, (int)foot.y - 3, 7, 7, UNCLAIMED);
             DrawCircleV(p, size, st.color);
             if (s->id == g.systems.home) DrawCircleLinesV(p, size + 4.0f, HUD);
             if (onCourse)                DrawCircleLinesV(p, size + 7.0f, YELLOW);
@@ -446,7 +448,9 @@ public:
             std::string lines[4] = {
                 s.name, StarSummary(s),
                 FindTarget(g, TargetId::MakeStar(hover), rel) ? FormatStarDist(Len(rel)) + " from the ship" : std::string(),
-                s.develop > 0.0f ? g.systems.factions.Name(s.ruler, "Unclaimed space") : std::string("No human presence") };
+                s.ruler != NO_FACTION ? g.systems.factions.Name(s.ruler)
+                : s.develop <= 0.0f ? std::string("No human presence")
+                : s.claim != NO_FACTION ? "Unclaimed: nobody lives here (inside " + g.systems.factions.Name(s.claim) + "'s borders)" : std::string("Unclaimed: nobody lives here") };
             if (g.know.charted.count(hover)) lines[3] += "  -  charts on file";
             int w = 0;
             for (const std::string &l : lines) w = std::max(w, MeasureText(l.c_str(), 16));
@@ -460,10 +464,18 @@ public:
         // Whose colours those are: the states with space on the map
         {
             std::vector<int> seen;
-            for (const StarSystem *s : stars)
+            bool empty = false;
+            for (const StarSystem *s : stars) {
                 if (s->ruler != NO_FACTION && std::find(seen.begin(), seen.end(), s->ruler) == seen.end()) seen.push_back(s->ruler);
+                if (s->ruler == NO_FACTION && s->develop > 0.0f) empty = true;
+            }
             std::sort(seen.begin(), seen.end());
-            int ly = (int)(panel.y + panel.height) - 40 - 20 * (int)seen.size();
+            int ly = (int)(panel.y + panel.height) - 40 - 20 * ((int)seen.size() + (empty ? 1 : 0));
+            if (empty) {
+                DrawRectangleLines((int)panel.x + 20, ly + 4, 8, 8, UNCLAIMED);
+                DrawText("Unclaimed: nobody lives there", (int)panel.x + 34, ly, 14, LIGHTGRAY);
+                ly += 20;
+            }
             for (int id : seen) {
                 const Faction *f = g.systems.factions.Get(id);
                 if (!f) continue;

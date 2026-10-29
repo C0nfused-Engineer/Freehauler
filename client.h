@@ -18,6 +18,7 @@
 class NetClient {
 public:
     enum class State { Idle, Connecting, Joined, Rejected, Lost };
+    double patience = TIMEOUT;                            // seconds to keep saying hello before giving up (longer for a server just started: it has a galaxy to build first)
 
     ~NetClient() { Disconnect(); }
 

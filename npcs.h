@@ -47,6 +47,7 @@ bool NpcHolds(const World &w, const Npc &n, const Captain &c);
 const char *NpcKindName(NpcKind k);
 
 // Actions (sent as Commands)
+bool BoardShip(World &w, Captain &c, int id);       // set about boarding a paymaster's ship: hold alongside it and what it carries is yours
 bool HailShip(World &w, Captain &c, int id);        // a word with another ship: the reply comes at light speed
 bool PayPirates(World &w, Captain &c);              // hand over what the pirate chasing you has demanded
 bool CallTanker(World &w, Captain &c);              // nearly out of fuel: a tanker comes out to you, at a price

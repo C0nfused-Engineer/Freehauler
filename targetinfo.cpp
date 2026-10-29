@@ -5,6 +5,7 @@
 #include "shipparts.h"
 #include "economy.h"
 #include "format.h"
+#include <algorithm>
 
 const double G_SI = 6.674e-11, MSUN_KG = 1.989e30;
 
@@ -139,6 +140,23 @@ static void AddEconomyRows(std::vector<InfoRow> &rows, const World &w, const Cap
     if (m.tariff > 0.0) rows.push_back({ "Tariff", TextFormat("%.0f%% on sales", m.tariff * 100.0) });
     double age = w.clock - at;
     rows.push_back({ "Prices as of", age < 5.0 ? std::string("now") : FormatETA(age) + " ago" });
+    // Its people and what they do, as last seen (the whole of it: 6 on its comms channel)
+    auto seen = c.know.worlds.find(EconomyBody(c, b));
+    if (seen == c.know.worlds.end()) return;
+    const WorldRecord &r = seen->second;
+    rows.push_back({ "People", FormatPopulation(r.pop) + (fabsf(r.trend) >= 0.0005f ? TextFormat("  (%+.1f%% a day)", r.trend * 100.0f) : "") +
+                               TextFormat("  -  living standard %.0f%%", r.living * 100.0f) });
+    rows.push_back({ "", TextFormat("%.0f%% in work, housing for %.0f%%", r.labour > 0.0f ? 100.0f * r.employed / r.labour : 0.0f, r.pop > 0.0 ? 100.0 * r.housing / r.pop : 0.0) });
+    if (r.stuck >= 1.0f || r.leaving >= 1.0f)
+        rows.push_back({ "Leaving", r.stuck >= 1.0f ? Thousands(r.stuck) + " a day would go but can't" : Thousands(r.leaving) + " a day" + (r.goingTo.empty() ? "" : ", for " + r.goingTo) });
+    rows.push_back({ "Power", TextFormat("%.0f made, %.0f used (cells a day)", r.cellsMade, r.cellsUsed) });
+    std::vector<const IndustryRow *> biggest;
+    for (const IndustryRow &in : r.rows) if (in.cap > 0.0f && !IsCivic(in.type) && !IsPower(in.type)) biggest.push_back(&in);
+    std::sort(biggest.begin(), biggest.end(), [](const IndustryRow *x, const IndustryRow *y) { return x->output > y->output; });
+    for (size_t i = 0; i < biggest.size() && i < 5; i++)
+        rows.push_back({ i ? "" : "Industry", std::string(IndustryData(biggest[i]->type).name) + TextFormat("  %.0f t/day%s", biggest[i]->output,
+                                                                  biggest[i]->run < 0.5f ? "  (idle)" : biggest[i]->building > 0.0f ? "  (growing)" : "") });
+    if (biggest.size() > 5) rows.push_back({ "", TextFormat("...and %d more  -  6 on its channel", (int)biggest.size() - 5) });
 }
 
 // How to get the rest: shown in place of what an unscanned body's rows would say

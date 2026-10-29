@@ -1,5 +1,6 @@
 // client.cpp - connecting, prediction and reconciliation, smoothing other ships
 #include "client.h"
+#include "partsdata.h"
 #include "sensors.h"
 #include "shipyard.h"
 #include <algorithm>
@@ -30,6 +31,7 @@ bool NetClient::Connect(const std::string &hostName, uint16_t port, const std::s
     w.Str(name);
     w.Str(password);
     w.Str(shipName, MAX_PLAYER_NAME);
+    w.U64(PartsHash());
     conn.Send(w.buf);
     startedAt = NetTime();
     conn.lastHeard = startedAt;
@@ -115,7 +117,7 @@ void NetClient::Poll(GameState &g, double now)
     }
     if (gotSnapshot) HandleSnapshot(g, newest, now);
 
-    if (state == State::Connecting && now - startedAt > TIMEOUT) {
+    if (state == State::Connecting && now - startedAt > patience) {
         state = State::Lost;
         message = "No answer from " + host + " - is the server running, and the port open?";
     }
@@ -240,6 +242,11 @@ void NetClient::HandleMessage(GameState &g, const std::vector<uint8_t> &msg)
         t.kind = (NpcKind)kind;
         if (npcInfo.size() > 4000) npcInfo.clear();
         npcInfo[t.id] = t;
+        return;
+    }
+    case MSG_WORLD: {
+        uint64_t body; WorldRecord rec;
+        if (ReadWorld(r, body, rec)) g.know.worlds[body] = rec;
         return;
     }
     case MSG_MARKS:

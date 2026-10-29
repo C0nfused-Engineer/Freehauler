@@ -42,6 +42,7 @@ public:
         std::vector<double>   commandsSince; // when each arrived (applied anyway after a second)
         std::vector<float>    standingSent;  // the standings last sent (sent again when they change)
         std::unordered_map<uint64_t, double> pricesSent;   // price records sent, by market: the time of the snapshot
+        std::unordered_map<uint64_t, double> worldsSent;   // ...and economy records, likewise
         uint32_t              newsSent = 0;  // the last headline sent
         uint64_t              jobsSent = 0;  // a signature of the contracts last sent (sent again when it changes)
         std::vector<uint8_t>  papersSent;

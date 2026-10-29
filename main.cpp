@@ -129,6 +129,7 @@
 // Scale: 1 world unit = 5 m. Planets, stars and distances are realistic.
 
 #include "client.h"
+#include "partsdata.h"
 #include "game.h"
 #include "hud.h"
 #include "input.h"
@@ -340,7 +341,7 @@ static bool PlaySession(InputSource &input, ScriptedInput *script, const RenderA
         aim.steer  = ui.steer;
         pending.yaw += c.yaw; pending.pitch += c.pitch; pending.roll += c.roll;
         pending.allStop |= c.allStop; pending.toggleDampeners |= c.toggleDampeners; pending.cyclePower |= c.cyclePower;
-        pending.toggleRadar |= c.toggleRadar;
+        pending.toggleRadar |= c.toggleRadar; pending.toggleReactor |= c.toggleReactor;
 
         // --- Simulation: fixed steps; this frame's rotation is spread across them ---
         if (paused) { acc = 0.0; pending = {}; prev = g.player.ship; }
@@ -356,6 +357,7 @@ static bool PlaySession(InputSource &input, ScriptedInput *script, const RenderA
             s.toggleDampeners = k == 0 && pending.toggleDampeners;
             s.cyclePower      = k == 0 && pending.cyclePower;
             s.toggleRadar     = k == 0 && pending.toggleRadar;
+            s.toggleReactor   = k == 0 && pending.toggleReactor;
             prev = g.player.ship;
             if (net) net->Step(g, s, aim, STEP);       // predicted here, confirmed by the server
             else     StepGame(g, s, aim, STEP);
@@ -405,6 +407,7 @@ static bool PlaySession(InputSource &input, ScriptedInput *script, const RenderA
 // ---------------------------------------------------------------------------
 // Multiplayer from the menu (or the command line)
 // ---------------------------------------------------------------------------
+static const double HOST_PATIENCE = 90.0;       // how long the host waits for the server it started to answer: a new galaxy's economy takes a while to build
 static bool JoinAndPlay(InputSource &input, const RenderAssets &assets, const MenuChoice &c,
                         const ProcessHandle *server = nullptr, const std::string &adminKey = "")
 {
@@ -413,6 +416,7 @@ static bool JoinAndPlay(InputSource &input, const RenderAssets &assets, const Me
     if (!net.Connect(c.address, c.port, c.name, c.password, error, c.ship)) { ShowError("COULDN'T JOIN", error); return true; }
     net.adminKey = adminKey;
     net.stopServerOnLeave = server && c.stopOnLeave;
+    if (server) net.patience = HOST_PATIENCE;
     GameState g;
     if (!WaitForWelcome(net, g, server)) {
         net.Disconnect();
@@ -447,6 +451,15 @@ int main(int argc, char **argv)
     double botSeconds = 60.0;
     bool   botIdle = false;
     for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--write-parts")) {        // the parts the game was built with, as a parts.txt to start from
+            std::string path = (std::filesystem::path(SelfPath()).parent_path() / "parts.txt").string();
+            FILE *f = fopen(path.c_str(), "wb");
+            if (!f) { fprintf(stderr, "Couldn't write %s\n", path.c_str()); return 1; }
+            fputs(DefaultPartsText(), f);
+            fclose(f);
+            printf("Wrote %s\n", path.c_str());
+            return 0;
+        }
         if (!strcmp(argv[i], "--test"))
             return RunHeadlessTests(i + 1 < argc ? argv[i + 1] : "all") == 0 ? 0 : 1;
         if (!strcmp(argv[i], "--server"))
@@ -485,8 +498,10 @@ int main(int argc, char **argv)
     Settings settings;
     LoadSettings(settings);
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
+    std::string partsProblem = LoadPartsBesideExe();        // (parts.txt, if there is one: partsdata.h)
     InitWindow(1280, 800, "Freehauler");
     SetTargetFPS(60);
+    if (!partsProblem.empty() && !script) ShowError("PARTS.TXT WASN'T USED: THE BUILT-IN PARTS ARE", partsProblem);
     if (settings.fullscreen && !script) ToggleBorderlessWindowed();
     rlSetClipPlanes(1.0, 400000.0);           // compressed space tops out around 190,000
     SetExitKey(KEY_NULL);                     // Esc opens menus instead of quitting
@@ -494,6 +509,7 @@ int main(int argc, char **argv)
     assets.Load();
 
     bool again = true;
+    ShowBusy("CHARTING THE GALAXY...");
     if (script && !script->startInMenu) {     // scripted runs start straight in a game
         GameState g;
         NewGame(g);

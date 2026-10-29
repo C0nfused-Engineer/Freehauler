@@ -230,7 +230,7 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
     }
     DrawText(mode, 228, 50, 16, f.driveCharging || f.driveTooHeavy || f.driveStarved || f.driveNone ? YELLOW : hyper ? HUD : HUD_DIM);
 
-    if (hyper) DrawText(TextFormat("DRIVE SET %d%%   field %.0f MW   [W/S]", (int)(p.ship.ftl * 100.0f + 0.5f), f.drivePower), 20, 78, 18, HUD);
+    if (hyper) DrawText(TextFormat("DRIVE SET %d%%   field %.0f TW   [W/S]", (int)(p.ship.ftl * 100.0f + 0.5f), f.drivePower), 20, 78, 18, HUD);
     else DrawText(TextFormat("THROTTLE %s%d%%   %s", asked < 0.0 ? "REV " : "", (int)(fabsf(p.ship.throttle) * 100.0f + 0.5f),
                              FormatSpeed((float)fabs(asked)).c_str()), 20, 78, 18, asked < 0.0 ? ORANGE : HUD);
     DrawText(p.ship.dampeners ? "DAMPENERS ON" : "DAMPENERS OFF  - DRIFTING", 20, 102, 18,
@@ -257,6 +257,11 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
         int lines = std::min((int)held.size(), MAX_LINES) + ((int)held.size() > MAX_LINES ? 1 : 0);
         double inHold = p.CargoTotal();
         int cy = sh - 56 - 18 * lines;
+        if (p.passengers + p.steerage > 0.0 || p.spec.berths > 0.0) {      // who's aboard: in the cabins, and in the hold
+            std::string who = TextFormat("PASSENGERS  %.0f / %.0f berths", p.passengers, p.spec.berths);
+            if (p.steerage > 0.0) who += TextFormat("   +%.0f in the hold (%.0f t)", p.steerage, p.steerage * PERSON_HOLD);
+            DrawText(who.c_str(), 20, cy - 22, 16, p.steerage > 0.0 ? YELLOW : HUD_LABEL);
+        }
         DrawText(TextFormat("CARGO  %.1f / %.0f t", inHold, p.spec.hold), 20, cy, 18,
                  inHold >= p.spec.hold - 1e-6 ? ORANGE : HUD);
         int top = cy;
@@ -278,8 +283,12 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
         DrawText(TextFormat("FUEL   %.1f / %.0f t", p.fuel, p.spec.tank), 20, top - 26, 18, fc);
         DrawRectangleLines(230, top - 24, 120, 12, HUD_DIM);
         DrawRectangle(232, top - 22, (int)(116 * frac), 8, fc);
-        if (f.burn > 0.0) DrawText(TextFormat("-%.3f t/s", f.burn), 360, top - 26, 18, f.load > 0.9 * p.spec.reactorMW ? ORANGE : HUD_DIM);
+        // (what the reactor is burning, and how much of the heat that makes is coming out as power in use)
+        if (p.power.cold) DrawText(TextFormat("REACTOR DOWN: on the bank  [Z]"), 360, top - 26, 18, YELLOW);
+        else if (p.power.restart > 0.0f) DrawText(TextFormat("LIGHTING THE REACTOR  %.0f s", p.power.restart), 360, top - 26, 18, YELLOW);
+        else if (f.burn > 0.0) DrawText(TextFormat("-%.3f t/s  at %.0f%%", f.burn, f.efficiency * 100.0), 360, top - 26, 18, f.load > 0.9 * p.spec.reactorTW ? ORANGE : HUD_DIM);
         DrawText(TextFormat("CREDITS  %s cr", Thousands(p.credits).c_str()), 20, top - 50, 18, HUD);
+        if (p.marked > 0.0) DrawText(TextFormat("MARKED  %s cr  (stolen: a fence at a clan haven or a free port takes them)", Thousands(p.marked).c_str()), 300, top - 50, 16, YELLOW);
         // Power: what the reactor is putting out, the two capacitors, and where spare output is going
         {
             int py = top - 76;
@@ -290,7 +299,7 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
                 DrawRectangle(bx + lw + 2, py + 4, (int)(50 * Clamp((float)frac, 0.0f, 1.0f)), 7, c);
                 return bx + lw + 64;
             };
-            double dc = p.power.driveCap / p.spec.driveCapMJ, bk = p.power.bank / p.spec.bankMJ, ld = f.load / p.spec.reactorMW;
+            double dc = p.power.driveCap / p.spec.driveCapTJ, bk = p.power.bank / p.spec.bankTJ, ld = f.load / p.spec.reactorTW;
             int bx = bar(20, "REACTOR", p.fuel > 0.0 ? ld : 0.0, ld > 0.9 ? ORANGE : HUD);
             bx = bar(bx, "BANK", bk, bk < 0.25 ? ORANGE : HUD);
             bool jump = p.power.driveCap >= JumpCharge(p.spec, p.Mass());          // (charge for a jump to warp?)
@@ -371,7 +380,7 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
         for (const Traffic &t : g.traffic) (t.ghost ? lost : held)++;
         for (const SensorMark &m : g.marks) (m.kind == MARK_RADAR ? radars : bursts)++;
         // (the heat an infrared array sees, and how far off a basic one sees it)
-        DrawText(TextFormat("HEAT %.1f MW  -  seen at %.2f AU", p.power.heat, IrRange(1.0, p.power.heat) / AU_U), x, y, 16, HUD_DIM);
+        DrawText(TextFormat("HEAT %.1f TW  -  seen at %.2f AU", p.power.heat, IrRange(1.0, p.power.heat) / AU_U), x, y, 16, HUD_DIM);
         y += 20;
         std::string scope = TextFormat("CONTACTS %d", held);
         if (lost) scope += TextFormat("  (%d lost)", lost);
@@ -476,9 +485,9 @@ void DrawHud(const GameState &g, const Ship &eye, const ViewState &v, bool trade
     }
 
     if (showHelp) {
-        const char *help = online ? "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  ALT look  TAB mouse  X power  G radar  SPACE/MMB lock  M map  R factions  T trade log  N news  J contracts  "
+        const char *help = online ? "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  ALT look  TAB mouse  X power  Z reactor  G radar  Y board  SPACE/MMB lock  M map  R factions  T trade log  N news  J contracts  "
                                     "I info  F hail / comms  LMB mine  ESC menu"
-                                  : "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  ALT look  TAB mouse  X power  G radar  SPACE/MMB lock  M map  R factions  T trade log  N news  J contracts  "
+                                  : "MOUSE aim  W/S throttle (both: stop)  A/D yaw  Q/E roll  SHIFT hyper/warp  CAPS damp  ALT look  TAB mouse  X power  Z reactor  G radar  Y board  SPACE/MMB lock  M map  R factions  T trade log  N news  J contracts  "
                                     "I info  F hail / comms  LMB mine  F5/F9 quicksave/load  ESC menu";
         int size = 16;
         while (size > 10 && MeasureText(help, size) > sw - 40) size--;          // shrink to fit narrow windows

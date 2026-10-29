@@ -30,7 +30,7 @@
 #include <vector>
 
 const uint32_t PROTOCOL_MAGIC   = 0x31504D53;   // "SMP1"
-const uint16_t PROTOCOL_VERSION = 16;           // bump when anything below changes (16: sensors: contacts, bearings, radar)
+const uint16_t PROTOCOL_VERSION = 22;           // bump when anything below changes (22: marked credits; boarding)
 const uint16_t DEFAULT_PORT     = 23500;
 const int      MAX_PACKET       = 1400;         // stays under a typical 1500-byte MTU
 const int      MAX_MESSAGE      = 1100;         // biggest reliable message
@@ -109,7 +109,7 @@ InputStep ReadInput(Reader &r, uint32_t seq);
 // ---------------------------------------------------------------------------
 enum MsgType : uint8_t {
     // client -> server
-    MSG_HELLO = 1,          // str name, str password, str ship name
+    MSG_HELLO = 1,          // str name, str password, str ship name, u64 parts hash (partsdata.h)
     MSG_COMMAND,            // u8 type, i32 arg, f64 qty, u32 step
     MSG_BYE,                // leaving
     MSG_ADMIN,              // str key, u8 action (1 = stop the server): from the player who started it
@@ -132,6 +132,7 @@ enum MsgType : uint8_t {
     MSG_BUILD,              // your ship: i32 hull, u8 stretch, u8 mounts, u8 n, n x (i32 part, i16 maker)
     MSG_NPC,                // an NPC ship your sensors have made out: i32 id, u8 kind, u8 hull, i32 faction, str name, str from, str dest, i32 good, f32 tonnes
     MSG_MARKS,              // the bearings on your scope, and whose traffic control you're under (see MsgMarks)
+    MSG_WORLD,              // a world's people and industries, as you've just seen them (see MsgWorld)
 };
 
 // Unreliable payload types (first byte after the reliable section)
@@ -155,6 +156,8 @@ std::vector<uint8_t> MsgContract(uint8_t type, const Contract &k);         // MS
 bool                 ReadContract(Reader &r, Contract &out);
 std::vector<std::vector<uint8_t>> MsgMined(const MinedMap &m); // split into messages that fit
 std::vector<uint8_t> MsgMarks(double clock, const Captain &c);
+std::vector<uint8_t> MsgWorld(uint64_t body, const WorldRecord &r);
+bool                 ReadWorld(Reader &r, uint64_t &body, WorldRecord &out);
 bool                 ReadMarks(Reader &r, double clock, Captain &c);
 
 // ---------------------------------------------------------------------------

@@ -4,7 +4,9 @@
 #include "comms.h"
 #include "contracts.h"
 #include "economy.h"
+#include "fleet.h"
 #include "npcs.h"
+#include "partsdata.h"
 #include "process.h"
 #include "save.h"
 #include "sensors.h"
@@ -81,7 +83,7 @@ static void Run(GameState &g, double seconds, Controls c = {}, Aim aim = {})
     int steps = (int)(seconds * SIM_HZ + 0.5);
     for (int i = 0; i < steps; i++) {
         Controls s = c;
-        if (i > 0) s.allStop = s.toggleDampeners = s.cyclePower = s.toggleRadar = false;      // one-shot presses happen once
+        if (i > 0) s.allStop = s.toggleDampeners = s.cyclePower = s.toggleRadar = s.toggleReactor = false;      // one-shot presses happen once
         StepGame(g, s, aim, (float)(1.0 / SIM_HZ));
     }
 }
@@ -107,7 +109,6 @@ static void TestFuel()
     int c = BodyIndex(g, home.name + " c"), d = BodyIndex(g, home.name + " d");
     const ShipSpec &spec = g.player.spec;
     g.player.power.radar = false;                                 // (the radar's draw is its own test: sensors)
-    const double perMJ = 1.0 / (spec.reactorEff * spec.fuelMJ);           // tonnes of fuel a megajoule
 
     // Sublight: thrust burns fuel; coasting costs only what the reactor idles at
     g.player.ship.anchor = H; g.player.ship.pos = home.n * (0.7 * LY_U); g.player.ship.vel = { 0, 0, 0 };
@@ -116,14 +117,14 @@ static void TestFuel()
     g.player.ship.throttle = 1.0f;
     Run(g, 5.0);
     double v = Vector3Length(g.player.ship.vel), burned = f0 - g.player.fuel;
-    CHECK(v > 0.5 * LIGHT_SEC_U && fabs(burned - 5.0 * (spec.idleMW + spec.engineMW) * perMJ) < 0.002,
+    CHECK(v > 0.5 * LIGHT_SEC_U && fabs(burned - 5.0 * ReactorBurnFor(spec, spec.idleTW + spec.engineTW)) < 0.002,
           "5 s at full throttle: %.2f c on %.4f t of fuel", v / LIGHT_SEC_U, burned);
     g.player.ship.vel = { 0, 0, 0 }; g.player.ship.throttle = 0.6f;
     Run(g, 10.0);
     v = Vector3Length(g.player.ship.vel);
     f0 = g.player.fuel;
     Run(g, 5.0);
-    CHECK(fabs(v - ThrottleSpeed(0.6f)) < 1e-3 * v && fabs(Vector3Length(g.player.ship.vel) - v) < 1e-3 * v && fabs(f0 - g.player.fuel - 5.0 * spec.idleMW * perMJ) < 1e-6,
+    CHECK(fabs(v - ThrottleSpeed(0.6f)) < 1e-3 * v && fabs(Vector3Length(g.player.ship.vel) - v) < 1e-3 * v && fabs(f0 - g.player.fuel - 5.0 * ReactorBurnFor(spec, spec.idleTW)) < 1e-6,
           "throttle at 60%%: up to %.0f km/s, and holding it there costs only what the reactor idles at (%.4f t in 5 s)", v / KM_U, f0 - g.player.fuel);
     g.player.ship.throttle = 0.0f;
     g.player.ship.vel = { 0, 0, 0 };
@@ -149,7 +150,7 @@ static void TestFuel()
     g.player.fuel = 50; f0 = 50;
     g.player.power = PowerState();
     Run(g, 10.0, hyper);
-    CHECK(!g.flight.drive.inField && f0 - g.player.fuel > 1.0 && f0 - g.player.fuel < 2.2,
+    CHECK(!g.flight.drive.inField && f0 - g.player.fuel > 1.6 && f0 - g.player.fuel < 3.5,
           "10 s of warp burns %.3f t (speed %.3f ly/s)", f0 - g.player.fuel, Vector3Length(g.player.ship.vel) / LY_U);
 
     // Empty tank: limp
@@ -1029,7 +1030,7 @@ static void TestFactions()
     int claimed = 0, unclaimedSettled = 0, fringe = 0, fringeClaimed = 0, outside = 0;
     for (const StarSystem *s : Neighbours(g, 90.0)) {
         if (s->ruler != NO_FACTION) { held[s->ruler]++; claimed++; }
-        if (s->develop >= 0.3f && s->ruler == NO_FACTION) unclaimedSettled++;
+        if (s->develop >= 0.3f && s->claim == NO_FACTION) unclaimedSettled++;       // (well inside human space, and in nobody's territory)
         if (s->develop > 0.0f && s->develop < 0.1f) { fringe++; if (s->ruler != NO_FACTION) fringeClaimed++; }
         if (s->develop <= 0.0f && s->ruler != NO_FACTION) outside++;
     }
@@ -1041,7 +1042,7 @@ static void TestFactions()
         if (gal[f.seat].ruler != f.id) seated = false;
     }
     CHECK(gal[gal.home].ruler == 0 && held[0] == 1 && unclaimedSettled == 0 && fringe > 50 && fringeClaimed == 0 && outside == 0 && seated,
-          "%d systems are somebody's; the free port holds only home; the fringe (%d systems) and beyond are nobody's", claimed, fringe);
+          "%d systems are somebody's: a government has people there (those inside its borders that nobody lives in are unclaimed); the free port holds only home; the fringe (%d systems) and beyond are nobody's", claimed, fringe);
     CHECK(least > 100 && most < 4 * least, "the governments hold between %d and %d systems each", least, most);
 
     // Ownership: everything inhabited at home is the free port's; elsewhere states, companies, guilds and nobody all own things,
@@ -1228,6 +1229,291 @@ static void TestSaveLoad()
     remove("not_a_save.txt");
 }
 
+// How the economy stands, good by good (a tuning aid: --test econprobe)
+static void ProbeEconomy(GameState &g, const char *when)
+{
+    const int N = g.econ.Count();
+    printf("  -- %s --\n", when);
+    double lab = 0, emp = 0, cellsMade = 0, cellsUsed = 0, housed = 0, pop = 0;
+    int building = 0, shortL = 0, shortC = 0, shortM = 0, inds = 0;
+    for (int i = 0; i < N; i++) {
+        const MarketState &s = g.econ.state[i];
+        lab += s.labour; emp += s.employed; cellsMade += s.cellsMade; cellsUsed += s.cellsUsed; housed += fmin((double)s.housing, s.pop); pop += s.pop;
+        for (const IndustryState &st : s.ind) {
+            if (st.cap <= 0.0f) continue;
+            inds++; if (st.building > 0.0f) building++;
+            if (st.shortOf & SHORT_LABOUR) shortL++; if (st.shortOf & SHORT_CELLS) shortC++; if (st.shortOf & SHORT_MATERIALS) shortM++;
+        }
+    }
+    printf("  employed %.0f%%  housed %.0f%%  cells made/used %.0f / %.0f  industries %d: building %d, short of labour %d, cells %d, materials %d\n",
+           100.0 * emp / lab, 100.0 * housed / pop, cellsMade, cellsUsed, inds, building, shortL, shortC, shortM);
+    {
+        double was = 0, living = 0, worst = 1, refugees = 0, leaving = 0, stuck = 0;
+        int growing = 0, shrinking = 0, skeleton = 0, poor = 0, borders[3] = {};
+        for (int i = 0; i < N; i++) {
+            const MarketState &s = g.econ.state[i];
+            was += g.econ.base->defs[i].pop; living += s.living; worst = fmin(worst, (double)s.living); refugees += s.refugees; leaving += s.leaving; stuck += s.stuck;
+            if (s.pop > 1.02 * g.econ.base->defs[i].pop) growing++; if (s.pop < 0.98 * g.econ.base->defs[i].pop) shrinking++;
+            if (s.pop < 2.0 * SKELETON_CREW) skeleton++; if (s.living < LEAVE_BELOW) poor++;
+        }
+        for (const Faction &f : g.systems.factions.list) if (f.kind == FactionKind::Government) borders[g.econ.border[f.id]]++;
+        printf("  people %.4g (%.1f%% of the start)  living %.2f on average, %.2f at worst, %d below %.2f  bigger %d, smaller %d, emptied %d  on the move %.0f a day, stuck %.0f, unsettled %.0f  borders open %d, selective %d, closed %d\n",
+               pop, 100.0 * pop / was, living / N, worst, poor, LEAVE_BELOW, growing, shrinking, skeleton, leaving, stuck, refugees, borders[0], borders[1], borders[2]);
+    }
+    {
+        // The fleets: ships of each kind, how busy they are (what there was to carry over what they could), and what the yards turn out against what wears out
+        const EconBase &base = *g.econ.base;
+        double ships[ROLE_COUNT] = {}, busy[ROLE_COUNT] = {}, tonnage = 0, built = 0, clans = 0;
+        for (int i = 0; i < N && i < (int)g.econ.fleets.size(); i++) {
+            for (const FleetAt &f : g.econ.fleets[i])
+                for (int r = 0; r < ROLE_COUNT; r++) {
+                    ships[r] += f.ships[r]; tonnage += f.ships[r] * FleetDesign(base, f.owner, r).tonnage;
+                    busy[r] += f.ships[r] * g.econ.busy[(size_t)i * ROLE_COUNT + r];
+                }
+            for (size_t k = 0; k < base.defs[i].ind.size() && k < g.econ.state[i].ind.size(); k++)
+                if (base.defs[i].ind[k].type == IND_SHIPYARD) built += g.econ.state[i].ind[k].output;
+        }
+        for (float c : g.econ.clanShips) clans += c;
+        printf("  ships: %.0f bulk (busy %.2f), %.0f haulers (%.2f), %.0f tankers (%.2f), %.0f liners (%.2f); %.0f with the clans; yards build %.0f t/d, %.0f t/d wears out\n",
+               ships[0], busy[0] / fmax(ships[0], 1e-9), ships[1], busy[1] / fmax(ships[1], 1e-9), ships[2], busy[2] / fmax(ships[2], 1e-9), ships[3], busy[3] / fmax(ships[3], 1e-9),
+               clans, built, tonnage / SHIP_LIFE_DAYS);
+    }
+    const double fd = fmax(g_flowDays, 1e-9);
+    for (int gd = 0; gd < GOOD_COUNT; gd++) {
+        double out = 0, stock = 0, target = 0, made = 0; int low = 0, high = 0, deal = 0, makers = 0;
+        for (int i = 0; i < N; i++) {
+            const MarketState &s = g.econ.state[i];
+            if (s.target[gd] <= 0.0f) continue;
+            deal++; out += s.out[gd]; stock += s.stock[gd]; target += s.target[gd];
+            if (s.out[gd] > 0.0f) makers++;
+            const MarketDef &d = g.econ.base->defs[i];
+            for (size_t k = 0; k < d.ind.size() && k < s.ind.size(); k++)
+                for (int p = 0; p < d.ind[k].outs; p++)
+                    if (d.ind[k].out[p].good == gd) made += s.ind[k].cap * s.ind[k].run * d.ind[k].out[p].share * g.econ.base->perCap[gd];
+            if (s.stock[gd] < 0.25f * s.target[gd]) low++; if (s.stock[gd] > 1.8f * s.target[gd]) high++;
+        }
+        (void)made;
+        printf("  %-18s cap %9.0f t/d at %4d, made %7.0f, to industry %7.0f, people %7.0f, ships %7.0f (+%.0f not there)  stock %3.0f%% of target  short at %4d, glutted at %4d of %d\n", GoodData(gd).name, out, makers, g_flow[0][gd] / fd, g_flow[1][gd] / fd, g_flow[2][gd] / fd, g_flow[3][gd] / fd, g_flow[4][gd] / fd, 100.0 * stock / fmax(target, 1.0), low, high, deal);
+    }
+    memset(g_flow, 0, sizeof g_flow); g_flowDays = 0.0;
+}
+
+static void RunEconomy(World &w, double days);
+static void TestEconProbe()
+{
+    GameState g; NewGame(g);
+    EnsureEconomy(g);
+    ProbeEconomy(g, "at the start");
+    RunEconomy(g, 14.0);
+    ProbeEconomy(g, "after two weeks");
+    RunEconomy(g, 30.0);
+    ProbeEconomy(g, "after six weeks");
+}
+
+// Who has grown most, and who has emptied (--test econwho)
+static void TestEconWho()
+{
+    GameState g; NewGame(g);
+    EnsureEconomy(g);
+    const EconBase &base = *g.econ.base;
+    const int N = g.econ.Count();
+    RunEconomy(g, getenv("FH_DAYS") ? atof(getenv("FH_DAYS")) : 365.0);
+    std::vector<int> order(N);
+    for (int i = 0; i < N; i++) order[i] = i;
+    auto ratio = [&](int i) { return g.econ.state[i].pop / fmax(base.defs[i].pop, 1.0); };
+    std::sort(order.begin(), order.end(), [&](int a, int b) { return ratio(a) > ratio(b); });
+    auto show = [&](int i) {
+        const MarketDef &d = base.defs[i];
+        const MarketState &s = g.econ.state[i];
+        double food = s.target[REF_FOOD] > 0.0f ? s.stock[REF_FOOD] / s.target[REF_FOOD] : -1.0;
+        printf("  %-30s %-18s %s pop %11.0f -> %13.0f  housing %13.0f  living %.2f  food %4.0f%%  work %3.0f%%  services %3.0f%%  trend %+.3f  arrived %.0f  leaving %.0f stuck %.0f  scale %.0f\n",
+               d.name.c_str(), SettlementName(d.settlement), d.hub == i ? "HUB" : "   ", d.pop, s.pop, s.housing, s.living, food * 100.0,
+               s.labour > 0 ? 100.0 * s.employed / s.labour : 0.0, s.services * 100.0, s.trend, s.refugees, s.leaving, s.stuck, d.scale);
+    };
+    printf("  -- grown most --\n");
+    for (int k = 0; k < 10; k++) show(order[k]);
+    printf("  -- emptied (a sample) --\n");
+    int shown = 0, bySettlement[32] = {}, hubs = 0, total = 0;
+    for (int i = 0; i < N; i++) {
+        if (g.econ.state[i].pop >= 2.0 * SKELETON_CREW || base.defs[i].pop < 4.0 * SKELETON_CREW) continue;
+        total++; bySettlement[(int)base.defs[i].settlement & 31]++; if (base.defs[i].hub == i) hubs++;
+        if (shown++ % 12 == 0) show(i);
+    }
+    printf("  -- %d emptied (%d of them hubs), by kind:", total, hubs);
+    for (int k = 0; k < 32; k++) if (bySettlement[k]) printf("  %s %d", SettlementName((Settlement)k), bySettlement[k]);
+    printf("\n");
+}
+
+// The ships each kind of faction designs (a look at the designer: --test fleetprobe)
+static void TestFleetProbe()
+{
+    GameState g; NewGame(g);
+    const FactionSet &fs = g.systems.factions;
+    std::vector<int> who = { NO_FACTION };
+    bool seen[8][8] = {};
+    for (const Faction &f : fs.list) {
+        int kind = (int)f.kind, sub = f.kind == FactionKind::Conglomerate ? (int)f.slant : f.kind == FactionKind::Government ? (f.axis[AX_FORCE] > 0.3f) + 2 * (f.axis[AX_OUTLOOK] > 0.3f) : 0;
+        if (seen[kind][sub & 7]) continue;
+        seen[kind][sub & 7] = true;
+        who.push_back(f.id);
+    }
+    for (int id : who)
+        for (int role = 0; role < ROLE_COUNT; role++) {
+            ShipDesign d = DesignShip(fs, id, role);
+            printf("  %-44s %-12s x%d  %5.0f t cargo %4.0f berths  %6.0f t loaded  %5.0f TW %-12s cruise %.2f  run: %4.0f s + %4.1f s/ly, %6.1f t fuel + %5.2f t/ly  local %3.0f s %5.1f t  "
+                   "%5.0f m3 of %5.0f  built from %5.0f t, %s cr\n", d.name.c_str(), Hull(d.build.hull).name, (int)d.build.stretch, d.cargo, d.berths, d.mass, d.spec.reactorTW,
+                   GoodData(d.fuelGood).name, d.cruise, d.fixedSec, d.secPerLy, d.fixedFuel, d.fuelPerLy, d.localSec, d.localFuel, VolumeUsed(d.build), BuildVolume(d.build), d.tonnage,
+                   Thousands(d.value).c_str());
+            // (the parts it was built around)
+            std::string parts;
+            for (const Part &p : d.build.parts)
+                if (p.type == PartType::Reactor || p.type == PartType::WarpDrive || p.type == PartType::HyperDrive || p.type == PartType::DriveCap)
+                    parts += std::string(parts.empty() ? "" : ", ") + PartModelOf(p).id + TextFormat(" %s x%d", PartTypeName(p.type), (int)p.size);
+            printf("      %s;  %.1f%% of its load in fuel on a %.0f ly run\n", parts.c_str(), 100.0 * (role == ROLE_HAULER ? d.localFuel : d.Fuel(USUAL_RUN_LY)) / fmax(role == ROLE_LINER ? d.berths * PERSON_CABIN : d.cargo, 1.0), USUAL_RUN_LY);
+        }
+}
+
+// How settled human space is, by distance from home (a tuning aid: --test spaceprobe)
+static void TestSpaceProbe()
+{
+    GameState g; NewGame(g);
+    EnsureEconomy(g);
+    const EconBase &base = *g.econ.base;
+    std::vector<const StarSystem *> all;
+    g.systems.Nearby(g.systems.home, {}, FRONTIER_RADIUS_LY * 1.25 * LY_U, all);
+    std::unordered_set<int64_t> settled;
+    for (const MarketDef &d : base.defs) settled.insert((int64_t)d.sys);
+    const double edges[] = { 10, 20, 30, 40, 50, 65, 82 };
+    int n[7] = {}, dev[7] = {}, ruled[7] = {}, lived[7] = {};
+    const SysId home = g.systems.home;
+    for (const StarSystem *sys : all) {
+        double d = Len(g.systems.Between(home, sys->id)) / LY_U;
+        int band = 0;
+        while (band < 6 && d > edges[band]) band++;
+        n[band]++;
+        if (sys->develop > 0.0f) dev[band]++;
+        if (sys->ruler != NO_FACTION) ruled[band]++;
+        if (settled.count((int64_t)sys->id)) lived[band]++;
+    }
+    int tn = 0, td = 0, tr = 0, tl = 0;
+    for (int b = 0; b < 7; b++) {
+        printf("  out to %2.0f ly: %5d systems, %5d with any development, %5d inside a government's borders, %5d with people living in them (%.0f%%)\n", edges[b], n[b], dev[b], ruled[b], lived[b],
+               100.0 * lived[b] / std::max(n[b], 1));
+        tn += n[b]; td += dev[b]; tr += ruled[b]; tl += lived[b];
+    }
+    printf("  in all:        %5d systems, %5d with any development, %5d inside a government's borders, %5d with people living in them (%.0f%%); %d markets\n", tn, td, tr, tl, 100.0 * tl / std::max(tn, 1),
+           (int)base.defs.size());
+}
+
+// The economy over years (a stability check: --test econyears [not part of the ordinary run])
+static void YearsLine(GameState &g, double day)
+{
+    const int N = g.econ.Count();
+    double lab = 0, emp = 0, pop = 0, pop0 = 0, living = 0, cap = 0, made = 0, used = 0, stuck = 0;
+    int poor = 0, empty = 0, hungry = 0, dark = 0, wild = 0, priced = 0, bad = 0, unhoused = 0, building = 0, borders[3] = {};
+    double key[5] = {}, keyT[5] = {};
+    const int goods[5] = { REF_FOOD, REF_CELLS, REF_STEEL, GOOD_HABITAT_MODULES, GOOD_MEDICINES };
+    double biggest = 0.0;
+    for (int i = 0; i < N; i++) {
+        const MarketState &s = g.econ.state[i];
+        lab += s.labour; emp += s.employed; pop += s.pop; pop0 += g.econ.base->defs[i].pop; living += s.living; made += s.cellsMade; used += s.cellsUsed; stuck += s.stuck;
+        if (s.living < LEAVE_BELOW) poor++;
+        if (s.pop < 2.0 * SKELETON_CREW && g.econ.base->defs[i].pop >= 4.0 * SKELETON_CREW) empty++;
+        if (s.target[REF_FOOD] > 0.0f && s.stock[REF_FOOD] < 0.25f * s.target[REF_FOOD]) hungry++;
+        if (s.cellsMade + 1.0f < 0.5f * s.cellsUsed && s.stock[REF_CELLS] < 0.1f * s.target[REF_CELLS]) dark++;
+        if (s.housing < 0.95 * s.pop) unhoused++;
+        biggest = fmax(biggest, s.pop / fmax(g.econ.base->defs[i].pop, 1.0));
+        for (const IndustryState &st : s.ind) { if (st.cap > 0.0f) cap += st.cap; if (st.building > 0.0f) building++; if (!(st.cap >= 0.0f) || !std::isfinite(st.earned)) bad++; }
+        if (!(s.pop > 0.0) || !std::isfinite(s.pop) || !std::isfinite(s.living)) bad++;
+        for (int k = 0; k < GOOD_COUNT; k++) {
+            if (!(s.stock[k] >= 0.0f) || !std::isfinite(s.stock[k])) bad++;
+            double p = MarketPrice(g, i, k);
+            if (p > 0.0) { priced++; if (p > 5.9 * GoodData(k).basePrice || p < 0.31 * GoodData(k).basePrice) wild++; }
+        }
+        for (int k = 0; k < 5; k++) { key[k] += s.stock[goods[k]]; keyT[k] += s.target[goods[k]]; }
+    }
+    for (const Faction &f : g.systems.factions.list) if (f.kind == FactionKind::Government) borders[g.econ.border[f.id]]++;
+    printf("  day %5.0f  people %5.1f%% (most grown x%.1f)  work %2.0f%%  living %.2f  poor %4d  emptied %3d  hungry %4d  dark %3d  unhoused %4d  prices at a limit %4.1f%%  "
+           "capacity %7.0fk  building %4d  cells %3.0f%%  food %3.0f%% steel %3.0f%% modules %3.0f%% medicine %3.0f%%  stuck %.1fM  borders %d/%d/%d  news %u%s\n",
+           day, 100.0 * pop / pop0, biggest, 100.0 * emp / lab, living / N, poor, empty, hungry, dark, unhoused, 100.0 * wild / fmax(priced, 1), cap / 1000.0, building,
+           100.0 * made / fmax(used, 1.0), 100.0 * key[0] / keyT[0], 100.0 * key[2] / keyT[2], 100.0 * key[3] / keyT[3], 100.0 * key[4] / keyT[4], stuck / 1e6,
+           borders[0], borders[1], borders[2], g.newsSeq, bad ? "   *** BAD NUMBERS ***" : "");
+    {
+        // (shipping: the fleets, how stretched they are, and the fuel they got against what they wanted)
+        double ships[ROLE_COUNT] = {}, busy[ROLE_COUNT] = {}, burned = 0.0, missing = 0.0;
+        for (int i = 0; i < N && i < (int)g.econ.fleets.size(); i++)
+            for (const FleetAt &f : g.econ.fleets[i])
+                for (int r = 0; r < ROLE_COUNT; r++) { ships[r] += f.ships[r]; busy[r] += f.ships[r] * g.econ.busy[(size_t)i * ROLE_COUNT + r]; }
+        for (int k : { REF_REACTOR_FUEL, REF_FUEL, RAW_HELIUM3 }) { burned += g_flow[3][k]; missing += g_flow[4][k]; }
+        printf("             ships %.0f bulk (busy %.2f) %.0f haulers (%.2f) %.0f tankers (%.2f) %.0f liners (%.2f)  fuel burned %.0f t/d, %.0f%% more wanted and not there\n",
+               ships[0], busy[0] / fmax(ships[0], 1e-9), ships[1], busy[1] / fmax(ships[1], 1e-9), ships[2], busy[2] / fmax(ships[2], 1e-9), ships[3], busy[3] / fmax(ships[3], 1e-9),
+               burned / fmax(g_flowDays, 1e-9), 100.0 * missing / fmax(burned, 1.0));
+        memset(g_flow, 0, sizeof g_flow); g_flowDays = 0.0;
+    }
+    {
+        // (money: by kind of faction, what's in the treasuries and on its way, what they earn a day and from what, what they spend and can't)
+        static const char *kinds[] = { "governments", "companies", "clans", "others" };
+        double waiting[4] = {};
+        const int F = g.systems.factions.Count();
+        for (int i = 0; i < N; i++) for (int f = 0; f < F; f++) {
+            FactionKind k = g.systems.factions.list[f].kind;
+            waiting[k == FactionKind::Government ? 0 : k == FactionKind::Conglomerate ? 1 : k == FactionKind::Clan ? 2 : 3] += g.econ.Coffer(i, f) + g.econ.Moving(i, f);
+        }
+        {
+            // (the treasury ships under way just now: how many, and what they carry)
+            std::vector<double> runs;
+            for (int i = 0; i < N; i++) for (int f = 0; f < F; f++) if (g.econ.Moving(i, f) > 0.0) runs.push_back(g.econ.Moving(i, f));
+            std::sort(runs.begin(), runs.end());
+            double all = 0.0;
+            for (double r : runs) all += r;
+            if (!runs.empty())
+                printf("             treasury ships under way: %d, carrying %.1fM in all; the middling one %.0f cr, one in ten more than %.0f, the richest %.1fM\n", (int)runs.size(), all / 1e6,
+                       runs[runs.size() / 2], runs[runs.size() * 9 / 10], runs.back() / 1e6);
+        }
+        for (int kind = 0; kind < 4; kind++) {
+            double treasury = 0, income[INC_COUNT] = {}, spent = 0, denied = 0, squeeze = 0, upkeep = 0; int n = 0, broke = 0;
+            for (const Faction &f : g.systems.factions.list) {
+                int k = f.kind == FactionKind::Government ? 0 : f.kind == FactionKind::Conglomerate ? 1 : f.kind == FactionKind::Clan ? 2 : 3;
+                if (k != kind) continue;
+                const FactionMoney &m = g.econ.money[f.id];
+                n++; treasury += m.treasury; spent += m.spent; denied += m.denied; squeeze += m.squeeze; upkeep += m.upkeep;
+                if (m.denied > m.spent) broke++;
+                for (int s = 0; s < INC_COUNT; s++) income[s] += m.income[s];
+            }
+            if (!n) continue;
+            printf("             %-11s x%-2d treasury %7.1fM  on its way %6.1fM  a day: tariffs %5.2fM tax %5.2fM heads %5.2fM profit %6.2fM freight %5.2fM yards %5.2fM loot %5.2fM  upkeep %6.2fM  built %6.2fM  couldn't %6.2fM  (%d going without)  squeeze %.2f\n",
+                   kinds[kind], n, treasury / 1e6, waiting[kind] / 1e6, income[0] / 1e6, income[1] / 1e6, income[2] / 1e6, income[3] / 1e6, income[4] / 1e6, income[5] / 1e6, income[6] / 1e6,
+                   upkeep / 1e6, spent / 1e6, denied / 1e6, broke, squeeze / n);
+        }
+    }
+    fflush(stdout);
+}
+
+static void TestEconYears()
+{
+    GameState g; NewGame(g);
+    EnsureEconomy(g);
+    const double years = getenv("FH_YEARS") ? atof(getenv("FH_YEARS")) : 3.0;
+    // (FH_FINE: at the step the game really takes, a hundred and twenty to the day: slow, and the one that counts)
+    const bool fine = getenv("FH_FINE") != nullptr;
+    printf("  %d economies, %.1f years of 365 market days, in %s steps\n", g.econ.Count(), years, fine ? "the game's own five-second" : "quarter-day");
+    YearsLine(g, 0.0);
+    for (int q = 1; q <= (int)(years * 8.0 + 0.5); q++) {
+        if (!fine) RunEconomy(g, 365.0 / 8.0);
+        else for (int i = 0, n = (int)(365.0 / 8.0 * MARKET_DAY / ECON_TICK + 0.5); i < n; i++) { g.clock += ECON_TICK; StepEconomy(g, ECON_TICK / MARKET_DAY); }
+        YearsLine(g, q * 365.0 / 8.0);
+    }
+    if (fine) return;
+    // ...and the same economy at the pace the game really runs it (a step every five seconds), from a fresh start, for comparison
+    GameState h; NewGame(h);
+    EnsureEconomy(h);
+    printf("  at the game's own step (%.4f of a day):\n", ECON_TICK / MARKET_DAY);
+    for (int d = 0; d <= 90; d += 30) {
+        YearsLine(h, d);
+        if (d < 90) for (int i = 0; i < 30 * (int)(MARKET_DAY / ECON_TICK); i++) { h.clock += ECON_TICK; StepEconomy(h, ECON_TICK / MARKET_DAY); }
+    }
+}
+
 // The economy: stock, production, trade and prices; what the factions do to it
 static void RunEconomy(World &w, double days)
 {
@@ -1257,16 +1543,18 @@ static void TestEconomy()
 
     // Every good is made somewhere and wanted somewhere, and prices start out spread but sane
     int unmade = 0, unwanted = 0, capped = 0, priced = 0, hungry = 0;
-    for (int i = 0; i < N; i++) if (g.econ.state[i].stock[REF_FOOD] < 0.25f * base.defs[i].target[REF_FOOD]) hungry++;
+    for (int i = 0; i < N; i++) if (g.econ.state[i].stock[REF_FOOD] < 0.25f * g.econ.state[i].target[REF_FOOD]) hungry++;
     for (int gd = 0; gd < GOOD_COUNT; gd++) {
         double out = 0, use = 0;
         for (int i = 0; i < N; i++) {
-            out += base.defs[i].out[gd]; use += base.defs[i].use[gd];
+            out += g.econ.state[i].out[gd]; use += g.econ.state[i].use[gd];
             double p = MarketPrice(g, i, gd);
             if (p > 0.0) { priced++; if (p > 5.9 * GoodData(gd).basePrice || p < 0.31 * GoodData(gd).basePrice) capped++; }
         }
         for (int other = 0; other < GOOD_COUNT; other++)
             for (const Ingredient &in : GoodData(other).recipe) if (in.tonnes > 0.0f && in.good == gd) use += 1.0;
+        if (gd == REF_CELLS || gd == GOOD_DATA) use += 1.0;      // (what industries themselves run on: industry.h)
+        if (gd == GOOD_HULL_PLATING || gd == GOOD_SHIP_COMPONENTS || gd == GOOD_REACTOR_CORES) use += 1.0;      // (what shipyards build from)
         if (out <= 0.0) unmade++;
         if (use <= 0.0) unwanted++;
     }
@@ -1280,7 +1568,7 @@ static void TestEconomy()
     {
         Economy was = g.econ;
         int gd = REF_FOOD;
-        float target = base.defs[home].target[gd];
+        float target = g.econ.state[home].target[gd];
         g.econ.state[home].stock[gd] = target;
         double at = MarketPrice(g, home, gd);
         g.econ.state[home].stock[gd] = target * 0.5f;
@@ -1295,7 +1583,7 @@ static void TestEconomy()
 
         // A hold of cargo matters at a small place and not at a big one
         int both = -1;
-        for (int k = 0; k < GOOD_COUNT; k++) if (base.defs[small].target[k] > 0.0f && base.defs[big].target[k] > 0.0f) { both = k; break; }
+        for (int k = 0; k < GOOD_COUNT; k++) if (g.econ.state[small].target[k] > 0.0f && g.econ.state[big].target[k] > 0.0f) { both = k; break; }
         if (both >= 0) {
             double s0 = MarketPrice(g, small, both), b0 = MarketPrice(g, big, both);
             g.econ.state[small].stock[both] += 50.0f; g.econ.state[big].stock[both] += 50.0f;
@@ -1311,20 +1599,20 @@ static void TestEconomy()
         int m = -1, gd = -1;
         for (int i = 0; i < N && m < 0; i++)
             for (int k = FIRST_REFINED; k < GOOD_COUNT; k++)
-                if (base.defs[i].out[k] > 0.2f * base.defs[i].scale && GoodData(k).recipe[0].tonnes > 0.0f && base.defs[i].sys != g.systems.home) { m = i; gd = k; break; }
+                if (g.econ.state[i].out[k] > 0.2f * base.defs[i].scale && GoodData(k).recipe[0].tonnes > 0.0f && base.defs[i].sys != g.systems.home) { m = i; gd = k; break; }
         CHECK(m >= 0, "found a plant: %s makes %s", m >= 0 ? base.defs[m].name.c_str() : "?", m >= 0 ? GoodData(gd).name : "?");
         if (m >= 0) {
             Economy was = g.econ;
             auto made = [&](float inputs) {
                 g.econ = was;
-                g.econ.state[m].stock[gd] = 0.5f * base.defs[m].target[gd];
+                g.econ.state[m].stock[gd] = 0.5f * g.econ.state[m].target[gd];
                 for (const Ingredient &in : GoodData(gd).recipe) if (in.tonnes > 0.0f) g.econ.state[m].stock[in.good] = inputs;
                 float before = g.econ.state[m].stock[gd];
                 StepEconomy(g, 0.01);
                 return g.econ.state[m].stock[gd] - before;
             };
             float starved = made(0.0f), fed = made(1e6f);
-            CHECK(fed - starved > 0.5f * base.defs[m].out[gd] * 0.01f, "in 1%% of a day its stock grows %.2f t with its inputs on hand and %.2f t without (what trade brought in)", fed, starved);
+            CHECK(fed - starved > 0.5f * g.econ.state[m].out[gd] * 0.01f, "in 1%% of a day its stock grows %.2f t with its inputs on hand and %.2f t without (what trade brought in)", fed, starved);
             g.econ = was;
         }
     }
@@ -1336,14 +1624,14 @@ static void TestEconomy()
             const MarketDef &d = base.defs[i];
             if (d.hub == i || d.hub < 0 || d.sys == g.systems.home) continue;
             for (int k = 0; k < GOOD_COUNT; k++)
-                if (d.target[k] > 0.0f && d.out[k] == 0.0f && d.use[k] == 0.0f && base.defs[d.hub].target[k] > 0.0f) { m = i; gd = k; break; }
+                if (g.econ.state[i].target[k] > 20.0f && g.econ.state[i].out[k] == 0.0f && g.econ.state[i].use[k] == 0.0f && g.econ.state[d.hub].target[k] > 0.0f && d.hub != i) { m = i; gd = k; break; }
         }
         CHECK(m >= 0, "found a market that neither makes nor uses something it deals in (%s, %s)", m >= 0 ? base.defs[m].name.c_str() : "?", m >= 0 ? GoodData(gd).name : "?");
         if (m >= 0) {
             Economy was = g.econ;
             int hub = base.defs[m].hub;
-            g.econ.state[m].stock[gd] = 3.0f * base.defs[m].target[gd];
-            g.econ.state[hub].stock[gd] = base.defs[hub].target[gd];
+            g.econ.state[m].stock[gd] = 3.0f * g.econ.state[m].target[gd];
+            g.econ.state[hub].stock[gd] = g.econ.state[hub].target[gd];
             double gap0 = MarketPrice(g, hub, gd) / MarketPrice(g, m, gd);
             float s0 = g.econ.state[m].stock[gd];
             for (int i = 0; i < 8; i++) StepEconomy(g, 0.25);
@@ -1376,7 +1664,8 @@ static void TestEconomy()
 
         // Tariff: off what you're paid
         int gd = -1;
-        for (int k = 0; k < GOOD_COUNT; k++) if (mk.Buys(k) && d.target[k] > 2000.0f) { gd = k; break; }
+        for (int k = 0; k < GOOD_COUNT; k++) if (mk.Buys(k) && g.econ.state[home].target[k] > 2000.0f) { gd = k; break; }
+        (void)d;
         if (gd < 0) for (int k = 0; k < GOOD_COUNT; k++) if (mk.Buys(k)) { gd = k; break; }
         float tariffWas = g.econ.tariff[d.ruler];
         g.econ.tariff[d.ruler] = 0.0f;
@@ -1429,7 +1718,7 @@ static void TestEconomy()
             for (int k = 0; k < GOOD_COUNT; k++) if (base.defs[i].banned[k] && !base.defs[i].station) { banned = i; gd = k; break; }
         if (banned >= 0)
             for (int i = 0; i < N && lawless < 0; i++)
-                if (base.defs[i].ruler == base.defs[banned].ruler && !base.defs[i].banned[gd] && base.defs[i].target[gd] > 0.0f) lawless = i;
+                if (base.defs[i].ruler == base.defs[banned].ruler && !base.defs[i].banned[gd] && g.econ.state[i].target[gd] > 0.0f) lawless = i;
         CHECK(lawful > N / 10 && banned >= 0, "%d markets keep their government's bans (%s won't take %s)", lawful,
               banned >= 0 ? base.defs[banned].name.c_str() : "?", banned >= 0 ? GoodData(gd).name : "?");
         if (banned >= 0) {
@@ -1519,7 +1808,7 @@ static void TestEconomy()
         CHECK(h.news.size() == g.news.size() && (g.news.empty() || h.news.back().text == g.news.back().text) && h.know.prices.size() == g.know.prices.size() &&
               h.know.prices.count(base.defs[home].bodyId) && h.know.prices[base.defs[home].bodyId].name == base.defs[home].name &&
               h.know.prices[base.defs[home].bodyId].price[REF_FOOD] == g.know.prices[base.defs[home].bodyId].price[REF_FOOD] &&
-              h.know.prices[base.defs[home].bodyId].target[REF_FOOD] == base.defs[home].target[REF_FOOD],
+              h.know.prices[base.defs[home].bodyId].target[REF_FOOD] == g.econ.state[home].target[REF_FOOD],
               "...and so do the news (%d items) and the captain's price records (%d markets)", (int)h.news.size(), (int)h.know.prices.size());
         remove("test_econ.txt");
     }
@@ -1907,7 +2196,7 @@ static void TestTraffic()
     int dest = -1, gd = -1;
     for (int i = 0; i < g.econ.Count() && dest < 0; i++) {
         if (base.defs[i].hub != hub || i == hub) continue;
-        for (int k = FIRST_FINISHED; k < GOOD_COUNT; k++) if (base.defs[i].target[k] <= 0.0f) { dest = i; gd = k; break; }
+        for (int k = FIRST_FINISHED; k < GOOD_COUNT; k++) if (g.econ.state[i].target[k] <= 0.0f) { dest = i; gd = k; break; }
     }
     CHECK(dest >= 0, "found a market that doesn't deal in something (%s, %s)", dest >= 0 ? base.defs[dest].name.c_str() : "?", dest >= 0 ? GoodData(gd).name : "?");
     if (dest < 0) return;
@@ -2133,7 +2422,6 @@ static void TestPower()
         while (speed() < v && t < 120.0) { Run(g, 0.05); t += 0.05; }
         return t;
     };
-    const double perMJ = 1.0 / (p.spec.reactorEff * p.spec.fuelMJ);
 
     // Mass: the same engines push a full hold about half as hard, and the thrusters swing it half as fast
     load(0.0); open();
@@ -2163,13 +2451,14 @@ static void TestPower()
     double f0 = p.fuel;
     Run(g, 10.0);
     double idle = f0 - p.fuel;
-    CHECK(fabs(idle - 10.0 * p.spec.idleMW * perMJ) < 1e-6 && fabs(g.flight.load - p.spec.idleMW) < 1e-9,
-          "sitting still: the reactor idles at %.0f MW, %.3f t of fuel in 10 s (%.0f%% of %.0f MJ/t)", g.flight.load, idle, p.spec.reactorEff * 100.0, p.spec.fuelMJ);
+    CHECK(fabs(idle - 10.0 * ReactorBurnFor(p.spec, p.spec.idleTW)) < 1e-6 && fabs(g.flight.load - p.spec.idleTW) < 1e-9 && g.flight.efficiency < 0.6 * p.spec.reactorEff,
+          "sitting still: the reactor idles at %.0f TW, %.3f t of fuel in 10 s (turned right down it gets %.0f%% of the fuel's %.0f TJ/t, where flat out it gets %.0f%%)",
+          g.flight.load, idle, g.flight.efficiency * 100.0, p.spec.fuelTJ, p.spec.reactorEff * 100.0);
     ship.throttle = 1.0f;
     Run(g, 2.0);
-    CHECK(fabs(g.flight.load - (p.spec.idleMW + p.spec.engineMW)) < 0.01, "at full thrust it draws %.0f MW", g.flight.load);
+    CHECK(fabs(g.flight.load - (p.spec.idleTW + p.spec.engineTW)) < 0.01, "at full thrust it draws %.0f TW", g.flight.load);
     Run(g, 30.0);
-    CHECK(fabs(g.flight.load - p.spec.idleMW) < 1e-9 && speed() > 0.989 * LIGHT_SEC_U, "once it's at the speed set, the engines shut down: back to %.0f MW at %.2f c", g.flight.load, speed() / LIGHT_SEC_U);
+    CHECK(fabs(g.flight.load - p.spec.idleTW) < 1e-9 && speed() > 0.989 * LIGHT_SEC_U, "once it's at the speed set, the engines shut down: back to %.0f TW at %.2f c", g.flight.load, speed() / LIGHT_SEC_U);
     ship.throttle = 0.0f;
     Run(g, 30.0);
 
@@ -2183,15 +2472,15 @@ static void TestPower()
     Run(g, 6.0, hyper);
     double fullSpeed = speed(), fullDraw = g.flight.drivePower, law = p.spec.hyperP0 + p.spec.hyperK * p.Mass() * pow(fullSpeed / LIGHT_SEC_U, p.spec.hyperN);
     CHECK(g.flight.drive.inField && fabs(fullSpeed - p.spec.hyperSpeed) < 1e-3 * fullSpeed && fabs(fullDraw - law) < 0.01 * law &&
-          p.power.driveCap > 0.99 * p.spec.driveCapMJ && g.flight.load < 0.5 * p.spec.reactorMW,
-          "hyper in a system: %.0f c takes %.0f MW to hold (the reactor has %.0f); the drive capacitor isn't touched", fullSpeed / LIGHT_SEC_U, fullDraw, p.spec.reactorMW);
+          p.power.driveCap > 0.99 * p.spec.driveCapTJ && g.flight.load < 0.5 * p.spec.reactorTW,
+          "hyper in a system: %.0f c takes %.0f TW to hold (the reactor has %.0f); the drive capacitor isn't touched", fullSpeed / LIGHT_SEC_U, fullDraw, p.spec.reactorTW);
     Controls slower = hyper; slower.throttle = -1;
     Run(g, 1.5, slower);
     Run(g, 2.0, hyper);
     double half = ship.ftl;
     CHECK(half < 0.6f && half > 0.4f && fabs(speed() - half * p.spec.hyperSpeed) < 0.01 * speed() &&
           fabs((g.flight.drivePower - p.spec.hyperP0) / (fullDraw - p.spec.hyperP0) - pow(half, 3.0)) < 0.01,
-          "S with the drive engaged sets it slower: at %.0f%% speed the field takes %.1f MW", half * 100.0f, g.flight.drivePower);
+          "S with the drive engaged sets it slower: at %.0f%% speed the field takes %.1f TW", half * 100.0f, g.flight.drivePower);
     Controls faster = hyper; faster.throttle = 1;
     Run(g, 3.0, faster);
     // It gets there at a steady rate, not all at once
@@ -2210,23 +2499,23 @@ static void TestPower()
     double top = speed(), capMid = p.power.driveCap, wlaw = p.spec.warpP0 + p.spec.warpK * p.Mass() * pow(top / LIGHT_SEC_U, p.spec.warpN);
     double held = g.flight.drivePower;
     Run(g, 30.0, hyper);
-    CHECK(fabs(spent - need) < 0.02 * need && fabs(need - p.spec.jumpMJ * massLight / p.spec.capOut) < 0.01 * need && p.power.warping &&
+    CHECK(fabs(spent - need) < 0.02 * need && fabs(need - p.spec.jumpTJ * massLight / p.spec.capOut) < 0.01 * need && p.power.warping &&
           top > 0.99 * p.spec.warpSpeed && speed() > 0.99 * p.spec.warpSpeed && !g.flight.driveStarved && p.power.driveCap >= capMid && cap0 / need > 1.5 && cap0 / need < 3.0,
-          "empty hold: the jump to warp takes %.0f MJ from the capacitor (%.0f for the bubble, the rest lost getting it out): %.1f jumps to a charge",
-          spent, p.spec.jumpMJ * massLight, cap0 / need);
-    CHECK(fabs(held - wlaw) < 0.01 * wlaw && held > 0.45 * p.spec.reactorMW, "holding the field at %.1f million c takes %.0f MW of the reactor's %.0f", top / LIGHT_SEC_U / 1e6, held, p.spec.reactorMW);
+          "empty hold: the jump to warp takes %.0f TJ from the capacitor (%.0f for the bubble, the rest lost getting it out): %.1f jumps to a charge",
+          spent, p.spec.jumpTJ * massLight, cap0 / need);
+    CHECK(fabs(held - wlaw) < 0.01 * wlaw && held > 0.45 * p.spec.reactorTW, "holding the field at %.1f million c takes %.0f TW of the reactor's %.0f", top / LIGHT_SEC_U / 1e6, held, p.spec.reactorTW);
     load(100.0); open();
     need = JumpCharge(p.spec, p.Mass());
     Run(g, 12.0, hyper);
-    CHECK(p.power.warping && speed() > 0.9 * p.spec.warpSpeed && g.flight.drivePower > 0.9 * (p.spec.reactorMW - p.spec.idleMW) && p.spec.driveCapMJ / need > 1.0 && p.spec.driveCapMJ / need < 2.0,
-          "full hold: %.0f MJ a jump (%.1f to a charge), and the field takes all but all the reactor has (%.0f MW, for %.0f%% of the drive's speed)",
-          need, p.spec.driveCapMJ / need, g.flight.drivePower, 100.0 * speed() / p.spec.warpSpeed);
+    CHECK(p.power.warping && speed() > 0.9 * p.spec.warpSpeed && g.flight.drivePower > 0.9 * (p.spec.reactorTW - p.spec.idleTW) && p.spec.driveCapTJ / need > 1.0 && p.spec.driveCapTJ / need < 2.0,
+          "full hold: %.0f TJ a jump (%.1f to a charge), and the field takes all but all the reactor has (%.0f TW, for %.0f%% of the drive's speed)",
+          need, p.spec.driveCapTJ / need, g.flight.drivePower, 100.0 * speed() / p.spec.warpSpeed);
     // Charging: what goes in is less than what the reactor sends
     open();
-    p.power.driveCap = 0.0; p.power.bank = p.spec.bankMJ;
+    p.power.driveCap = 0.0; p.power.bank = p.spec.bankTJ;
     Run(g, 2.0);
-    CHECK(fabs(p.power.driveCap - 2.0 * (p.spec.reactorMW - p.spec.idleMW) * p.spec.capIn) < 2.0,
-          "an empty capacitor takes all the reactor can spare, and keeps %.0f%% of it (%.0f MJ in 2 s)", p.spec.capIn * 100.0, p.power.driveCap);
+    CHECK(fabs(p.power.driveCap - 2.0 * (p.spec.reactorTW - p.spec.idleTW) * p.spec.capIn) < 2.0,
+          "an empty capacitor takes all the reactor can spare, and keeps %.0f%% of it (%.0f TJ in 2 s)", p.spec.capIn * 100.0, p.power.driveCap);
     // Without the charge for a jump the drive holds at hyper speed until it has it
     open();
     p.power.driveCap = 0.0;
@@ -2239,14 +2528,14 @@ static void TestPower()
           "flat capacitor: the drive holds at hyper speed for %.0f s while it charges, then jumps", t);
     // Short of power: the drive speeds up as fast as ever, but can't go as fast
     load(100.0); open();
-    p.spec.reactorMW = 60.0;
+    p.spec.reactorTW = 1920.0;
     Run(g, 1.0, hyper);
     double gaining = speed();
     Run(g, 11.0, hyper);
-    double limit = LIGHT_SEC_U * pow((p.spec.reactorMW - p.spec.idleMW - p.spec.warpP0) / (p.spec.warpK * p.Mass()), 1.0 / p.spec.warpN);
+    double limit = LIGHT_SEC_U * pow((p.spec.reactorTW - p.spec.idleTW - p.spec.warpP0) / (p.spec.warpK * p.Mass()), 1.0 / p.spec.warpN);
     CHECK(g.flight.driveStarved && p.power.warping && fabs(speed() - limit) < 0.01 * limit && speed() < 0.7 * p.spec.warpSpeed &&
           fabs(gaining - p.spec.warpAccel * LIGHT_SEC_U) < 0.05 * gaining,
-          "the same load on a 60 MW reactor: at warp, but held to %.0f%% of the drive's speed", 100.0 * speed() / p.spec.warpSpeed);
+          "the same load on a 1,920 TW reactor: at warp, but held to %.0f%% of the drive's speed", 100.0 * speed() / p.spec.warpSpeed);
     Refit(g);
     ship.vel = { 0, 0, 0 };
     Run(g, 1.0);
@@ -2270,7 +2559,7 @@ static void TestPower()
     p.power.bank = p.power.driveCap = 0.0;
     Run(g, 2.0);
     CHECK(second == POWER_COMBAT && travelDrive > 2.5 * travelBank && p.power.bank > 2.5 * p.power.driveCap &&
-          fabs(travelDrive / p.spec.capIn + travelBank - 2.0 * (p.spec.reactorMW - p.spec.idleMW)) < 5.0,
+          fabs(travelDrive / p.spec.capIn + travelBank - 2.0 * (p.spec.reactorTW - p.spec.idleTW)) < 5.0,
           "X cycles the power mode: TRAVEL sends three quarters of the spare output to the drive capacitor, COMBAT to the bank");
     Run(g, 1.0 / SIM_HZ, cycle);
     uint8_t third = p.power.mode;
@@ -2322,7 +2611,7 @@ static void TestPower()
 
 static bool base_target(const GameState &g, int market, int good)
 {
-    return market >= 0 && g.econ.base->defs[market].target[good] > 0.0f;
+    return market >= 0 && g.econ.state[market].target[good] > 0.0f;
 }
 
 // Ships built from parts: what they add up to, the yard, and the tachyons a warp exit gives off
@@ -2343,14 +2632,14 @@ static void TestShips()
 
     // The starter ship is the sum of its parts
     ShipSpec d, s = SpecOf(StarterBuild());
-    CHECK(fabs(s.dryMass - d.dryMass) < 0.01 && s.thrust == d.thrust && s.turn == d.turn && s.reactorMW == d.reactorMW && s.reactorEff == d.reactorEff &&
-          s.fuelGood == REF_REACTOR_FUEL && d.fuelGood == REF_REACTOR_FUEL && fabs(s.idleMW - d.idleMW) < 1e-9 && s.engineMW == d.engineMW && s.bankMJ == d.bankMJ && s.driveCapMJ == d.driveCapMJ &&
+    CHECK(fabs(s.dryMass - d.dryMass) < 0.01 && s.thrust == d.thrust && s.turn == d.turn && fabs(s.reactorTW - d.reactorTW) < 1e-6 && fabs(s.reactorEff - d.reactorEff) < 1e-9 && fabs(s.reactorBurn - d.reactorBurn) < 1e-12 &&
+          s.fuelGood == REF_REACTOR_FUEL && d.fuelGood == REF_REACTOR_FUEL && fabs(s.idleTW - d.idleTW) < 1e-9 && s.engineTW == d.engineTW && s.bankTJ == d.bankTJ && s.driveCapTJ == d.driveCapTJ &&
           s.hyperSpeed == d.hyperSpeed && s.hyperP0 == d.hyperP0 && s.hyperMaxMass == d.hyperMaxMass && s.warpSpeed == d.warpSpeed && s.warpP0 == d.warpP0 &&
-          s.jumpMJ == d.jumpMJ && s.tank == FUEL_CAPACITY && s.hold == CARGO_CAPACITY && s.laserRate == d.laserRate && s.scoopRate == d.scoopRate &&
-          s.skimRate == d.skimRate && s.scan == d.scan && s.radar == d.radar && s.radarMW == d.radarMW && s.ir == d.ir && s.tachArea == d.tachArea &&
+          s.jumpTJ == d.jumpTJ && s.tank == FUEL_CAPACITY && s.hold == CARGO_CAPACITY && s.laserRate == d.laserRate && s.scoopRate == d.scoopRate &&
+          s.skimRate == d.skimRate && s.scan == d.scan && s.radar == d.radar && s.radarTW == d.radarTW && s.ir == d.ir && s.tachArea == d.tachArea &&
           s.tachDepth == d.tachDepth && s.tachEff == d.tachEff && s.tachRes == d.tachRes && s.hullSize == d.hullSize,
-          "the starter ship: a %s with %d parts, %.1f t dry, %.0f MW, %.0f t of fuel, %.0f t of cargo", Hull(p.build.hull).name, (int)p.build.parts.size(),
-          s.dryMass, s.reactorMW, s.tank, s.hold);
+          "the starter ship: a %s with %d parts, %.1f t dry, %.0f TW, %.0f t of fuel, %.0f t of cargo", Hull(p.build.hull).name, (int)p.build.parts.size(),
+          s.dryMass, s.reactorTW, s.tank, s.hold);
     CHECK(fabs(VolumeUsed(p.build) - 343.0) < 0.01 && BuildVolume(p.build) == 400.0 && HardpointsUsed(p.build) == 7 && BuildHardpoints(p.build) == 9,
           "it uses %.0f of its %.0f m3 and %d of its %d hardpoints", VolumeUsed(p.build), BuildVolume(p.build), HardpointsUsed(p.build), BuildHardpoints(p.build));
     // Size doubles a part; grade makes it lighter, better and much dearer
@@ -2359,9 +2648,9 @@ static void TestShips()
         ShipBuild one; one.parts = { MakePart(PartType::Reactor, 2, 3) };
         ShipSpec elite = SpecOf(one);
         CHECK(b2.mass == 2.0 * a.mass && b2.volume == 2.0 * a.volume && b2.cost == 2.0 * a.cost && c3.mass < 0.75 * a.mass && c3.volume == a.volume &&
-              c3.cost == 15.0 * a.cost && elite.reactorMW > 1.4 * s.reactorMW && elite.reactorEff > s.reactorEff + 0.1,
-              "a size 3 reactor is twice a size 2; an elite one is %.0f%% lighter, gives %.0f MW at %.0f%%, and costs 15 times as much",
-              100.0 * (1.0 - c3.mass / a.mass), elite.reactorMW, elite.reactorEff * 100.0);
+              c3.cost == 15.0 * a.cost && elite.reactorTW > 1.4 * s.reactorTW && elite.reactorEff > s.reactorEff + 0.05,
+              "a size 3 reactor is twice a size 2; an elite one is %.0f%% lighter, gives %.0f TW at %.0f%%, and costs 15 times as much",
+              100.0 * (1.0 - c3.mass / a.mass), elite.reactorTW, elite.reactorEff * 100.0);
     }
 
     // Away from a yard nothing can be done
@@ -2430,12 +2719,13 @@ static void TestShips()
         one.parts = { MakePart(PartType::Reactor, 2, 0, BURNS_HELIUM3) };      ShipSpec he3 = SpecOf(one);
         double costF = Describe(MakePart(PartType::Reactor, 2, 0, BURNS_REACTOR_FUEL)).cost, costD = Describe(MakePart(PartType::Reactor, 2, 0, BURNS_DEUTERIUM)).cost,
                costH = Describe(MakePart(PartType::Reactor, 2, 0, BURNS_HELIUM3)).cost;
-        auto perMJ = [](const ShipSpec &r) { return GoodData(r.fuelGood).basePrice / r.fuelMJ; };
+        auto perTJ = [](const ShipSpec &r) { return GoodData(r.fuelGood).basePrice / (r.fuelTJ * r.reactorEff); };      // (credits a terajoule of power, flat out)
         CHECK(fis.fuelGood == REF_REACTOR_FUEL && deu.fuelGood == REF_FUEL && he3.fuelGood == RAW_HELIUM3 && std::string(GoodData(REF_FUEL).name) == "Deuterium" &&
-              fis.reactorMW < deu.reactorMW && deu.reactorMW < he3.reactorMW && fis.fuelMJ < deu.fuelMJ && deu.fuelMJ < he3.fuelMJ && costF < costD && costD < costH &&
-              perMJ(he3) < perMJ(deu) && perMJ(deu) < perMJ(fis),
-              "size 2 reactors: fission %.0f MW on %.0f MJ/t (%.0f cr), deuterium fusion %.0f MW on %.0f MJ/t (%.0f cr), helium-3 fusor %.0f MW on %.0f MJ/t (%.0f cr)",
-              fis.reactorMW, fis.fuelMJ, costF, deu.reactorMW, deu.fuelMJ, costD, he3.reactorMW, he3.fuelMJ, costH);
+              fis.reactorTW < deu.reactorTW && deu.reactorTW < he3.reactorTW && 4.0 * fis.fuelTJ < deu.fuelTJ && deu.fuelTJ < he3.fuelTJ && he3.fuelTJ < 1.1 * deu.fuelTJ &&
+              costF < costD && costD < costH && perTJ(deu) < perTJ(fis) && perTJ(deu) < perTJ(he3) && he3.reactorEff > deu.reactorEff + 0.15 && deu.reactorEff > fis.reactorEff,
+              "size 2 reactors: fission %.0f TW at %.0f%% of %.0f TJ/t (%.0f cr), deuterium fusion %.0f TW at %.0f%% of %.0f TJ/t (%.0f cr), helium-3 fusor %.0f TW at %.0f%% of %.0f TJ/t (%.0f cr): "
+              "fusion fuel holds four times what fission fuel does, deuterium is the cheapest power, and helium-3 wastes least as heat",
+              fis.reactorTW, fis.reactorEff * 100.0, fis.fuelTJ, costF, deu.reactorTW, deu.reactorEff * 100.0, deu.fuelTJ, costD, he3.reactorTW, he3.reactorEff * 100.0, he3.fuelTJ, costH);
         const GoodInfo &d2 = GoodData(REF_FUEL);
         CHECK(d2.recipe[0].good == REF_WATER && d2.recipe[0].tonnes >= 3.0f && d2.recipe[1].good == REF_CHEMICALS && GoodData(REF_REACTOR_FUEL).recipe[0].good == ORE_URANIUM,
               "deuterium is made from water, %.0f t of it and a little of the exchange towers' chemicals to the tonne; reactor fuel from uranium", d2.recipe[0].tonnes);
@@ -2443,14 +2733,14 @@ static void TestShips()
         int reactor = -1;
         for (int i = 0; i < (int)p.build.parts.size(); i++) if (p.build.parts[i].type == PartType::Reactor) reactor = i;
         bool mixed = FitPart(g, g, MakePart(PartType::Reactor, 1, 0, BURNS_DEUTERIUM));
-        double perTonne = p.spec.reactorEff * p.spec.fuelMJ;
+        double perTonne = p.spec.reactorEff * p.spec.fuelTJ;
         p.fuel = 0.0;
         RemovePart(g, g, reactor);
-        bool dead = p.spec.reactorMW == 0.0;
+        bool dead = p.spec.reactorTW == 0.0;
         bool fusion = FitPart(g, g, MakePart(PartType::Reactor, 2, 0, BURNS_DEUTERIUM));
-        CHECK(!mixed && dead && fusion && p.spec.fuelGood == REF_FUEL && fabs(p.spec.reactorEff * p.spec.fuelMJ / perTonne - 3.2) < 1e-9 && p.spec.reactorMW == 260.0,
-              "reactors aboard must share a fuel; swapped the fission reactor for a deuterium one: %.0f MW, and a tonne of %s goes 3.2 times as far",
-              p.spec.reactorMW, GoodData(p.spec.fuelGood).name);
+        CHECK(!mixed && dead && fusion && p.spec.fuelGood == REF_FUEL && p.spec.reactorEff * p.spec.fuelTJ / perTonne > 4.0 && p.spec.reactorTW > 8000.0 && p.spec.reactorTW < 8600.0,
+              "reactors aboard must share a fuel; swapped the fission reactor for a deuterium one: %.0f TW, and a tonne of %s goes %.1f times as far",
+              p.spec.reactorTW, GoodData(p.spec.fuelGood).name, p.spec.reactorEff * p.spec.fuelTJ / perTonne);
         g.econ.state[market].stock[REF_FUEL] = 100.0f;
         p.fuel = 0.0;
         bool fuelled = base_target(g, market, REF_FUEL) ? BuyFuel(g, 5.0) : (p.fuel = 5.0, true);
@@ -2529,8 +2819,8 @@ static void TestShips()
         ShipSpec bulk = SpecOf(NpcBuild(NpcKind::Freighter, 3000.0)), small = SpecOf(NpcBuild(NpcKind::Freighter, 60.0)), raider = SpecOf(NpcBuild(NpcKind::Pirate, 0.0));
         double full = bulk.dryMass + bulk.tank + 3000.0, crew = 0.45 * bulk.hyperSpeed;
         CHECK(bulk.hold >= 3000.0 && small.hold >= 60.0 && small.hold <= 100.0 && bulk.hyperMaxMass >= full && bulk.thrust > 0.0 &&
-              DrivePower(bulk, crew, full, false) < bulk.reactorMW - bulk.idleMW && raider.hyperSpeed > 0.0 && raider.dryMass < 0.5 * small.dryMass + 30.0,
-              "a 3,000 t freighter: %.0f t dry, a %.0f MW reactor, a drive good for %.0f t; a raider: %.0f t dry", bulk.dryMass, bulk.reactorMW, bulk.hyperMaxMass, raider.dryMass);
+              DrivePower(bulk, crew, full, false) < bulk.reactorTW - bulk.idleTW && raider.hyperSpeed > 0.0 && raider.dryMass < 0.5 * small.dryMass + 30.0,
+              "a 3,000 t freighter: %.0f t dry, a %.0f TW reactor, a drive good for %.0f t; a raider: %.0f t dry", bulk.dryMass, bulk.reactorTW, bulk.hyperMaxMass, raider.dryMass);
     }
 
     // Saved and loaded
@@ -2555,7 +2845,7 @@ static double AngleBetween(DVec3 a, DVec3 b) { return atan2(Len(Cross(a, b)), Do
 static void TestSensors()
 {
     const TachyonSensor ship = ShipDetector(ShipSpec()), outpost = OutpostDetector(), port = PortDetector();
-    const double small = TACH_E0_MJ, big = 50.0 * TACH_E0_MJ;       // a 100 t ship, and a 5,000 t one
+    const double small = TACH_E0_TJ, big = 50.0 * TACH_E0_TJ;       // a 100 t ship, and a 5,000 t one
 
     // --- The physics ---
     {
@@ -2648,8 +2938,8 @@ static void TestSensors()
     {
         SensorFit basic = { 1.0, 1.0, 1.0, true }, passive = { 1.0, 1.0, 1.0, false };
         Signature hauler, bulk, hot, cold;
-        hauler.heat = 7.5; bulk = hauler; bulk.size = Hull(HULL_BULK).volume / Hull(HULL_HAULER).volume;
-        hot = hauler; hot.heat = 120.0; cold = hauler; cold.heat = 0.5;
+        hauler.heat = 1275.0; bulk = hauler; bulk.size = Hull(HULL_BULK).volume / Hull(HULL_HAULER).volume;
+        hot = hauler; hot.heat = 20400.0; cold = hauler; cold.heat = 85.0;
         uint8_t by = 0;
         int far = Sense(basic, hauler, 1.6 * AU_U), found = Sense(basic, hauler, 1.4 * AU_U, 1.0, &by), known = Sense(basic, hauler, 1.0 * AU_U), named = Sense(basic, hauler, 0.2 * AU_U);
         CHECK(far == CONTACT_NONE && found == CONTACT_DETECTED && by == BY_RADAR && known == CONTACT_CLASSIFIED && named == CONTACT_IDENTIFIED &&
@@ -2742,24 +3032,24 @@ static void TestSensors()
         put(rid, 1.2, 0.5); r = FindNpc(h, rid);
         double heatOff = p.power.heat;
         bool seenOff = r && NpcHolds(h, *r, h);
-        CHECK(fabs(idle - (p.spec.idleMW + p.spec.radarMW)) < 1e-6 && fabs(h.flight.load - p.spec.idleMW) < 1e-6 && heatOn > heatOff && seenOn && !seenOff,
-              "the radar draws %.0f MW, and it all ends up as heat: %.1f MW with it on, %.1f off. A raider's infrared 1.2 AU away holds the first and not the second", p.spec.radarMW, heatOn, heatOff);
+        CHECK(fabs(idle - (p.spec.idleTW + p.spec.radarTW)) < 1e-6 && fabs(h.flight.load - p.spec.idleTW) < 1e-6 && heatOn > heatOff && seenOn && !seenOff,
+              "the radar draws %.0f TW, and it all ends up as heat: %.1f TW with it on, %.1f off. A raider's infrared 1.2 AU away holds the first and not the second", p.spec.radarTW, heatOn, heatOff);
         put(rid, 0.8, 0.5); r = FindNpc(h, rid);
         bool near = r && NpcHolds(h, *r, h);
         p.power.mode = POWER_SILENT;
         p.power.driveCap = 0.0;
         put(rid, 0.8, 2.0); r = FindNpc(h, rid);
         bool silent = r && !NpcHolds(h, *r, h);
-        CHECK(near && silent && p.power.heat < 0.2 * heatOff && h.flight.load <= SILENT_REACTOR * p.spec.reactorMW && p.power.driveCap == 0.0 && !RadarOn(p.spec, p.power),
-              "at 0.8 AU it holds a ship idling with its radar off; running silent (%.2f MW of heat, nothing charging) it doesn't", p.power.heat);
+        CHECK(near && silent && p.power.heat < 0.3 * heatOff && h.flight.load <= SILENT_REACTOR * p.spec.reactorTW && p.power.driveCap == 0.0 && !RadarOn(p.spec, p.power),
+              "at 0.8 AU it holds a ship idling with its radar off; running silent (%.2f TW of heat, nothing charging) it doesn't", p.power.heat);
         p.ship.throttle = 1.0f;
         put(rid, 0.8, 0.5); r = FindNpc(h, rid);
         double silentBurn = p.power.heat;
         p.power.mode = POWER_TRAVEL;
         p.ship.vel = { 0, 0, 0 };
         put(rid, 3.0, 0.5); r = FindNpc(h, rid);
-        CHECK(r && NpcHolds(h, *r, h) && p.power.heat > 40.0 && silentBurn > 5.0 * heatOff,
-              "burning the engines flat out gives off %.0f MW: it's held from 3 AU (and running silent doesn't hide an exhaust: %.0f MW)", p.power.heat, silentBurn);
+        CHECK(r && NpcHolds(h, *r, h) && p.power.heat > 5000.0 && silentBurn > 1.5 * heatOff,
+              "burning the engines flat out gives off %.0f TW: it's held from 3 AU (and running silent doesn't hide an exhaust: %.0f TW)", p.power.heat, silentBurn);
         p.ship.throttle = 0.0f; p.ship.vel = { 0, 0, 0 };
     }
 
@@ -2850,9 +3140,9 @@ static void TestSensors()
         Run(h, 60.0, hyper);
         float slow = p.power.field;
         double mass = p.Mass();
-        CHECK(warping && fabs(full - 1.0f) < 0.01f && soon > 0.85f && fabs(slow - 0.09f) < 0.03f && fabs(BubbleEnergy(p.spec, mass, 1.0) - p.spec.jumpMJ * mass) < 1e-6 &&
+        CHECK(warping && fabs(full - 1.0f) < 0.01f && soon > 0.85f && fabs(slow - 0.09f) < 0.03f && fabs(BubbleEnergy(p.spec, mass, 1.0) - p.spec.jumpTJ * mass) < 1e-6 &&
               BubbleEnergy(p.spec, mass, slow) < 0.3 * BubbleEnergy(p.spec, mass, 1.0) && TachyonDecayAU(BubbleEnergy(p.spec, mass, slow)) < 0.55 * TachyonDecayAU(BubbleEnergy(p.spec, mass, 1.0)),
-              "at full speed the bubble holds %.0f MJ; set to 30%% it still holds %.0f%% of that a second later, and %.0f%% after a minute: a burst that carries %.0f AU, not %.0f",
+              "at full speed the bubble holds %.0f TJ; set to 30%% it still holds %.0f%% of that a second later, and %.0f%% after a minute: a burst that carries %.0f AU, not %.0f",
               BubbleEnergy(p.spec, mass, 1.0), soon * 100.0, 100.0 * BubbleEnergy(p.spec, mass, slow) / BubbleEnergy(p.spec, mass, 1.0),
               TachyonDecayAU(BubbleEnergy(p.spec, mass, slow)), TachyonDecayAU(BubbleEnergy(p.spec, mass, 1.0)));
         p.ship.anchor = H; p.ship.pos = RandomPointFarFromPorts(h); p.ship.vel = { 0, 0, 0 }; p.ship.ftl = 1.0f;
@@ -3011,6 +3301,1141 @@ static void TestSensors()
               to.marks[0].rHi == 4.0 * AU_U && fabs(to.marks[0].at - 1990.0) < 1e-3 && to.marks[0].note == "Somewhere Control" && to.marks[1].kind == MARK_RADAR &&
               to.marks[1].source == NPC_ID_BASE + 3,
               "the bearings on a scope reach the client, with their ages");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Industry: what a world can do, the labour and power it takes, and building more of it
+// ---------------------------------------------------------------------------
+static void TestIndustry()
+{
+    // --- The place decides what can be done there ---
+    {
+        SiteInfo garden, moon, station, hot;
+        garden.openAir = garden.surface = true; garden.flux = 1.0f; garden.tempK = 288.0f; garden.gravity = 1.0f; garden.life = 3; garden.res[RES_BIOMASS] = 0.8f;
+        moon.surface = true; moon.giant = true; moon.flux = 0.03f; moon.tempK = 60.0f; moon.gravity = 0.15f; moon.res[RES_ICES] = 0.9f; moon.res[RES_METALS] = 0.6f;
+        station.giant = true; station.flux = 0.03f;
+        hot.surface = true; hot.flux = 6.0f; hot.tempK = 700.0f; hot.gravity = 0.9f; hot.res[RES_METALS] = 0.8f; hot.strangeStar = true;
+        CHECK(SiteQuality(IND_FARM, garden) > 1.0 && SiteQuality(IND_FARM, moon) == 0.0 && SiteQuality(IND_AGRIDOME, moon) > 0.9 && SiteQuality(IND_AGRIDOME, garden) == 0.0 &&
+              SiteQuality(IND_HYDROPONICS, station) == 1.0 && SiteQuality(IND_HYDROPONICS, moon) == 0.0,
+              "open farming wants a sky to breathe under; a far moon gets agridomes; a station, hydroponics");
+        CHECK(SiteQuality(IND_MINE, garden) == 0.0 && SiteQuality(IND_MINE, moon) > 0.8 && SiteQuality(IND_MINE, hot) > SiteQuality(IND_MINE, moon) &&
+              SiteQuality(IND_ICEWORKS, moon) > 1.0 && SiteQuality(IND_ICEWORKS, hot) == 0.0 && SiteQuality(IND_SKIMMER, station) == 1.0 && SiteQuality(IND_SKIMMER, garden) == 0.0,
+              "mines are as good as the rock, ice works need ice, a skimmer needs a giant below");
+        CHECK(SiteQuality(IND_LAB, hot) > 2.0 * SiteQuality(IND_LAB, garden) && SiteQuality(IND_LAB, moon) > SiteQuality(IND_LAB, garden) &&
+              SiteQuality(IND_XENO, garden) > 1.0 && SiteQuality(IND_XENO, moon) == 0.0 && SiteQuality(IND_SOLAR, hot) > 2.0 && SiteQuality(IND_SOLAR, moon) == 0.0 &&
+              SiteQuality(IND_GEOTHERMAL, hot) > 1.0 && SiteQuality(IND_GEOTHERMAL, garden) == 0.0 && SiteQuality(IND_CITY, garden) > SiteQuality(IND_CITY, moon),
+              "research labs do best where it's strangest (%.1f on a scorched world of a dying star, %.1f on a garden world); xenobiology needs life; power is by the place; cities are cheapest in the open",
+              SiteQuality(IND_LAB, hot), SiteQuality(IND_LAB, garden));
+        Product mix[MAX_PRODUCTS];
+        int n = IndustryProducts(IND_MINE, hot, mix);
+        double sum = 0.0, iron = 0.0;
+        for (int i = 0; i < n; i++) { sum += mix[i].share; if (mix[i].good == ORE_IRON) iron = mix[i].share; }
+        CHECK(n >= 4 && fabs(sum - 1.0) < 1e-5 && iron > 0.4 && fabs(IndustryLabour(IND_MINE, 20.0, 1.0) / IndustryLabour(IND_MINE, 10.0, 1.0) - pow(2.0, LABOUR_POWER)) < 1e-9 &&
+              IndustryLabour(IND_MINE, 10.0, 0.5) > 4.0 * IndustryLabour(IND_MINE, 10.0, 1.0) && fabs(CityHousing(CityFor(1e6)) - 1e6) < 1.0,
+              "a metal-rich world's mines are %.0f%% iron; twice the capacity takes %.1f times the labour, and a site half as good more than four times",
+              100.0 * iron, pow(2.0, LABOUR_POWER));
+    }
+
+    GameState g; NewGame(g);
+    EnsureEconomy(g);
+    const EconBase &base = *g.econ.base;
+    const int N = g.econ.Count();
+    auto find = [&](int m, int type) { for (int k = 0; k < (int)base.defs[m].ind.size(); k++) if (base.defs[m].ind[k].type == type && g.econ.state[m].ind[k].cap > 0.0f) return k; return -1; };
+    int home = -1, domed = -1, mining = -1;
+    for (int i = 0; i < N; i++) {
+        const MarketDef &d = base.defs[i];
+        if (d.sys == g.systems.home && d.settlement == Settlement::CoreWorld) home = i;
+        if (domed < 0 && d.settlement == Settlement::DomedColonies && d.pop > 5000.0) domed = i;
+        if (mining < 0 && d.settlement == Settlement::MiningOutpost) mining = i;
+    }
+    CHECK(home >= 0 && domed >= 0 && mining >= 0, "found a core world, a domed colony and a mining outpost");
+    if (home < 0 || domed < 0 || mining < 0) return;
+
+    // --- One economy to a world, stations and all; industries by what the place is ---
+    {
+        const MarketDef &d = base.defs[home];
+        int stations = 0, merged = 0;
+        for (const Body &b : g.loaded.bodies)
+            if (b.kind == Kind::Station && b.population > 0 && b.parent > 0 && g.loaded.bodies[b.parent].id == d.bodyId) { stations++; if (g.econ.MarketOf(b.id) == home) merged++; }
+        double bodies = 0.0;
+        for (const Body &b : g.loaded.bodies) if (g.econ.MarketOf(b.id) == home) bodies += b.population;
+        CHECK(stations > 0 && merged == stations && fabs(bodies - d.pop) < 1.0 && fabs(g.econ.state[home].pop - d.pop) < 1.0,
+              "%s and the %d stations over it are one economy of %s people", d.name.c_str(), stations, FormatPopulation(d.pop).c_str());
+        CHECK(find(home, IND_FARM) >= 0 && find(home, IND_AGRIDOME) < 0 && find(home, IND_CITY) >= 0 && find(home, IND_FOUNDRY) >= 0 && find(home, IND_PHARMA) >= 0 &&
+              find(home, IND_ARMS) >= 0 && find(home, IND_LAB) >= 0 && find(domed, IND_AGRIDOME) >= 0 && find(domed, IND_FARM) < 0 && find(mining, IND_MINE) >= 0,
+              "the core world farms in the open and has its foundries, labs and arms plants; the domed colony farms under domes; the outpost mines");
+        int powered = 0, housed = 0, sized = 0, employed = 0;
+        for (int i = 0; i < N; i++) {
+            const MarketState &s = g.econ.state[i];
+            bool power = false;
+            double need = 0.0;
+            for (int k = 0; k < (int)s.ind.size(); k++) {
+                if (s.ind[k].cap <= 0.0f) continue;
+                if (IsPower(base.defs[i].ind[k].type)) power = true;
+                need += IndustryLabour(base.defs[i].ind[k].type, s.ind[k].cap, base.defs[i].ind[k].site);
+                if (base.defs[i].ind[k].type == IND_CITY && fabs(CityHousing(s.ind[k].cap) / s.pop - HOUSING_SPARE) < 0.01) housed++;
+            }
+            if (power) powered++;
+            // (stations, whose power takes more hands, come out a little over)
+            if (need / (LABOUR_SHARE * s.pop) > EMPLOYED_AT_START - 0.06 && need / (LABOUR_SHARE * s.pop) < 1.0) sized++;
+            if (s.employed <= s.labour * 1.0001f) employed++;
+        }
+        CHECK(powered == N && housed == N && sized > 0.97 * N && employed == N,
+              "all %d economies make power and house their people (%.0f%% of them over); %d are sized to use about %.0f%% of their labour, services and all", N, (HOUSING_SPARE - 1.0) * 100.0, sized,
+              EMPLOYED_AT_START * 100.0);
+    }
+
+    // --- Labour: 0.9 a head; short of it, the least important goes short first ---
+    {
+        Economy was = g.econ;
+        MarketState &s = g.econ.state[home];
+        StepEconomy(g, 0.02);
+        double labour = s.labour, pop = s.pop;
+        int farm = find(home, IND_FARM), light = find(home, IND_LIGHT), city = find(home, IND_CITY);
+        for (int k = 0; k < GOOD_COUNT; k++) s.stock[k] = 0.9f * s.target[k];     // (everything wanted)
+        StepEconomy(g, 0.02);
+        float farmFull = s.ind[farm].run, lightFull = s.ind[light].run;
+        s.pop *= 0.5;
+        for (int k = 0; k < GOOD_COUNT; k++) s.stock[k] = 0.9f * s.target[k];
+        StepEconomy(g, 0.02);
+        int shortHanded = 0;
+        for (const IndustryState &st : s.ind) if (st.shortOf & SHORT_LABOUR) shortHanded++;
+        int services = find(home, IND_SERVICES);
+        CHECK(fabs(labour - LABOUR_SHARE * pop) < 1e-3 * labour && fabs(s.labour - 0.5 * labour) < 1e-3 * labour && s.employed > 0.99f * s.labour && shortHanded > 2 &&
+              s.housing > 0.99 * s.pop && farmFull > 0.8f && s.ind[farm].run > 0.9f * farmFull && lightFull > 0.0f && services >= 0 && s.ind[services].run < 0.05f,
+              "labour is %.1f a head. With half its people, %s still houses them all (its cities at %.0f%% of what they could), and its farms run (%.0f%%); %d industries are short-handed (light industry at %.0f%%), and there's nobody left for services",
+              LABOUR_SHARE, base.defs[home].name.c_str(), s.ind[city].run * 100.0f, s.ind[farm].run * 100.0f, shortHanded, s.ind[light].run * 100.0f);
+        g.econ = was;
+    }
+
+    // --- Power: plasma cells, made here or brought in; without them the works stop and the cities go dark ---
+    {
+        Economy was = g.econ;
+        MarketState &s = g.econ.state[home];
+        for (int k = 0; k < GOOD_COUNT; k++) s.stock[k] = 0.9f * s.target[k];
+        StepEconomy(g, 0.02);
+        float made = s.cellsMade, used = s.cellsUsed, housing = s.housing;
+        int foundry = find(home, IND_FOUNDRY);
+        float before = s.ind[foundry].output;
+        for (int k = 0; k < (int)s.ind.size(); k++) if (IsPower(base.defs[home].ind[k].type)) s.ind[k].cap = 0.0f;       // the plants shut
+        for (int k = 0; k < GOOD_COUNT; k++) s.stock[k] = 0.9f * s.target[k];
+        s.stock[REF_CELLS] = 0.0f;
+        StepEconomy(g, 0.02);
+        bool dark = s.cellsMade == 0.0f && s.housing < 0.05f * housing && s.ind[foundry].output < 0.05f * before && (s.ind[foundry].shortOf & SHORT_CELLS);
+        s.stock[REF_CELLS] = (float)(used * 0.02 * 3.0);                        // a shipload comes in
+        for (int k = 0; k < GOOD_COUNT; k++) if (k != REF_CELLS) s.stock[k] = 0.9f * s.target[k];
+        StepEconomy(g, 0.02);
+        CHECK(made > 0.9f * used && used > 0.0f && dark && s.housing > 0.95f * housing && s.ind[foundry].output > 0.9f * before,
+              "%s makes %.0f plasma cells a day and uses %.0f. With its plants shut and none in store the foundry stops and the cities go dark; a shipload of cells brings both back",
+              base.defs[home].name.c_str(), made, used);
+        g.econ = was;
+    }
+
+    // --- Materials: an industry short of what it's made from (or of scientific data) makes less ---
+    {
+        Economy was = g.econ;
+        MarketState &s = g.econ.state[home];
+        int pharma = find(home, IND_PHARMA);
+        for (int k = 0; k < GOOD_COUNT; k++) s.stock[k] = 0.9f * s.target[k];
+        StepEconomy(g, 0.02);
+        float before = s.ind[pharma].output;
+        for (int k = 0; k < GOOD_COUNT; k++) s.stock[k] = 0.9f * s.target[k];
+        float data = s.stock[GOOD_DATA];
+        s.stock[GOOD_DATA] = 0.0f;
+        for (int k = 0; k < (int)s.ind.size(); k++) if (base.defs[home].ind[k].type == IND_LAB) s.ind[k].cap = 0.0f;
+        StepEconomy(g, 0.02);
+        CHECK(before > 0.0f && data > 0.0f && s.ind[pharma].output < 0.05f * before && (s.ind[pharma].shortOf & SHORT_MATERIALS),
+              "pharmaceuticals run on scientific data: with the labs shut and none in store, medicine output falls from %.0f t a day to %.1f", before, s.ind[pharma].output);
+        g.econ = was;
+    }
+
+    // --- Building more: the owner, when it pays; and a captain, for a share ---
+    {
+        Economy was = g.econ;
+        MarketState &s = g.econ.state[home];
+        int heavy = find(home, IND_LIGHT);
+        for (int k = 0; k < GOOD_COUNT; k++) s.stock[k] = 1.1f * s.target[k];     // (nothing else worth building)
+        for (int p = 0; p < base.defs[home].ind[heavy].outs; p++) s.stock[base.defs[home].ind[heavy].out[p].good] = 0.2f * s.target[base.defs[home].ind[heavy].out[p].good];
+        s.stock[REF_STEEL] = 2.0f * s.target[REF_STEEL]; s.stock[GOOD_MACHINERY] = 2.0f * s.target[GOOD_MACHINERY];
+        float cap = s.ind[heavy].cap, steel = s.stock[REF_STEEL];
+        g.clock += MARKET_DAY;                                    // (time for the owners to look again)
+        StepEconomy(g, 0.01);
+        bool started = s.ind[heavy].building > 0.0f && fabs(s.ind[heavy].building - UPGRADE_STEP * cap) < 1e-3 * cap && s.stock[REF_STEEL] < steel - 0.3f * s.ind[heavy].building;
+        float adding = s.ind[heavy].building;
+        for (int i = 0; i < 12; i++) StepEconomy(g, 0.2);
+        CHECK(started && s.ind[heavy].building == 0.0f && fabs(s.ind[heavy].cap - cap - adding) < 1e-3 * cap,
+              "consumer goods are short at %s: its owner adds %.0f%% to its light industry (%.0f capacity, for steel and machinery), and %.0f days later it's running", base.defs[home].name.c_str(),
+              UPGRADE_STEP * 100.0, adding, UPGRADE_DAYS);
+        g.econ = was;
+
+        // The captain's stake
+        int world = -1;
+        for (int i = 0; i < (int)g.loaded.bodies.size(); i++) if (g.loaded.bodies[i].id == base.defs[home].bodyId) world = i;
+        Park(g, world, 0.9);
+        g.player.credits = 5e6;
+        Run(g, 1.2);
+        MarketState &h = g.econ.state[home];
+        int foundry = find(home, IND_FOUNDRY);
+        h.stock[REF_STEEL] = 2.0f * h.target[REF_STEEL]; h.stock[GOOD_MACHINERY] = 2.0f * h.target[GOOD_MACHINERY];
+        for (IndustryState &st : h.ind) { st.building = 0.0f; }
+        h.employed = 0.5f * h.labour;
+        float had = h.ind[foundry].cap;
+        double credits = g.player.credits;
+        bool funded = ApplyCommand(g, g, { Command::Invest, foundry });
+        double paid = credits - g.player.credits;
+        const WorldRecord &rec = g.know.worlds[base.defs[home].bodyId];
+        bool onRecord = (int)rec.rows.size() > foundry && rec.rows[foundry].stake > 0.0f && rec.rows[foundry].building > 0.0f;
+        bool again = ApplyCommand(g, g, { Command::Invest, foundry });        // (one thing at a time)
+        CHECK(funded && paid > INVEST_FEE * UPGRADE_STEP * had && g.stakes.size() == 1 && fabs(g.stakes[0].cap - UPGRADE_STEP * had) < 1e-3 * had && onRecord && !again,
+              "docked at %s, the captain funds an addition to its semiconductor foundry for %s cr: %.0f capacity in the building, and theirs", base.defs[home].name.c_str(),
+              Thousands(paid).c_str(), g.stakes.empty() ? 0.0 : g.stakes[0].cap);
+        // It earns while they're away, and pays when they're back
+        Park(g, world, 40.0);
+        g.player.ship.pos = g.player.ship.pos + g.systems[g.systems.home].n * (2.0 * AU_U);
+        credits = g.player.credits;
+        for (int i = 0; i < 30; i++) { h.stock[GOOD_ELECTRONICS] = 0.5f * h.target[GOOD_ELECTRONICS]; StepEconomy(g, 0.2); }    // (six days of a good price for electronics)
+        Run(g, 0.5);
+        bool waiting = g.player.credits == credits && h.ind[foundry].cap > had * 1.09f;
+        Park(g, world, 0.9);
+        Run(g, 1.5);
+        double earned = g.player.credits - credits;
+        CHECK(waiting && earned > 100.0 && earned < paid, "six days on, the foundry is %.0f%% bigger; back in dock, the stake pays out %s cr (on %s put in)",
+              100.0 * (h.ind[foundry].cap / had - 1.0), Thousands(earned).c_str(), Thousands(paid).c_str());
+
+        // Saved, and over the wire
+        std::string path = "test_industry.txt";
+        float capNow = h.ind[foundry].cap;
+        double earnedMark = h.ind[foundry].earned;
+        bool saved = SaveGame(g, path.c_str());
+        GameState l; NewGame(l);
+        bool loaded = LoadGame(l, path.c_str());
+        remove(path.c_str());
+        CHECK(saved && loaded && l.econ.state[home].ind[foundry].cap == capNow && fabs(l.econ.state[home].ind[foundry].earned - earnedMark) < 1e-6 * fabs(earnedMark) + 1e-9 &&
+              l.stakes.size() == 1 && l.stakes[0].cap == g.stakes[0].cap && l.stakes[0].body == g.stakes[0].body && l.econ.state[home].pop == h.pop &&
+              fabs(l.econ.state[home].target[GOOD_ELECTRONICS] - h.target[GOOD_ELECTRONICS]) < 1e-3f * h.target[GOOD_ELECTRONICS],
+              "industries, what they've earned and the captain's stake are saved and come back");
+        std::vector<uint8_t> msg = MsgWorld(base.defs[home].bodyId, g.know.worlds[base.defs[home].bodyId]);
+        Reader r(msg);
+        uint64_t body = 0; WorldRecord back;
+        bool type = r.U8() == MSG_WORLD, read = ReadWorld(r, body, back);
+        const WorldRecord &sent = g.know.worlds[base.defs[home].bodyId];
+        CHECK(type && read && body == base.defs[home].bodyId && back.rows.size() == sent.rows.size() && back.pop == sent.pop && back.rows[foundry].cap == sent.rows[foundry].cap &&
+              back.rows[foundry].stake == sent.rows[foundry].stake && back.rows[foundry].type == IND_FOUNDRY && back.name == sent.name,
+              "a world's economy page reaches a client (%d industries, %d bytes)", (int)back.rows.size(), (int)msg.size());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parts from a file: the built-in set, a changed one, a broken one
+// ---------------------------------------------------------------------------
+static void TestParts()
+{
+    const std::string builtIn = DefaultPartsText();
+    auto save = [](const std::string &text) { FILE *f = fopen("test_parts.txt", "wb"); if (f) { fputs(text.c_str(), f); fclose(f); } };
+    auto swap = [](std::string text, const std::string &from, const std::string &to) { size_t at = text.find(from); if (at != std::string::npos) text.replace(at, from.size(), to); return text; };
+
+    PartsData d;
+    std::string problem;
+    bool ok = ParseParts(builtIn, d, problem);
+    int models = 0;
+    for (int t = 0; t < (int)PartType::Count; t++) models += (int)d.models[t].size();
+    const uint64_t usual = PartsHash();
+    ShipSpec before = SpecOf(StarterBuild());
+    CHECK(ok && d.hash == usual && models == (int)PartType::Count + 24 && ModelCount(PartType::Reactor) == 15 && ModelCount(PartType::WarpDrive) == 6 && FuelGoodOf(BURNS_HELIUM3) == RAW_HELIUM3 &&
+          std::string(Hull(HULL_BULK).name) == "Bulk carrier" && before.hold == 100.0 && before.jumpTJ == 800.0,
+          "the parts the game is built with read as a parts file: %d models of %d kinds of part, six hulls %s", models, (int)PartType::Count, problem.c_str());
+
+    // Comments and spacing aren't the numbers
+    PartsData spaced;
+    bool same = ParseParts("# a note at the top\r\n\r\n" + swap(builtIn, "capacity = 25\n", "capacity   =   25     # tonnes\n"), spaced, problem);
+    CHECK(same && spaced.hash == usual, "a file that differs only in comments and spacing is the same parts (%s)", problem.c_str());
+
+    // A changed number and a new model
+    std::string changed = swap(builtIn, "capacity = 25\n", "capacity = 40\n") +
+        "\n[warpdrive easy]\nname = Easy-jump warp drive\nmass = 8\nvolume = 20\ncost = 9000\nmaterial = Ship Components\n"
+        "speed = 0.6\nspeed_grade = 0.1\nfield_base = 9\nfield_mass = 9e-15\nfield_power = 2\naccel = 2e6\nmax_mass = 225\njump = 10\njump_grade = 0.05\n";
+    save(changed);
+    bool loaded = LoadPartsFile("test_parts.txt", problem);
+    ShipBuild b = StarterBuild();
+    ShipSpec bigger = SpecOf(b);
+    Part easy;
+    easy.type = PartType::WarpDrive; easy.size = 3; easy.variant = 6;
+    std::string fits = FitProblem(b, easy), name = Describe(easy).name;
+    for (Part &p : b.parts) if (p.type == PartType::WarpDrive) p.variant = 6;
+    ShipSpec jumps = SpecOf(b);
+    CHECK(loaded && PartsHash() != usual && bigger.hold == 160.0 && ModelCount(PartType::WarpDrive) == 7 && jumps.jumpTJ == 10.0 && jumps.warpSpeed < 0.7 * before.warpSpeed &&
+          jumps.warpAccel == 2e6 && name.find("easy-jump warp drive") != std::string::npos && (fits.empty() || fits.find("No room") == 0),
+          "a file with bigger cargo bays and a second warp drive: the starter ship holds %.0f t, and with the \"%s\" jumps for %.0f TJ/t at %.0f%% of the speed %s",
+          bigger.hold, name.c_str(), jumps.jumpTJ, 100.0 * jumps.warpSpeed / before.warpSpeed, problem.c_str());
+
+    // A file that won't do changes nothing, and says where it's wrong
+    const uint64_t held = PartsHash();
+    save(swap(changed, "thrust = 1312.5", "thrust = lots"));
+    bool bad1 = LoadPartsFile("test_parts.txt", problem);
+    std::string said1 = problem;
+    save(swap(builtIn, "[hull bulk]", "[hull barge]"));
+    bool bad2 = LoadPartsFile("test_parts.txt", problem);
+    std::string said2 = problem;
+    save(swap(builtIn, "fuel = Deuterium", "fuel = Steel"));
+    bool bad3 = LoadPartsFile("test_parts.txt", problem);
+    std::string said3 = problem;
+    bool missing = LoadPartsFile("no_such_parts.txt", problem);
+    CHECK(!bad1 && said1.find("line ") != std::string::npos && said1.find("lots") != std::string::npos && !bad2 && said2.find("barge") != std::string::npos &&
+          !bad3 && said3.find("fuel") != std::string::npos && !missing && problem.empty() && PartsHash() == held && SpecOf(StarterBuild()).hold == 160.0,
+          "broken files are refused and nothing changes: \"%s\"; \"%s\"; \"%s\"; and no file at all is no complaint", said1.c_str(), said2.c_str(), said3.c_str());
+
+    UseDefaultParts();
+    remove("test_parts.txt");
+    CHECK(PartsHash() == usual && SpecOf(StarterBuild()).hold == 100.0, "back to the built-in parts");
+}
+
+// ---------------------------------------------------------------------------
+// Reactors: heat from the burn rate, power from the efficiency there; the floor; shutting down
+// ---------------------------------------------------------------------------
+static void TestReactors()
+{
+    auto model = [](const char *id) { const auto &all = Parts().models[(int)PartType::Reactor]; for (int k = 0; k < (int)all.size(); k++) if (all[k].id == id) return k; return -1; };
+    auto ship = [](int variant, int size) { ShipBuild b; b.parts = { MakePart(PartType::Reactor, size, 0, variant) }; return SpecOf(b); };
+    const ShipSpec s = SpecOf(StarterBuild());
+
+    // --- Power is burn rate x the fuel's energy x the efficiency at that burn rate ---
+    double half = ReactorOutput(s, 0.5), loadFor = ReactorLoadFor(s, half);
+    int best = 0;
+    for (int k = 1; k <= 100; k++) if (ReactorEfficiency(s, k / 100.0) > ReactorEfficiency(s, best / 100.0)) best = k;
+    bool rising = true;
+    for (int k = 1; k <= 100; k++) if (ReactorOutput(s, k / 100.0) <= ReactorOutput(s, (k - 1) / 100.0)) rising = false;
+    CHECK(fabs(ReactorOutput(s, 1.0) - s.reactorTW) < 1e-6 && fabs(half - 0.5 * s.reactorBurn * s.fuelTJ * ReactorEfficiency(s, 0.5)) < 1e-6 && fabs(loadFor - 0.5) < 1e-6 && rising &&
+          ReactorEfficiency(s, 0.05) < 0.5 * ReactorEfficiency(s, 0.8) && best > 60 && best < 100 && ReactorEfficiency(s, best / 100.0) > s.reactorEff &&
+          ReactorLoadFor(s, 2.0 * s.reactorTW) == 1.0 && ReactorLoadFor(s, 0.0) == 0.0,
+          "the starter's fission reactor: %.0f TW flat out at %.0f%%; it does best at %d%% of that burn (%.0f%%), and at a twentieth gets %.0f%%; more fuel is always more power",
+          s.reactorTW, s.reactorEff * 100.0, best, ReactorEfficiency(s, best / 100.0) * 100.0, ReactorEfficiency(s, 0.05) * 100.0);
+
+    // --- It can't be turned down below its floor: a big fusion reactor is a wasteful thing to idle ---
+    {
+        ShipSpec fis = ship(BURNS_REACTOR_FUEL, 4), deu = ship(BURNS_DEUTERIUM, 4);
+        double idle = 100.0;                                        // terawatts of housekeeping
+        double burnF = ReactorBurnFor(fis, idle), burnD = ReactorBurnFor(deu, idle), heatF = burnF * fis.fuelTJ - idle, heatD = burnD * deu.fuelTJ - idle;
+        CHECK(fabs(ReactorBurnFor(deu, 0.0) - deu.reactorFloor * deu.reactorBurn) < 1e-12 && fabs(burnD - deu.reactorFloor * deu.reactorBurn) < 1e-12 && deu.reactorFloor > 3.0 * fis.reactorFloor &&
+              ReactorOutput(deu, deu.reactorFloor) > 2.0 * idle && heatD > 2.0 * heatF && ReactorBurnFor(fis, 0.5 * fis.reactorTW) > 5.0 * burnF,
+              "feeding %.0f TW of housekeeping, a size 4 fission reactor turns down to %.4f t/s and gives off %.0f TW of heat; a deuterium one can't go below %.0f%% of its burn: "
+              "%.4f t/s, %.0f TW made that nothing wants, %.0f TW of heat", idle, burnF, heatF, deu.reactorFloor * 100.0, burnD, ReactorOutput(deu, deu.reactorFloor) - idle, heatD);
+    }
+
+    // --- The models: what each is for ---
+    {
+        int baseload = model("fission_baseload"), high = model("fission_high"), flat = model("fission_flat"), compact = model("fission_compact");
+        CHECK(baseload == 3 && high == 4 && flat == 5 && compact == 6 && model("helium3_compact") == 14, "five fission reactors, five deuterium, five helium-3: the everyday three first");
+        if (baseload < 0 || high < 0 || flat < 0 || compact < 0) return;
+        ShipSpec usual = ship(BURNS_REACTOR_FUEL, 3), base = ship(baseload, 3), hot = ship(high, 3), even = ship(flat, 3), small = ship(compact, 3);
+        auto perTJ = [](const ShipSpec &r, double load) { return 1e6 / (r.fuelTJ * ReactorEfficiency(r, load)); };        // grams of fuel a terajoule
+        PartInfo pu = Describe(MakePart(PartType::Reactor, 3)), pc = Describe(MakePart(PartType::Reactor, 3, 0, compact)), pb = Describe(MakePart(PartType::Reactor, 3, 0, baseload));
+        CHECK(base.reactorTW < 0.7 * usual.reactorTW && hot.reactorTW > 1.5 * usual.reactorTW && perTJ(base, 1.0) < 0.9 * perTJ(usual, 1.0) && perTJ(hot, 1.0) > perTJ(usual, 1.0) &&
+              perTJ(hot, 0.3) > 1.5 * perTJ(usual, 0.3) && perTJ(even, 0.1) < 0.8 * perTJ(usual, 0.1) && fabs(perTJ(even, 0.2) - perTJ(even, 1.0)) < 1e-9 &&
+              even.reactorFloor < usual.reactorFloor && base.reactorFloor > 2.0 * usual.reactorFloor && base.reactorRestart > usual.reactorRestart &&
+              pc.mass < 0.6 * pu.mass && pc.volume < 0.6 * pu.volume && perTJ(small, 1.0) > 1.2 * perTJ(usual, 1.0) && pb.mass > pu.mass && pb.cost > pu.cost,
+              "size 3 fission reactors, flat out: everyday %.0f TW at %.1f g of fuel a terajoule; baseload %.0f TW at %.1f; high-output %.0f TW at %.1f (and %.1f at a third of its burn); "
+              "load-following %.1f at any load; compact %.1f, in %.0f m3 against %.0f",
+              usual.reactorTW, perTJ(usual, 1.0), base.reactorTW, perTJ(base, 1.0), hot.reactorTW, perTJ(hot, 1.0), perTJ(hot, 0.3), perTJ(even, 1.0), perTJ(small, 1.0), pc.volume, pu.volume);
+        // Two aboard run together: their burn adds, and the curve is theirs by how much each burns
+        ShipBuild two; two.parts = { MakePart(PartType::Reactor, 3), MakePart(PartType::Reactor, 3, 0, baseload) };
+        ShipSpec both = SpecOf(two);
+        CHECK(fabs(both.reactorBurn - usual.reactorBurn - base.reactorBurn) < 1e-12 && fabs(both.reactorTW - usual.reactorTW - base.reactorTW) < 1e-6 &&
+              both.reactorEff > usual.reactorEff && both.reactorEff < base.reactorEff && both.reactorFloor > usual.reactorFloor && both.reactorFloor < base.reactorFloor,
+              "an everyday reactor and a baseload one together: %.0f TW at %.0f%%", both.reactorTW, both.reactorEff * 100.0);
+    }
+
+    // --- Shut down, the ship runs on its bank: nothing burned, next to nothing to see, and no drive ---
+    {
+        GameState g; NewGame(g);
+        Player &p = g.player;
+        p.ship.anchor = g.systems.home; p.ship.pos = g.systems[g.systems.home].n * (0.7 * LY_U); p.ship.vel = { 0, 0, 0 };
+        UpdateLoadedSystem(g);
+        p.power.radar = false;
+        Run(g, 2.0);
+        double lit = p.power.heat, burning = g.flight.burn;
+        Controls press; press.toggleReactor = true;
+        double f0 = p.fuel, b0 = p.power.bank;
+        Run(g, 5.0, press);
+        bool down = p.power.cold;
+        double spent = b0 - p.power.bank, cold = p.power.heat;
+        Controls hyper; hyper.hyper = true;
+        Run(g, 1.0, hyper);
+        bool refused = g.flight.driveCold && !p.power.engaged;
+        CHECK(burning > 0.0 && down && p.fuel == f0 && fabs(spent - 5.0 * p.spec.idleTW) < 0.02 * spent && cold < 0.1 * lit && refused,
+              "reactor down for 5 s: no fuel burned, %.0f TJ out of the bank for the housekeeping, %.0f TW of heat where it gave off %.0f lit; the drive won't engage", spent, cold, lit);
+        // Lighting it again takes a while, and burns fuel before it gives anything
+        f0 = p.fuel; b0 = p.power.bank;
+        Run(g, 5.0, press);
+        bool lighting = !p.power.cold && p.power.restart > 0.0f && fabs(p.power.restart - (p.spec.reactorRestart - 5.0)) < 0.1;
+        double used = f0 - p.fuel;
+        bool still = p.power.bank < b0;
+        Run(g, p.spec.reactorRestart);
+        CHECK(lighting && fabs(used - 5.0 * p.spec.reactorFloor * p.spec.reactorBurn) < 1e-6 && still && p.power.restart == 0.0f && g.flight.load > 0.0 && p.power.bank > b0 - 15.0 * p.spec.idleTW,
+              "lit again: %.0f s before it gives power, burning at its floor meanwhile (%.3f t in the first 5 s) with the bank still carrying the ship; then the bank fills", p.spec.reactorRestart, used);
+        // ...and nobody freezes in the dark: with the bank flat, it's lit
+        Run(g, 0.1, press);
+        p.power.bank = 0.5 * p.spec.idleTW;
+        Run(g, 2.0);
+        CHECK(!p.power.cold && p.power.restart > 0.0f, "shut down with a nearly flat bank: when that's gone the reactor is lit again (%.0f s to go)", p.power.restart);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Drives and drive capacitors: the kinds there are, and what each is for
+// ---------------------------------------------------------------------------
+static void TestDrives()
+{
+    auto model = [](PartType type, const char *id) { const auto &all = Parts().models[(int)type]; for (int k = 0; k < (int)all.size(); k++) if (all[k].id == id) return k; return -1; };
+    auto ship = [](int warp, int hyper, int cap) {
+        ShipBuild b;
+        b.hull = HULL_BULK;
+        b.parts = { MakePart(PartType::Reactor, 6), MakePart(PartType::WarpDrive, 6, 0, warp), MakePart(PartType::HyperDrive, 6, 0, hyper),
+                    MakePart(PartType::DriveCap, 6, 0, cap), MakePart(PartType::DriveCap, 6, 0, cap) };
+        return SpecOf(b);
+    };
+    const double mass = 4000.0;
+    // (the fuel for a run: the jump, and the passage at half the drive's speed or what the reactor will hold)
+    auto run = [&](const ShipSpec &s, double ly) {
+        double v = fmin(0.5 * s.warpSpeed, DriveSpeedFor(s, s.reactorTW - s.idleTW, mass, true));
+        return s.jumpTJ * mass / (s.capIn * s.capOut) / (s.reactorEff * s.fuelTJ) + ReactorBurnFor(s, DrivePower(s, v, mass, true) + s.idleTW) * ly * LY_U / v;
+    };
+    int wCruise = model(PartType::WarpDrive, "cruise"), wShort = model(PartType::WarpDrive, "shorthaul"), wDeep = model(PartType::WarpDrive, "deeprange"),
+        wSprint = model(PartType::WarpDrive, "sprint"), wHeavy = model(PartType::WarpDrive, "heavy");
+    int hCruise = model(PartType::HyperDrive, "cruise"), hFast = model(PartType::HyperDrive, "fast"), hHeavy = model(PartType::HyperDrive, "heavy");
+    int cSuper = model(PartType::DriveCap, "superconducting"), cBulk = model(PartType::DriveCap, "bulk");
+    CHECK(wCruise == 1 && wShort == 2 && wDeep == 3 && wSprint == 4 && wHeavy == 5 && hCruise == 1 && hFast == 2 && hHeavy == 3 && cSuper == 1 && cBulk == 2,
+          "six warp drives, four hyper drives and three drive capacitors, the everyday one of each first");
+    if (wCruise < 0 || wShort < 0 || wDeep < 0 || wSprint < 0 || wHeavy < 0 || hCruise < 0 || hFast < 0 || hHeavy < 0 || cSuper < 0 || cBulk < 0) return;
+
+    // --- Warp: the jump, the upkeep of the bubble, and speed, traded against each other ---
+    ShipSpec usual = ship(0, 0, 0), cruise = ship(wCruise, 0, 0), shorthaul = ship(wShort, 0, 0), deep = ship(wDeep, 0, 0), sprint = ship(wSprint, 0, 0), heavy = ship(wHeavy, 0, 0);
+    const double v = 0.5 * usual.warpSpeed;
+    auto hold = [&](const ShipSpec &s) { return DrivePower(s, v, mass, true); };
+    CHECK(fabs(cruise.warpSpeed / usual.warpSpeed - 0.7) < 1e-9 && hold(cruise) < 0.55 * hold(usual) && cruise.jumpTJ == usual.jumpTJ &&
+          shorthaul.jumpTJ < 0.5 * usual.jumpTJ && hold(shorthaul) > 2.0 * hold(usual) &&
+          deep.jumpTJ > 1.2 * usual.jumpTJ && hold(deep) < 0.4 * hold(usual) &&
+          sprint.warpSpeed > 1.5 * usual.warpSpeed && sprint.jumpTJ > usual.jumpTJ && hold(sprint) > hold(usual) && sprint.warpAccel > usual.warpAccel &&
+          fabs(heavy.warpMaxMass / usual.warpMaxMass - 2.0) < 1e-9 && heavy.warpSpeed < usual.warpSpeed,
+          "holding a %.0f t ship's bubble at the same speed: everyday %.0f TW; cruising %.0f (and 70%% of the top speed); short-haul %.0f, for a jump of %.0f TJ/t against %.0f; "
+          "deep-range %.0f, for %.0f TJ/t; sprint %.0f, and 60%% faster; heavy-lift moves %.0f t where the others move %.0f",
+          mass, hold(usual), hold(cruise), hold(shorthaul), shorthaul.jumpTJ, usual.jumpTJ, hold(deep), deep.jumpTJ, hold(sprint), heavy.warpMaxMass, usual.warpMaxMass);
+    CHECK(run(shorthaul, 2.0) < 0.6 * run(usual, 2.0) && run(shorthaul, 25.0) > run(usual, 25.0) && run(deep, 2.0) > run(usual, 2.0) && run(deep, 25.0) < 0.8 * run(usual, 25.0) &&
+          run(cruise, 12.0) < run(usual, 12.0) && run(sprint, 5.0) > run(usual, 5.0),
+          "fuel for a 2 ly run and a 25 ly one: everyday %.0f t and %.0f; short-haul %.0f and %.0f; deep-range %.0f and %.0f; cruising %.0f and %.0f; sprint %.0f and %.0f",
+          run(usual, 2.0), run(usual, 25.0), run(shorthaul, 2.0), run(shorthaul, 25.0), run(deep, 2.0), run(deep, 25.0), run(cruise, 2.0), run(cruise, 25.0), run(sprint, 2.0), run(sprint, 25.0));
+
+    // --- Hyper drives ---
+    {
+        ShipSpec c = ship(0, hCruise, 0), f = ship(0, hFast, 0), h = ship(0, hHeavy, 0);
+        const double hv = 0.5 * usual.hyperSpeed;
+        CHECK(DrivePower(c, hv, mass, false) < 0.6 * DrivePower(usual, hv, mass, false) && fabs(c.hyperSpeed / usual.hyperSpeed - 0.75) < 1e-9 &&
+              fabs(f.hyperSpeed / usual.hyperSpeed - 1.5) < 1e-9 && DrivePower(f, hv, mass, false) > 1.3 * DrivePower(usual, hv, mass, false) && f.hyperAccel > usual.hyperAccel &&
+              fabs(h.hyperMaxMass / usual.hyperMaxMass - 2.0) < 1e-9 && h.hyperSpeed < usual.hyperSpeed,
+              "hyper drives: the cruising one holds its field for %.0f TW where the everyday one takes %.0f, at three quarters of the speed; the fast one is half as fast again for %.0f; "
+              "heavy-lift moves %.0f t", DrivePower(c, hv, mass, false), DrivePower(usual, hv, mass, false), DrivePower(f, hv, mass, false), h.hyperMaxMass);
+    }
+
+    // --- Capacitors: what a jump draws from the reactor is what the bubble takes over what survives going in and coming out ---
+    {
+        ShipSpec sc = ship(0, 0, cSuper), bk = ship(0, 0, cBulk);
+        auto drawn = [&](const ShipSpec &s) { return s.jumpTJ * mass / (s.capIn * s.capOut); };
+        CHECK(drawn(sc) < 0.9 * drawn(usual) && drawn(bk) > 1.1 * drawn(usual) && sc.driveCapTJ < 0.7 * usual.driveCapTJ && fabs(bk.driveCapTJ / usual.driveCapTJ - 2.0) < 1e-9 &&
+              JumpCharge(sc, mass) < JumpCharge(usual, mass) && JumpCharge(usual, mass) < JumpCharge(bk, mass),
+              "a jump for %.0f t draws %.0f TJ from the reactor through everyday capacitors, %.0f through superconducting ones (which hold %.0f%% as much), %.0f through bulk ones (twice as much)",
+              mass, drawn(usual), drawn(sc), 100.0 * sc.driveCapTJ / usual.driveCapTJ, drawn(bk));
+    }
+
+    // --- The fleets' designers choose among them ---
+    {
+        GameState g; NewGame(g);
+        EnsureEconomy(g);
+        const EconBase &base = *g.econ.base;
+        int odd = 0, baseload = 0, designs = 0;
+        double worstFission = 0.0, worstFusion = 0.0;
+        for (int id = NO_FACTION; id < g.systems.factions.Count(); id++)
+            for (int role : { ROLE_BULK, ROLE_TANKER }) {
+                const ShipDesign &d = FleetDesign(base, id, role);
+                designs++;
+                for (const Part &p : d.build.parts) {
+                    if ((p.type == PartType::WarpDrive || p.type == PartType::DriveCap) && p.variant != 0) { odd++; break; }
+                }
+                for (const Part &p : d.build.parts) if (p.type == PartType::Reactor && PartModelOf(p).id.find("baseload") != std::string::npos) { baseload++; break; }
+                double share = d.Fuel(USUAL_RUN_LY) / d.cargo;
+                if (d.fuelGood == REF_REACTOR_FUEL) worstFission = fmax(worstFission, share); else worstFusion = fmax(worstFusion, share);
+            }
+        CHECK(odd > designs / 2 && baseload > 0 && worstFission < 0.10 && worstFusion < 0.02,
+              "of %d freighter and tanker designs, %d are built around a drive or capacitor that isn't the everyday one and %d around a baseload reactor; "
+              "the thirstiest fission one burns %.1f%% of its load on a %.0f ly run, the thirstiest fusion one %.1f%%", designs, odd, baseload, 100.0 * worstFission, USUAL_RUN_LY, 100.0 * worstFusion);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Money: what factions earn, how it gets home, and what happens without it
+// ---------------------------------------------------------------------------
+static void TestMoney()
+{
+    GameState g; NewGame(g);
+    EnsureEconomy(g);
+    const EconBase &base = *g.econ.base;
+    const FactionSet &fs = g.systems.factions;
+    const int N = g.econ.Count(), F = fs.Count();
+    Economy &e = g.econ;
+    auto run = [&](GameState &h, double days) { for (int step = 0; step < (int)(days * 8.0 + 0.5); step++) { h.clock += 0.125 * MARKET_DAY; StepEconomy(h, 0.125); } };
+
+    // --- Every faction with a seat has a way home from wherever it does business ---
+    int seated = 0, lost = 0, furthest = 0;
+    const Faction *state = nullptr, *company = nullptr;
+    for (const Faction &f : fs.list) {
+        if (f.kind == FactionKind::Government && !state) state = &f;
+        if (f.kind == FactionKind::Conglomerate && !company) company = &f;
+        int cap = base.capital[f.id];
+        if (cap < 0) continue;
+        seated++;
+        for (int i = 0; i < N; i++) {
+            if (base.defs[i].hub != i || i == cap) continue;
+            int at = i, hops = 0;
+            while (at >= 0 && at != cap && hops < N) { at = base.toCapital[(size_t)f.id * N + at]; hops++; }
+            if (at != cap) { if (base.toCapital[(size_t)f.id * N + i] >= 0) lost++; } else furthest = std::max(furthest, hops);
+        }
+    }
+    CHECK(seated >= F / 2 && lost == 0 && furthest > 5 && state && company && base.capital[state->id] >= 0 && e.money.size() == (size_t)F && e.money[state->id].treasury > 0.0,
+          "%d of %d factions have a capital on the lanes; from the furthest hub it is %d hops home; every route that starts, arrives", seated, F, furthest);
+    if (!state || !company) return;
+
+    // --- A day's business: who is paid, and for what ---
+    {
+        double before = 0.0;
+        for (const FactionMoney &m : e.money) before += m.treasury;
+        run(g, 2.0);
+        double gov[INC_COUNT] = {}, co[INC_COUNT] = {}, waiting = 0.0;
+        for (const Faction &f : fs.list)
+            for (int k = 0; k < INC_COUNT; k++) (f.kind == FactionKind::Government ? gov : co)[k] += e.money[f.id].income[k];
+        for (int i = 0; i < N; i++) for (int f = 0; f < F; f++) waiting += e.Coffer(i, f);
+        CHECK(gov[INC_TARIFF] > 0.0 && gov[INC_TAX] > 0.0 && gov[INC_HEADS] > 0.0 && co[INC_TARIFF] == 0.0 && co[INC_TAX] == 0.0 && co[INC_HEADS] == 0.0 &&
+              co[INC_PROFIT] > 0.0 && co[INC_FREIGHT] > 0.0 && co[INC_YARDS] > 0.0 && waiting > 0.0,
+              "two days in, governments are taking %s cr a day in tariffs, %s in tax on others' profits and %s from their people; the rest earn %s from their works, %s in freight and %s for new ships; "
+              "%s cr is in coffers waiting to be carried home", Thousands(gov[INC_TARIFF]).c_str(), Thousands(gov[INC_TAX]).c_str(), Thousands(gov[INC_HEADS]).c_str(),
+              Thousands(co[INC_PROFIT]).c_str(), Thousands(co[INC_FREIGHT]).c_str(), Thousands(co[INC_YARDS]).c_str(), Thousands(waiting).c_str());
+    }
+
+    // --- Money earned far away comes home a hop at a time, and raiders take a share on the way ---
+    {
+        GameState h; NewGame(h); EnsureEconomy(h);
+        Economy &m = h.econ;
+        const int f = state->id, cap = base.capital[f];
+        int far = -1, hops = 0;
+        for (int i = 0; i < N && far < 0; i++) {
+            if (base.defs[i].hub != i) continue;
+            int at = i, n = 0;
+            while (at >= 0 && at != cap && n < 50) { at = base.toCapital[(size_t)f * N + at]; n++; }
+            if (at == cap && n == 4) { far = i; hops = n; }
+        }
+        CHECK(far >= 0, "found a hub four hops from %s's capital (%s)", state->name.c_str(), far >= 0 ? base.defs[far].name.c_str() : "?");
+        if (far < 0) return;
+        for (float &r : m.raid) r = 0.0f;
+        for (double &until : m.raidUntil) until = 1e12;
+        for (double &c : m.coffer) c = 0.0;
+        for (double &c : m.moving) c = 0.0;
+        m.paying = true;
+        const double sum = 1.0e12;             // (far more than anything else that is moving: it can be followed)
+        // A coffer waits for its market's sailing: every three days
+        m.coffer[(size_t)far * F + f] = sum;
+        int waited = 0;
+        while (m.Coffer(far, f) >= 0.99 * sum && waited < 20) { h.clock += 0.51 * MARKET_DAY; StepEconomy(h, 1e-6); waited++; }
+        CHECK(waited >= 1 && waited <= 6, "a coffer at %s waits for the treasury ship: it sails within three days (here, %.1f)", base.defs[far].name.c_str(), 0.5 * waited);
+        for (double &c : m.coffer) c = 0.0;
+        for (double &c : m.moving) c = 0.0;
+        m.moving[(size_t)far * F + f] = sum;
+        auto where = [&]() { for (int i = 0; i < N; i++) if (m.Moving(i, f) >= 0.99 * sum) return i; return -1; };
+        double home0 = m.money[f].treasury;
+        std::vector<int> path;
+        // (a collection every half day: step just over that, and look where the money is)
+        for (int k = 0; k < hops + 2; k++) { h.clock += 0.51 * MARKET_DAY; StepEconomy(h, 1e-6); path.push_back(where()); }
+        int next = base.toCapital[(size_t)f * N + far], after = base.toCapital[(size_t)f * N + next];
+        CHECK(path[0] == next && path[1] == after && path[hops - 1] == -1 && m.money[f].treasury > home0 + 0.99 * sum,
+              "once it has sailed from %s it doesn't stop: half a day later it is at %s, then %s; after %d hops it is in the treasury", base.defs[far].name.c_str(), base.defs[next].name.c_str(),
+              base.defs[after].name.c_str(), hops);
+        // ...with raiders about
+        int clan = -1;
+        for (const Faction &c : fs.list) if (c.kind == FactionKind::Clan && clan < 0) clan = c.id;
+        int raided = -1;
+        for (int i = 0; i < N && raided < 0; i++)
+            if (base.defs[i].hub == i && i != cap && base.toCapital[(size_t)f * N + i] >= 0 && Len(base.defs[i].ly - fs.list[clan].seatLy) < 0.4 * fs.list[clan].reach) raided = i;
+        CHECK(raided >= 0, "found a hub in a clan's patch (%s)", raided >= 0 ? base.defs[raided].name.c_str() : "?");
+        if (raided < 0) return;
+        for (float &r : m.raid) r = 1.0f;
+        for (double &c : m.coffer) c = 0.0;
+        for (double &c : m.moving) c = 0.0;
+        m.moving[(size_t)raided * F + f] = sum;
+        double loot0 = 0.0, loot1 = 0.0;
+        for (const Faction &c : fs.list) if (c.kind == FactionKind::Clan) loot0 += m.money[c.id].treasury;
+        int to = base.toCapital[(size_t)f * N + raided];
+        double there0 = to == cap ? m.money[f].treasury : m.Moving(to, f);
+        h.clock += 0.51 * MARKET_DAY; StepEconomy(h, 1e-6);
+        for (const Faction &c : fs.list) if (c.kind == FactionKind::Clan) loot1 += m.money[c.id].treasury;
+        double got = (to == cap ? m.money[f].treasury : m.Moving(to, f)) - there0;
+        CHECK(got < 0.97 * sum && got > 0.8 * sum && loot1 - loot0 > 0.3 * (sum - got) && loot1 - loot0 < 0.5 * (sum - got),
+              "sent on through raided space, %s of the trillion arrives; the clans are %s the richer for it (what the rest fetched them)", Thousands(got).c_str(), Thousands(loot1 - loot0).c_str());
+    }
+
+    // --- A new ship goes to whoever can pay for it ---
+    {
+        GameState h; NewGame(h); EnsureEconomy(h);
+        Economy &m = h.econ;
+        int hub = -1; const FleetAt *top = nullptr;
+        for (int i = 0; i < N && hub < 0; i++) {
+            if (base.defs[i].hub != i || m.fleets[i].size() < 2) continue;
+            bool yard = false;
+            for (int j = 0; j < N; j++) if (base.defs[j].hub == i) for (const IndustryDef &in : base.defs[j].ind) if (in.type == IND_SHIPYARD && in.cap > 0.0f) yard = true;
+            if (yard) continue;
+            const FleetAt *best = &m.fleets[i][0];
+            for (const FleetAt &f : m.fleets[i]) if (f.ships[ROLE_BULK] > best->ships[ROLE_BULK]) best = &f;
+            if (best->owner >= 0 && best->ships[ROLE_BULK] > 0.0f) { hub = i; top = best; }
+        }
+        CHECK(hub >= 0, "found a hub with no yard of its own whose biggest fleet is a faction's (%s)", hub >= 0 ? base.defs[hub].name.c_str() : "?");
+        if (hub < 0) return;
+        const int who = top->owner;
+        auto ships = [&](int owner) { for (const FleetAt &f : m.fleets[hub]) if (f.owner == owner) return (double)f.ships[ROLE_BULK]; return 0.0; };
+        for (int r = 0; r < ROLE_COUNT; r++) m.busy[(size_t)hub * ROLE_COUNT + r] = r == ROLE_BULK ? 2.0f : 0.0f;
+        const ShipDesign &d = FleetDesign(base, who, ROLE_BULK);
+        const double tonnes = 2.0 * d.tonnage, price = tonnes * d.value / d.tonnage;
+        double had = ships(who), others = ships(NO_FACTION);
+        m.money[who].treasury = 10.0 * price; m.money[who].overhead = 0.0f;
+        m.slips[hub] = (float)tonnes;
+        h.clock += 5.0; StepEconomy(h, 1e-6);
+        double paid = 10.0 * price - m.money[who].treasury, gained = ships(who) - had;
+        m.money[who].treasury = 0.5 * price;
+        for (int r = 0; r < ROLE_COUNT; r++) m.busy[(size_t)hub * ROLE_COUNT + r] = r == ROLE_BULK ? 2.0f : 0.0f;
+        m.slips[hub] = (float)tonnes;
+        had = ships(who);
+        h.clock += 5.0; StepEconomy(h, 1e-6);
+        CHECK(fabs(gained - 2.0) < 0.01 && fabs(paid - price) < 1e-3 * price && fabs(ships(who) - had) < 0.01 && fabs(m.money[who].treasury - 0.5 * price) < 1e-3 * price && m.money[who].deniedNow + m.money[who].denied > 0.0f &&
+              ships(NO_FACTION) > others + 1.0,
+              "two bulk freighters off the slips at %s: with money at its capital %s takes them for %s cr; without, it goes without and independent owners have them",
+              base.defs[hub].name.c_str(), fs.list[who].name.c_str(), Thousands(price).c_str());
+    }
+
+    // --- A government that can't pay its way taxes harder, and its people feel it ---
+    {
+        GameState h; NewGame(h); EnsureEconomy(h);
+        Economy &m = h.econ;
+        const int f = state->id;
+        int world = -1;
+        for (int i = 0; i < N && world < 0; i++) if (base.defs[i].ruler == f && base.defs[i].pop > 1e6) world = i;
+        run(h, 3.0);
+        double living = LivingStandard(m, fs, world), tariff = TariffNow(m, f);
+        float eased = m.money[f].squeeze;
+        // (robbed blind: nothing gets home for a fortnight)
+        for (int day = 0; day < 14; day++) { m.money[f].treasury = 0.0; for (int i = 0; i < N; i++) m.coffer[(size_t)i * F + f] = m.moving[(size_t)i * F + f] = 0.0; run(h, 1.0); m.money[f].treasury = 0.0; }
+        float squeezed = m.money[f].squeeze;
+        double taxed = LivingStandard(m, fs, world);
+        CHECK(squeezed > eased + 0.2f && squeezed <= 2.0f && TariffNow(m, f) > 1.15 * tariff && m.money[f].denied > 0.0f,
+              "%s, with nothing reaching its treasury for a fortnight, can't meet its bills: its taxes go from %.2f of the usual to %.2f, its tariff from %.1f%% to %.1f%% "
+              "(living standard at %s %.2f, where it was %.2f)", state->name.c_str(), eased, squeezed, 100.0 * tariff, 100.0 * TariffNow(m, f), base.defs[world].name.c_str(), taxed, living);
+        // (the tax itself, all else equal)
+        float keep = m.money[f].squeeze;
+        m.money[f].squeeze = 1.0f; double usual = LivingStandard(m, fs, world);
+        m.money[f].squeeze = 2.0f; double hard = LivingStandard(m, fs, world);
+        m.money[f].squeeze = keep;
+        CHECK(fabs(usual - hard - 0.06) < 1e-6, "taxed twice as hard, a world's living standard is %.2f lower", usual - hard);
+        // ...and all of it is saved
+        m.coffer[(size_t)world * F + f] = 12345.0;
+        CHECK(SaveGame(h, "test_money.txt"), "saved");
+        GameState back;
+        bool loaded = LoadGame(back, "test_money.txt");
+        CHECK(loaded && back.econ.money.size() == m.money.size() && back.econ.money[f].squeeze == m.money[f].squeeze && fabs(back.econ.money[company->id].treasury - m.money[company->id].treasury) < 1.0 &&
+              back.econ.Coffer(world, f) >= 12345.0 && back.econ.Coffer(world, f) < 12345.0 + 1e9 && fabs(back.econ.money[f].usual - m.money[f].usual) < 1e-3 * m.money[f].usual,
+              "loaded again: %s has %s cr, and %s's taxes are where they were", company->name.c_str(), Thousands(back.econ.money[company->id].treasury).c_str(), state->name.c_str());
+        remove("test_money.txt");
+    }
+    // --- Where ships are flown, a paymaster's ship carries the coffer: and can be robbed ---
+    {
+        GameState h; NewGame(h);
+        Run(h, 2.0);
+        Economy &m = h.econ;
+        const SysId H = h.systems.home;
+        int from = -1, hub = -1;
+        for (int i = 0; i < N; i++) if (base.defs[i].sys == H) { hub = base.defs[i].hub; if (base.defs[i].hub != i && from < 0 && BodyIndex(h, base.defs[i].name) >= 0) from = i; }
+        int who = -1;
+        for (const Faction &f : fs.list) if (f.kind == FactionKind::Government && base.capital[f.id] >= 0 && base.capital[f.id] != hub && who < 0) who = f.id;
+        CHECK(from >= 0 && hub >= 0 && who >= 0 && m.zone[from] == 2, "a world in the home system (%s) with a coffer of %s's", from >= 0 ? base.defs[from].name.c_str() : "?", who >= 0 ? fs.list[who].name.c_str() : "?");
+        if (from < 0 || who < 0) return;
+        const double sum = 5.0e6;
+        m.moving[(size_t)from * F + who] = sum;                     // (as on its sailing day)
+        double atHub = m.Moving(hub, who);
+        int id = -1;
+        for (int t = 0; t < 400 && id < 0; t++) { Run(h, 1.0); for (const Npc &n : h.npcs) if (n.credits > 0.0 && n.payee == who && n.from == from) id = n.id; }
+        const Npc *ship = nullptr;
+        for (const Npc &n : h.npcs) if (n.id == id) ship = &n;
+        CHECK(ship && ship->name.find("paymaster") != std::string::npos && ship->to == hub && fabs(ship->credits - sum) < 1.0 + 0.05 * sum && m.Moving(from, who) < 0.05 * sum && ship->faction == who,
+              "on its sailing day the %s casts off from %s for %s with %s cr aboard", ship ? ship->name.c_str() : "?", base.defs[from].name.c_str(), base.defs[hub].name.c_str(),
+              ship ? Thousands(ship->credits).c_str() : "?");
+        if (!ship) return;
+        const double aboard = ship->credits;
+        // Left alone, it gets there
+        {
+            GameState other = h;
+            bool gone = false;
+            for (int t = 0; t < 900 && !gone; t++) { Run(other, 1.0); gone = true; for (const Npc &n : other.npcs) if (n.id == id) gone = false; }
+            double onward = other.econ.Moving(hub, who) + other.econ.money[who].treasury;
+            for (const Specie &s : other.econ.specie) if (s.faction == who) onward += s.credits;
+            for (const Npc &n : other.npcs) if (n.payee == who) onward += n.credits;
+            for (const Transit &t : other.transits) if (t.payee == who) onward += t.credits;
+            CHECK(gone && onward >= atHub + h.econ.money[who].treasury + 0.9 * aboard,
+                  "left alone it docks at %s, and the money goes on from there toward the capital", base.defs[hub].name.c_str());
+        }
+        // A captain who holds alongside has it instead
+        bool hailed = BoardShip(h, h, id);
+        float regard = h.Standing(who);
+        bool under = false;
+        for (int t = 0; t < 120 && !under; t++) { Run(h, 0.5); for (const Npc &n : h.npcs) if (n.id == id && n.doing != NpcDo::Dock) under = true; }
+        for (int t = 0; t < 30 && h.player.marked <= 0.0; t++) {
+            for (const Npc &n : h.npcs) if (n.id == id) { h.player.ship.anchor = H; h.player.ship.pos = n.pos + DVec3{ 50.0 * KM_U, 0, 0 }; h.player.ship.vel = ToF(n.vel); }
+            Run(h, 0.25);
+        }
+        double left = -1.0;
+        for (const Npc &n : h.npcs) if (n.id == id) left = n.credits;
+        bool told = false;
+        for (const EconNews &n : h.news) if (n.text.find("boarded") != std::string::npos && n.faction == who) told = true;
+        CHECK(hailed && under && fabs(h.player.marked - aboard) < 1.0 && left == 0.0 && h.Standing(who) < regard - 30.0f && told && h.boardTarget == -1,
+              "held 50 km off her for four seconds under way, the captain has the %s cr aboard as marked credits; the paymaster's ship flies on empty, it's in the news, and %s thinks %.0f less of them",
+              Thousands(aboard).c_str(), fs.list[who].name.c_str(), regard - h.Standing(who));
+        bool not1 = BoardShip(h, h, id);
+        CHECK(!not1, "there is nothing left aboard her to go back for");
+        // Marked credits: a free port's fence gives half
+        int port = BodyIndex(h, base.defs[hub].name);
+        const Faction *owner = fs.Get(m.state[hub].owner);
+        double credits = h.player.credits;
+        Park(h, port, 0.3);
+        Run(h, 1.0);
+        CHECK(owner && owner->kind == FactionKind::FreePort && h.player.marked == 0.0 && fabs(h.player.credits - credits - MARKED_FENCE * aboard) < 1.0,
+              "docked at %s, a fence takes them for %s cr", base.defs[hub].name.c_str(), Thousands(h.player.credits - credits).c_str());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fleets: the ships that carry the trade, what they burn, and what happens without them
+// ---------------------------------------------------------------------------
+static void TestFleets()
+{
+    static const int FUELS[3] = { REF_REACTOR_FUEL, REF_FUEL, RAW_HELIUM3 };
+    GameState g; NewGame(g);
+    EnsureEconomy(g);
+    const EconBase &base = *g.econ.base;
+    const FactionSet &fs = g.systems.factions;
+    const int N = g.econ.Count();
+
+    // --- Every faction has a ship for every job, out of parts a captain could buy ---
+    int bad = 0, fission = 0, designs = 0;
+    const Faction *line = nullptr, *clan = nullptr;
+    const ShipDesign *deut = nullptr;
+    for (const Faction &f : fs.list) {
+        if (f.kind == FactionKind::Conglomerate && f.slant == Slant::Shipping && !line) line = &f;
+        if (f.kind == FactionKind::Clan && !clan) clan = &f;
+    }
+    for (int id = NO_FACTION; id < fs.Count(); id++)
+        for (int role = 0; role < ROLE_COUNT; role++) {
+            const ShipDesign &d = FleetDesign(base, id, role);
+            const Faction *f = fs.Get(id);
+            designs++;
+            bool carries = role == ROLE_LINER ? d.berths > 0.0 : d.cargo > 0.0;
+            bool flies = d.localSec > 0.0 && d.localFuel > 0.0 &&
+                         (role == ROLE_HAULER || (d.spec.warpSpeed > 0.0 && d.fixedFuel > 0.0 && d.Fuel(10.0) > d.Fuel(1.0) && d.Seconds(10.0) > d.Seconds(1.0)));
+            bool fits = VolumeUsed(d.build) <= BuildVolume(d.build) && d.tonnage > 0.0 && d.value > 0.0 && d.spec.tank >= (role == ROLE_HAULER ? d.localFuel : d.Fuel(FLEET_RANGE_LY));
+            if (!carries || !flies || !fits) bad++;
+            if (role != ROLE_HAULER && d.fuelGood == REF_REACTOR_FUEL && !(f && f->kind == FactionKind::Clan)) fission++;
+            if (role == ROLE_BULK && d.build.hull == HULL_BULK && d.fuelGood == REF_FUEL && !deut) deut = &d;
+        }
+    CHECK(bad == 0 && fission == 0, "%d designs (every faction's freighter, hauler, tanker and liner): all carry, fly, fit their hulls and hold the fuel for their longest run; none that jumps for a living burns fission fuel but the clans' (%d do)",
+          designs, fission);
+    const ShipDesign &plain = FleetDesign(base, NO_FACTION, ROLE_BULK);
+    CHECK(line && clan && deut, "found a shipping line, a clan, and a bulk carrier burning deuterium");
+    if (!line || !clan || !deut) return;
+    const ShipDesign &liner = FleetDesign(base, line->id, ROLE_BULK), &raider = FleetDesign(base, clan->id, ROLE_BULK);
+    auto perTonne = [](const ShipDesign &d) { return d.Fuel(5.0) / d.cargo; };
+    CHECK(liner.cargo > 3.0 * plain.cargo && liner.cruise < plain.cruise && raider.cruise > plain.cruise && raider.fuelGood == REF_REACTOR_FUEL &&
+          perTonne(raider) > 3.0 * perTonne(*deut),
+          "%s carries %.0f t (an independent's, %.0f t) and runs its drives easier; a clan's is quick and burns %.1f%% of its load in fission fuel a run, where a deuterium carrier's takes %.1f%%",
+          liner.name.c_str(), liner.cargo, plain.cargo, 100.0 * perTonne(raider), 100.0 * perTonne(*deut));
+
+    // --- Fleets: ships at every hub that trades ---
+    std::vector<char> laned(N, 0);
+    for (const Lane &l : base.lanes) { laned[l.a] = laned[l.b] = 1; }
+    auto count = [&](const Economy &e, int role) { double n = 0.0; for (const auto &at : e.fleets) for (const FleetAt &f : at) n += f.ships[role]; return n; };
+    int hubs = 0, shipless = 0, owners = 0;
+    for (int i = 0; i < N; i++) {
+        if (base.defs[i].hub != i) continue;
+        hubs++;
+        double here = 0.0;
+        for (const FleetAt &f : g.econ.fleets[i]) { here += f.ships[ROLE_BULK]; owners++; }
+        if (laned[i] && here <= 0.0) shipless++;
+    }
+    CHECK(shipless == 0 && count(g.econ, ROLE_BULK) > 100.0 && count(g.econ, ROLE_HAULER) > 50.0 && count(g.econ, ROLE_TANKER) > 10.0 && count(g.econ, ROLE_LINER) > 100.0 && owners > hubs,
+          "%d hubs: %.0f bulk freighters, %.0f local haulers, %.0f tankers and %.0f liners based at them, in %d owners' fleets; no hub on a lane without freighters",
+          hubs, count(g.econ, ROLE_BULK), count(g.econ, ROLE_HAULER), count(g.econ, ROLE_TANKER), count(g.econ, ROLE_LINER), owners);
+
+    // --- Trade takes ships, and ships take fuel ---
+    auto day = [&](GameState &h, double &burned, double &missing, float &busy) {
+        memset(g_flow, 0, sizeof g_flow); g_flowDays = 0.0;
+        for (int step = 0; step < 8; step++) StepEconomy(h, 0.125);
+        burned = missing = 0.0;
+        for (int k = 0; k < 3; k++) { burned += g_flow[3][FUELS[k]]; missing += g_flow[4][FUELS[k]]; }
+        double all = 0.0; int n = 0;
+        for (int i = 0; i < N; i++) if (base.defs[i].hub == i && laned[i]) { all += h.econ.busy[(size_t)i * ROLE_COUNT + ROLE_BULK]; n++; }
+        busy = (float)(all / std::max(n, 1));
+    };
+    double burnA, missA, burnB, missB, burnC, missC; float busyA, busyB, busyC;
+    day(g, burnA, missA, busyA);
+    GameState b; NewGame(b); EnsureEconomy(b);
+    for (auto &at : b.econ.fleets) for (FleetAt &f : at) for (float &n : f.ships) n = 0.0f;
+    int food = 0; double before = 0.0, after = 0.0;
+    for (int i = 0; i < N; i++) if (b.econ.state[i].out[REF_FOOD] <= 0.0f && b.econ.state[i].use[REF_FOOD] > 0.0f) { food++; before += b.econ.state[i].stock[REF_FOOD]; }
+    day(b, burnB, missB, busyB);
+    for (int i = 0; i < N; i++) if (b.econ.state[i].out[REF_FOOD] <= 0.0f && b.econ.state[i].use[REF_FOOD] > 0.0f) after += b.econ.state[i].stock[REF_FOOD];
+    CHECK(burnA > 1000.0 && burnB < 0.01 * burnA && busyB > 1.5f && busyB > busyA && food > 100 && after < before,
+          "a day's trade burns %.0f t of the fleets' fuel; with no ships next to nothing moves (%.0f t burned, by the few the yards launched that day), cargo piles up "
+          "(%.1f times what there'd be to carry it, against %.1f), and the %d places that grow no food eat into what they have", burnA, burnB, busyB, busyA, food);
+    GameState c; NewGame(c); EnsureEconomy(c);
+    for (int i = 0; i < N; i++) for (int k = 0; k < 3; k++) c.econ.state[i].stock[FUELS[k]] = 0.0f;
+    day(c, burnC, missC, busyC);
+    CHECK(burnC < 0.05 * burnA && missC > 0.2 * burnA, "with every port's tanks dry the ships are stranded: %.0f t burned in the day (what little was made), %.0f t wanted and not there", burnC, missC);
+    // A port keeps back what its own power plants run on
+    {
+        int m = -1, fuel = -1;
+        for (int i = 0; i < N && m < 0; i++) for (int k = 0; k < 3; k++) if (c.econ.state[i].target[FUELS[k]] > 100.0f) { m = i; fuel = FUELS[k]; break; }
+        MarketState &ms = c.econ.state[m];
+        ms.stock[fuel] = 0.2f * ms.target[fuel];
+        bool low = Bunker(c.econ, m, fuel, 5.0);
+        ms.stock[fuel] = ms.target[fuel];
+        float had = ms.stock[fuel];
+        bool full = Bunker(c.econ, m, fuel, 5.0);
+        CHECK(!low && full && fabsf(had - ms.stock[fuel] - 5.0f) < 0.01f, "%s won't sell ships %s out of its last fifth; with its tanks full a ship takes its 5 t", base.defs[m].name.c_str(), GoodData(fuel).name);
+    }
+
+    // --- Ships wear out, raiders take some, the yards build more ---
+    {
+        GameState h; NewGame(h); EnsureEconomy(h);
+        double start = 0.0, built = 0.0;
+        for (int r = 0; r < ROLE_COUNT; r++) start += count(h.econ, r);
+        for (const Faction &f : fs.list) if (f.kind == FactionKind::Clan) { h.econ.raid[f.id] = 1.0f; h.econ.raidUntil[f.id] = 1e12; }
+        for (int step = 0; step < 80; step++) StepEconomy(h, 0.25);
+        double now = 0.0, taken = 0.0;
+        for (int r = 0; r < ROLE_COUNT; r++) now += count(h.econ, r);
+        for (float n : h.econ.clanShips) taken += n;
+        for (int i = 0; i < N; i++)
+            for (size_t k = 0; k < base.defs[i].ind.size() && k < h.econ.state[i].ind.size(); k++) if (base.defs[i].ind[k].type == IND_SHIPYARD) built += h.econ.state[i].ind[k].output;
+        CHECK(now > 0.9 * start && now < 1.25 * start && taken > 0.3 && built > 100.0,
+              "20 days on, with every clan raiding flat out: %.0f ships where there were %.0f (a fiftieth wore out, the yards built more), %.1f taken by the clans and kept, and the yards turning out %.0f t of ship a day", now, start, taken, built);
+        // ...and all of it is saved
+        CHECK(SaveGame(h, "test_fleets.txt"), "saved");
+        GameState back;
+        bool loaded = LoadGame(back, "test_fleets.txt");
+        double again = 0.0, theirs = 0.0;
+        if (loaded) { for (int r = 0; r < ROLE_COUNT; r++) again += count(back.econ, r); for (float n : back.econ.clanShips) theirs += n; }
+        CHECK(loaded && fabs(again - now) < 0.01 * now && fabs(theirs - taken) < 0.01 * taken + 0.1, "loaded again: %.0f ships in the fleets, %.0f with the clans", again, theirs);
+        remove("test_fleets.txt");
+    }
+
+    // --- The freighters that are flown are those ships: their owners' designs, fuelled from the port ---
+    {
+        GameState t; NewGame(t);
+        g_bunkered = 0.0;
+        Run(t, 240.0);
+        int freighters = 0, over = 0, theirs = 0;
+        for (const Npc &n : t.npcs) {
+            if (n.kind != NpcKind::Freighter) continue;
+            freighters++;
+            if (n.total > n.spec.hold * 1.01 + 1.0) over++;
+            for (int role = 0; role < ROLE_COUNT; role++) if (fabs(n.spec.dryMass - FleetDesign(base, n.faction, role).spec.dryMass) < 0.5) { theirs++; break; }
+        }
+        double bought = g_bunkered;
+        CHECK(freighters >= 3 && over == 0 && theirs == freighters && bought > 0.0,
+              "four minutes in the home system: %d freighters in flight, every one its owner's design for the job with its load inside what it holds; %.1f t of fuel has left the ports' stock for them",
+              freighters, bought);
+    }
+
+    // --- A world's page shows its system's shipping, and it reaches a client ---
+    {
+        int world = -1; const Body *body = nullptr;
+        for (int i = 0; i < N && !body; i++) {
+            if (base.defs[i].sys != g.systems.home || base.defs[i].hub == i) continue;
+            for (const Body &bd : g.loaded.bodies) if (bd.id == base.defs[i].bodyId) { world = i; body = &bd; break; }
+        }
+        CHECK(body != nullptr, "found a world in the home system that isn't its hub (%s)", body ? body->name.c_str() : "?");
+        if (!body) return;
+        RecordWorld(g, g, *body);
+        const WorldRecord &rec = g.know.worlds[base.defs[world].bodyId];
+        const int hub = base.defs[world].hub;
+        double based = 0.0;
+        for (const FleetAt &f : g.econ.fleets[hub]) based += f.ships[ROLE_BULK];
+        std::vector<uint8_t> msg = MsgWorld(base.defs[world].bodyId, rec);
+        Reader r(msg);
+        uint64_t id = 0; WorldRecord back;
+        bool type = r.U8() == MSG_WORLD, read = ReadWorld(r, id, back);
+        CHECK(based > 0.0 && fabs(rec.fleet[ROLE_BULK] - based) < 1e-3 * based && rec.busy[ROLE_BULK] > 0.0f && type && read && back.fleet[ROLE_BULK] == rec.fleet[ROLE_BULK] &&
+              back.fleet[ROLE_LINER] == rec.fleet[ROLE_LINER] && back.busy[ROLE_TANKER] == rec.busy[ROLE_TANKER],
+              "%s's page shows the %.1f freighters based at %s and how full their holds are (%.0f%%), and a client is sent the same", base.defs[world].name.c_str(), based,
+              base.defs[hub].name.c_str(), 100.0f * rec.busy[ROLE_BULK]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// People: living standards, growth and famine, migration and borders, and carrying them
+// ---------------------------------------------------------------------------
+static void TestPeople()
+{
+    GameState g; NewGame(g);
+    EnsureEconomy(g);
+    const EconBase &base = *g.econ.base;
+    const FactionSet &fs = g.systems.factions;
+    const int N = g.econ.Count();
+    auto stocked = [&](int m, float share) { MarketState &s = g.econ.state[m]; for (int k = 0; k < GOOD_COUNT; k++) s.stock[k] = share * s.target[k]; };
+    // A colony that isn't its system's hub, and that hub: both under one government
+    int colony = -1;
+    for (int i = 0; i < N && colony < 0; i++) {
+        const MarketDef &d = base.defs[i];
+        if (d.hub != i && d.hub >= 0 && d.pop > 5000.0 && d.pop < 5e6 && base.defs[d.hub].pop > 20.0 * d.pop && d.sys != g.systems.home && !d.station) colony = i;
+    }
+    CHECK(colony >= 0, "found a colony with a bigger neighbour (%s, by %s)", colony >= 0 ? base.defs[colony].name.c_str() : "?", colony >= 0 ? base.defs[base.defs[colony].hub].name.c_str() : "?");
+    if (colony < 0) return;
+    const int hub = base.defs[colony].hub;
+
+    // --- The living standard ---
+    {
+        Economy was = g.econ;
+        MarketState &s = g.econ.state[colony];
+        stocked(colony, 1.2f);
+        s.employed = s.labour; s.housing = (float)(1.05 * s.pop);
+        for (float &r : g.econ.raid) r = 0.0f;
+        double best = LivingStandard(g.econ, fs, colony);
+        s.stock[REF_FOOD] = 0.0f;
+        double hungry = LivingStandard(g.econ, fs, colony);
+        stocked(colony, 1.2f);
+        s.housing = (float)(0.5 * s.pop);
+        double crowded = LivingStandard(g.econ, fs, colony);
+        s.housing = (float)(1.05 * s.pop); s.employed = 0.0f;
+        double idle = LivingStandard(g.econ, fs, colony);
+        s.employed = s.labour;
+        s.stock[REF_WATER] = s.stock[GOOD_MEDICINES] = s.stock[GOOD_CONSUMER] = s.stock[GOOD_LIQUOR] = s.stock[GOOD_LUXURY] = 0.0f;
+        double bare = LivingStandard(g.econ, fs, colony);
+        CHECK(fabs(best - 1.0) < 1e-6 && fabs(best - hungry - (LIVING_FOOD + LIVING_RESERVE)) < 1e-6 && fabs(best - crowded - 0.5 * LIVING_HOUSING) < 0.01 &&
+              fabs(best - idle - LIVING_WORK) < 1e-6 && best - bare > 0.1 && hungry < LEAVE_BELOW && best > GROW_ABOVE,
+              "fed, housed, in work and supplied, a world's living standard is %.0f%%; with no food %.0f%%, with roofs for half %.0f%%, with no work %.0f%%, with no water, medicine or comforts %.0f%%",
+              best * 100.0, hungry * 100.0, crowded * 100.0, idle * 100.0, bare * 100.0);
+        g.econ = was;
+    }
+
+    // --- Growth, up to the roofs there are; famine; and never quite empty ---
+    {
+        Economy was = g.econ;
+        MarketState &s = g.econ.state[colony];
+        int city = -1;
+        for (int k = 0; k < (int)s.ind.size(); k++) if (base.defs[colony].ind[k].type == IND_CITY) city = k;
+        double pop = s.pop, housing = CityHousing(s.ind[city].cap);
+        for (int k = 0; k < GOOD_COUNT; k++) if (k != REF_STEEL && k != GOOD_MACHINERY && k != GOOD_HABITAT_MODULES) s.stock[k] = 1.2f * s.target[k];
+        s.stock[REF_STEEL] = s.stock[GOOD_MACHINERY] = s.stock[GOOD_HABITAT_MODULES] = 0.0f;      // (nothing to build with)
+        for (int i = 0; i < 40; i++) { s.stock[REF_FOOD] = 1.2f * s.target[REF_FOOD]; s.stock[REF_STEEL] = s.stock[GOOD_HABITAT_MODULES] = 0.0f; StepEconomy(g, 0.1); }
+        double full = s.pop;
+        bool capped = full > 1.03 * pop && full <= housing * 1.0001 && s.trend < 0.001f;
+        // ...and with the materials for more city, more people
+        g.clock += MARKET_DAY;
+        for (int i = 0; i < 60; i++) {
+            s.stock[REF_FOOD] = 1.2f * s.target[REF_FOOD];
+            s.stock[REF_STEEL] = s.stock[GOOD_MACHINERY] = s.stock[GOOD_HABITAT_MODULES] = 5000.0f;
+            g.clock += 0.1 * MARKET_DAY;
+            StepEconomy(g, 0.1);
+        }
+        CHECK(capped && s.pop > 1.03 * full && CityHousing(s.ind[city].cap) > 1.03 * housing,
+              "well fed, %s grows from %s to the %s its cities can house, and stops; given steel and habitat modules its cities grow, and in six days it has %s",
+              base.defs[colony].name.c_str(), FormatPopulation(pop).c_str(), FormatPopulation(full).c_str(), FormatPopulation(s.pop).c_str());
+        g.econ = was;
+
+        MarketState &t = g.econ.state[colony];
+        for (uint8_t &b : g.econ.border) b = BORDER_CLOSED;                 // (nowhere to go)
+        double before = t.pop;
+        for (int i = 0; i < 50; i++) { t.stock[REF_FOOD] = 0.0f; t.stock[RAW_GRAIN] = t.stock[RAW_LIVESTOCK] = 0.0f; g.econ.state[hub].stock[REF_FOOD] = 0.0f; StepEconomy(g, 0.1); }
+        double starved = t.pop;
+        t.pop = 100.0;
+        // (in small steps, so that what trade brings in is gone again before anyone eats it)
+        for (int i = 0; i < 600; i++) { t.stock[REF_FOOD] = 0.0f; t.stock[RAW_GRAIN] = t.stock[RAW_LIVESTOCK] = 0.0f; g.econ.state[hub].stock[REF_FOOD] = 0.0f; StepEconomy(g, 0.1); }
+        CHECK(starved < 0.93 * before && starved > 0.5 * before && t.trend <= 0.0f && fabs(t.pop - SKELETON_CREW) < 1.0 && t.living < GROW_ABOVE,
+              "with nothing to eat it loses %.0f%% of its people in five days; left long enough, %.0f caretakers remain and no fewer", 100.0 * (1.0 - starved / before), t.pop);
+        g.econ = was;
+    }
+
+    // --- Migration: a hop at a time to somewhere better; unless the border's shut ---
+    {
+        Economy was = g.econ;
+        for (uint8_t &b : g.econ.border) b = BORDER_OPEN;
+        MarketState &s = g.econ.state[colony], &h = g.econ.state[hub];
+        stocked(hub, 1.2f);
+        int city = -1;
+        for (int k = 0; k < (int)h.ind.size(); k++) if (base.defs[hub].ind[k].type == IND_CITY) city = k;
+        h.ind[city].cap *= 1.05f;                                  // (room at the hub)
+        s.stock[REF_FOOD] = 0.0f; s.stock[RAW_GRAIN] = s.stock[RAW_LIVESTOCK] = 0.0f;
+        double a0 = s.pop, b0 = h.pop;
+        StepEconomy(g, 0.02);
+        s.stock[REF_FOOD] = 0.0f;
+        StepEconomy(g, 0.02);
+        bool going = s.leaving > 1.0f && s.bestTo == hub && s.pop < a0 && h.refugees > 0.0f && s.living < LEAVE_BELOW && h.living > s.living + 0.05f;
+        CHECK(going && h.pop > b0, "%s runs out of food: %.0f people a day leave for %s, where life is better (%.0f%% against %.0f%%)", base.defs[colony].name.c_str(),
+              s.leaving, base.defs[hub].name.c_str(), h.living * 100.0f, s.living * 100.0f);
+        g.econ = was;
+
+        // Two hubs with a lane between them and different governments: the border between them
+        int from = -1, to = -1;
+        for (const Lane &l : base.lanes) {
+            const MarketDef &a = base.defs[l.a], &b = base.defs[l.b];
+            if (a.ruler == b.ruler || a.ruler < 0 || b.ruler <= 0 || a.pop < 1e5 || b.pop < 1e5) continue;
+            from = l.a; to = l.b;
+            break;
+        }
+        CHECK(from >= 0, "found a lane across a border (%s to %s)", from >= 0 ? base.defs[from].name.c_str() : "?", to >= 0 ? base.defs[to].name.c_str() : "?");
+        if (from >= 0) {
+            auto run = [&](uint8_t policy, bool work) {
+                g.econ = was;
+                for (uint8_t &b : g.econ.border) b = BORDER_OPEN;
+                g.econ.border[base.defs[to].ruler] = policy;
+                g.econ.bordersLooked = g.clock;                    // (the policy as set: no second thoughts meanwhile)
+                MarketState &a = g.econ.state[from], &b = g.econ.state[to];
+                for (int i = 0; i < N; i++) if (base.defs[i].hub == from || base.defs[i].hub == to) stocked(i, 1.2f);
+                for (int k = 0; k < (int)b.ind.size(); k++) if (base.defs[to].ind[k].type == IND_CITY) b.ind[k].cap *= 1.05f;
+                // (everywhere else the lanes from there go is no better, so it's this way or none)
+                for (const Lane &l : base.lanes) { int other = l.a == from ? l.b : l.b == from ? l.a : -1; if (other >= 0 && other != to) g.econ.state[other].stock[REF_FOOD] = 0.0f; }
+                for (int i = 0; i < N; i++) if (base.defs[i].hub == from && i != from) g.econ.state[i].stock[REF_FOOD] = 0.0f;
+                a.stock[REF_FOOD] = 0.0f; a.stock[RAW_GRAIN] = a.stock[RAW_LIVESTOCK] = 0.0f;
+                if (!work) for (int k = 0; k < (int)b.ind.size(); k++) if (!IsCivic(base.defs[to].ind[k].type)) b.ind[k].cap *= 0.05f;
+                StepEconomy(g, 0.01);
+                a.stock[REF_FOOD] = 0.0f;
+                StepEconomy(g, 0.01);
+                a.stock[REF_FOOD] = 0.0f;
+                StepEconomy(g, 0.01);
+            };
+            // (counted where they arrive: some will always find another way out)
+            run(BORDER_OPEN, true);
+            float open = g.econ.state[to].refugees;
+            run(BORDER_CLOSED, true);
+            float shut = g.econ.state[to].refugees;
+            int barred = g.econ.state[from].barredTo;
+            run(BORDER_SELECTIVE, true);
+            float picky = g.econ.state[to].refugees;
+            run(BORDER_SELECTIVE, false);
+            float noWork = g.econ.state[to].refugees;
+            // (a few find another way out, whatever the border does)
+            CHECK(open > 1.0f && shut < 0.05f * open && barred == to && picky > 0.2f * open && picky < 0.4f * open && noWork < 0.05f * open,
+                  "famine at %s: with %s's border open %.0f people cross in a few minutes; shut, %.0f; selective, %.0f while it has work for them, and %.0f when it hasn't",
+                  base.defs[from].name.c_str(), fs.Name(base.defs[to].ruler).c_str(), open, shut, picky, noWork);
+            // A government swamped with arrivals tightens its border, and says so
+            g.econ = was;
+            int ruler = base.defs[to].ruler;
+            g.econ.border[ruler] = BORDER_OPEN;
+            for (int i = 0; i < N; i++) if (base.defs[i].ruler == ruler) g.econ.state[i].refugees = (float)(0.2 * g.econ.state[i].pop);
+            uint32_t news = g.newsSeq;
+            g.clock += 3.0 * MARKET_DAY;
+            StepEconomy(g, 0.01);
+            bool said = false;
+            for (const EconNews &item : g.news) if (item.seq > news && item.faction == ruler && item.text.find("migrants") != std::string::npos) said = true;
+            CHECK(g.econ.border[ruler] == BORDER_SELECTIVE && said, "swamped with new arrivals, %s stops taking all comers  (\"%s\")", fs.Name(ruler).c_str(), g.news.empty() ? "" : g.news.back().text.c_str());
+            g.econ = was;
+        }
+    }
+
+    // --- Carrying them: cabins for those who pay, the hold for those who can't ---
+    {
+        ShipBuild one; one.parts = { MakePart(PartType::Cabins, 1), MakePart(PartType::Cabins, 2) };
+        CHECK(SpecOf(one).berths == 12.0 && SpecOf(StarterBuild()).berths == 0.0 && !IsExternal(PartType::Cabins), "passenger cabins: 4 berths at size 1, 8 at size 2; the starter ship has none");
+        const SysId H = g.systems.home;
+        int a = -1, b = -1;
+        for (int i = 0; i < (int)g.loaded.bodies.size(); i++) {
+            const Body &body = g.loaded.bodies[i];
+            if (body.kind == Kind::Station || body.population <= 0) continue;
+            if (a < 0) a = i; else if (b < 0) b = i;
+        }
+        CHECK(a >= 0 && b >= 0, "two inhabited worlds at home");
+        if (a < 0 || b < 0) return;
+        const Body &A = g.loaded.bodies[a], &B = g.loaded.bodies[b];
+        int ma = g.econ.MarketOf(A.id), mb = g.econ.MarketOf(B.id);
+        g.player.credits = 1000.0;
+        g.scanSafeUntil = 1e18;
+        Contract &fare = Inject(g, ContractKind::Passage, H, A, B, -1, 6.0f, 900.0f, 0.0f);
+        uint32_t fareId = fare.id;
+        Contract &flight = Inject(g, ContractKind::Refugees, H, A, B, -1, 40.0f, 600.0f, 0.0f);
+        uint32_t flightId = flight.id;
+        Park(g, a, 0.9); Run(g, 1.2);
+        bool barred = !AcceptContract(g, g, fareId) && !ContractBar(g, g, *std::find_if(g.contracts.begin(), g.contracts.end(), [&](const Contract &k) { return k.id == fareId; })).empty();
+        g.player.build.parts.push_back(MakePart(PartType::Cabins, 2));
+        Refit(g);
+        bool taken = AcceptContract(g, g, fareId) && AcceptContract(g, g, flightId);
+        double popA = g.econ.state[ma].pop, popB = g.econ.state[mb].pop, hold = g.player.CargoTotal(), mass = g.player.Mass();
+        bool aboard = AdvanceContract(g, g, fareId) && AdvanceContract(g, g, flightId);
+        // (six fares in the cabins; of forty refugees two get the berths left and thirty-eight ride in the hold)
+        CHECK(barred && taken && aboard && g.player.passengers == 8.0 && g.player.steerage == 38.0 && fabs(g.player.CargoTotal() - hold - 38.0 * PERSON_HOLD) < 1e-9 &&
+              g.player.Mass() > mass + 19.0 && fabs(popA - g.econ.state[ma].pop - 46.0) < 1e-6,
+              "six passengers need berths (none: refused; with cabins for 8, taken); forty refugees fill the two berths left and %.0f t of the hold; %s has 46 fewer people",
+              38.0 * PERSON_HOLD, A.name.c_str());
+        Park(g, b, 0.9); Run(g, 1.2);
+        double credits = g.player.credits;
+        bool delivered = AdvanceContract(g, g, fareId) && AdvanceContract(g, g, flightId);
+        CHECK(delivered && g.player.passengers == 0.0 && g.player.steerage == 0.0 && fabs(g.player.credits - credits - 1500.0) < 1.0 &&
+              g.econ.state[mb].pop > popB + 45.0 && g.econ.state[mb].refugees >= 40.0f && fabs(g.player.CargoTotal() - hold) < 1e-9,
+              "landed at %s: 1,500 cr, the hold clear, and 46 more people there", B.name.c_str());
+
+        // The boards carry them: where people are leaving, passage for refugees; and for a price, past a border that's shut
+        {
+            Economy was = g.econ;
+            g.econ.state[ma].leaving = 400.0f; g.econ.state[ma].stuck = 900.0f; g.econ.state[ma].bestTo = mb; g.econ.state[ma].barredTo = mb;
+            g.clock += 5.0 * MARKET_DAY;
+            g.contracts.clear(); g.boardMade.clear();
+            RecordBoard(g, g, A);
+            int legal = 0, quiet = 0; float fare = 0.0f, bribe = 0.0f;
+            for (const Contract &k : g.contracts) {
+                if (k.kind != ContractKind::Refugees || k.fromBody != A.id || k.toBody != B.id) continue;
+                if (k.law == NO_FACTION) { legal++; fare = k.pay / k.tonnes; } else { quiet++; bribe = k.pay / k.tonnes; }
+            }
+            int passages = 0;
+            for (const Contract &k : g.contracts) if (k.kind == ContractKind::Passage) passages++;
+            CHECK(legal == 1 && quiet == 1 && bribe > 1.5f * fare && fare > 0.0f, "people are leaving %s: its board offers refugees' passage to %s at %.0f cr a head, and a quiet run past the border at %.0f (%d ordinary passages on offer besides)",
+                  A.name.c_str(), B.name.c_str(), fare, bribe, passages);
+            g.econ = was;
+        }
+
+        // Past a shut border: customs may find them
+        int law = base.defs[mb].ruler;
+        int caught = 0, through = 0;
+        for (int tries = 0; tries < 30 && law >= 0; tries++) {
+            Contract &run = Inject(g, ContractKind::Refugees, H, A, B, -1, 20.0f, 3000.0f, 0.0f);
+            run.law = law; run.against = law;
+            uint32_t id = run.id;
+            Park(g, a, 0.9); Run(g, 1.2);
+            if (!AcceptContract(g, g, id) || !AdvanceContract(g, g, id)) break;
+            g.standing.assign(fs.Count(), 0.0f);
+            g.player.credits = 5000.0;
+            Park(g, b, 0.9); Run(g, 1.2 + 0.1 * tries);
+            if (g.jobs.empty()) { caught++; if (g.player.credits >= 5000.0 || g.Standing(law) >= 0.0f || g.player.steerage + g.player.passengers > 0.0) caught = -100; }
+            else { through++; AdvanceContract(g, g, id); }
+        }
+        if (law >= 0) CHECK(caught > 0 && through > 0, "running refugees past a closed border: customs found them %d times in %d (held, a fine, and the government's regard lost); %d runs got through",
+                           caught, caught + through, through);
+        else CHECK(false, "the home system has a government to run a border past");
+    }
+
+    // --- Saved; and over the wire ---
+    {
+        g.econ.border[1 % (int)g.econ.border.size()] = BORDER_CLOSED;
+        g.econ.state[colony].pop *= 1.5; g.econ.state[colony].refugees = 123.0f;
+        double pop = g.econ.state[colony].pop;
+        bool saved = SaveGame(g, "test_people.txt");
+        GameState l; NewGame(l);
+        bool loaded = LoadGame(l, "test_people.txt");
+        remove("test_people.txt");
+        Writer w;
+        Player p = g.player; p.passengers = 5.0; p.steerage = 17.0;
+        WritePlayer(w, p);
+        Reader r(w.buf);
+        Player back = ReadPlayer(r);
+        CHECK(saved && loaded && l.econ.state[colony].pop == pop && l.econ.state[colony].refugees == 123.0f && l.econ.border[1 % (int)g.econ.border.size()] == BORDER_CLOSED &&
+              back.passengers == 5.0 && back.steerage == 17.0, "populations, new arrivals and border policy are saved; who's aboard reaches the client");
     }
 }
 
@@ -3445,16 +4870,18 @@ static void TestHosting();                    // (below, with the bot)
 
 int RunHeadlessTests(const char *only)
 {
+    setvbuf(stdout, nullptr, _IONBF, 0);            // (so that what led up to a crash is there to read)
     struct T { const char *name; void (*fn)(); };
     const T tests[] = {
         { "fuel", TestFuel }, { "flight", TestFlight }, { "trade", TestTrade }, { "stations", TestStations }, { "hz", TestHabitableZone },
-        { "skimming", TestSkimming }, { "comms", TestComms }, { "galaxy", TestGalaxy }, { "systems", TestSystems }, { "maps", TestMaps }, { "factions", TestFactions }, { "economy", TestEconomy }, { "contracts", TestContracts }, { "traffic", TestTraffic }, { "power", TestPower }, { "ships", TestShips }, { "sensors", TestSensors },
+        { "skimming", TestSkimming }, { "comms", TestComms }, { "galaxy", TestGalaxy }, { "systems", TestSystems }, { "maps", TestMaps }, { "factions", TestFactions }, { "economy", TestEconomy }, { "contracts", TestContracts }, { "traffic", TestTraffic }, { "power", TestPower }, { "ships", TestShips }, { "sensors", TestSensors }, { "industry", TestIndustry }, { "people", TestPeople }, { "fleets", TestFleets }, { "parts", TestParts }, { "reactors", TestReactors }, { "drives", TestDrives }, { "money", TestMoney }, { "econprobe", TestEconProbe }, { "econyears", TestEconYears }, { "econwho", TestEconWho }, { "fleetprobe", TestFleetProbe }, { "spaceprobe", TestSpaceProbe },
         { "targeting", TestTargeting }, { "mining", TestMining }, { "save", TestSaveLoad },
         { "protocol", TestProtocol }, { "net", TestNetwork }, { "host", TestHosting },
     };
     SetTraceLogLevel(LOG_WARNING);
     for (const T &t : tests) {
         if (only && *only && strcmp(only, "all") && strcmp(only, t.name)) continue;
+        if ((!strcmp(t.name, "econprobe") || !strcmp(t.name, "econyears") || !strcmp(t.name, "econwho") || !strcmp(t.name, "fleetprobe") || !strcmp(t.name, "spaceprobe")) && (!only || strcmp(only, t.name))) continue;      // (tuning aids: only when asked for by name)
         printf("[%s]\n", t.name);
         t.fn();
     }
@@ -3496,8 +4923,9 @@ static void TestHosting()
     if (!launched) return;
 
     NetTester host, other;
+    host.net.patience = 90.0;                                   // (it has a galaxy to build before it answers)
     host.net.Connect("127.0.0.1", PORT, "Holden", password, err);
-    CHECK(WaitFor(host, NetClient::State::Joined, 8.0), "the host joined it, with a password full of quotes and spaces");
+    CHECK(WaitFor(host, NetClient::State::Joined, 60.0), "the host joined it, with a password full of quotes and spaces");
     other.net.Connect("127.0.0.1", PORT, "Amos", password, err);
     CHECK(WaitFor(other, NetClient::State::Joined, 5.0), "a second captain joined");
     other.net.adminKey = "not-the-key";
@@ -3840,6 +5268,28 @@ std::unique_ptr<ScriptedInput> MakeScript(const std::string &name)
             if (f == 80) s.screenshot = "outpost.png";
             if (f == 85) s.done = true;
             (void)in;
+        };
+        return s;
+    }
+    if (name == "industry") {                                                // a world's economy page
+        s->body = [](ScriptedInput &s, InputFrame &in) {
+            GameState &g = *s.game;
+            int f = s.frame;
+            if (f == 10) {
+                for (int i = 0; i < (int)g.loaded.bodies.size(); i++)
+                    if (g.loaded.bodies[i].settlement == Settlement::CoreWorld) { Park(g, i, 0.9); s.snap = true; break; }
+                g.player.credits = 2500000;
+            }
+            if (f == 20)  in.Press(KEY_F);
+            if (f == 200) in.Press(KEY_SIX);
+            if (f == 215) s.screenshot = "industry_page.png";
+            if (f == 220) in.Press(KEY_TAB);
+            if (f == 235) s.screenshot = "industry_unbuilt.png";
+            if (f == 240) in.Press(KEY_ESCAPE);
+            if (f == 250) in.Press(KEY_ESCAPE);
+            if (f == 255) in.Press(KEY_I);
+            if (f == 270) s.screenshot = "industry_info.png";
+            if (f == 275) s.done = true;
         };
         return s;
     }

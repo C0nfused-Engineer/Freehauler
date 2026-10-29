@@ -1,4 +1,4 @@
-// goods.h - everything you can carry and trade: forty goods in three tiers.
+// goods.h - everything you can carry and trade: forty-three goods in three tiers.
 //
 //   Raw        dug, pumped, skimmed or grown: ores and ices (which also come
 //              out of asteroids), helium-3 (skimmed from gas giants), crops
@@ -21,13 +21,16 @@ enum Good {
     ORE_WATER_ICE, ORE_VOLATILES,                  // (the ten above are what asteroids and ring chunks hold)
     RAW_HELIUM3,                                   // skimmed from gas giants
     RAW_GRAIN, RAW_LIVESTOCK, RAW_FLORA,           // grown
+    RAW_FAUNA,                                     // caught and bred by xenobiology outposts, on worlds with life of their own
     // --- Refined ---
     REF_STEEL, REF_ALLOYS, REF_CONDUCTORS, REF_SILICON, REF_CERAMICS, REF_POLYMERS, REF_CHEMICALS, REF_FERTILIZER,
     REF_WATER, REF_FUEL, REF_REACTOR_FUEL, REF_FOOD,
+    REF_CELLS,                                     // plasma cells: stored power. What industry and cities run on (industry.h)
     // --- Finished ---
     GOOD_MACHINERY, GOOD_ELECTRONICS, GOOD_ROBOTICS, GOOD_HULL_PLATING, GOOD_SHIP_COMPONENTS, GOOD_REACTOR_CORES,
     GOOD_WEAPONS, GOOD_MUNITIONS, GOOD_MEDICINES, GOOD_CONSUMER, GOOD_LUXURY, GOOD_LIQUOR, GOOD_HABITAT_MODULES,
     GOOD_INSTRUMENTS,
+    GOOD_DATA,                                     // scientific data: what research labs turn out, and the cleverer industries use up
     GOOD_COUNT,
     FIRST_REFINED = REF_STEEL, FIRST_FINISHED = GOOD_MACHINERY,
     MINED_COUNT = RAW_HELIUM3,                     // ores and ices are [0, MINED_COUNT)
@@ -68,6 +71,7 @@ inline const GoodInfo &GoodData(int g)
         { "Grain",               CROP,                     30, false, { _, _, _ } },
         { "Livestock",           CROP,                     90, false, { _, _, _ } },
         { "Exotic Flora",        LIFE,                    500, false, { _, _, _ } },
+        { "Exotic Fauna",        { 255, 170, 120, 255 },  900, false, { _, _, _ } },
         // Refined
         { "Steel",               METAL,                   110, false, { { ORE_IRON, 1.0f }, { ORE_CARBON, 0.5f }, _ } },
         { "Light Alloys",        METAL,                   280, false, { { ORE_TITANIUM, 1.0f }, { ORE_IRON, 0.5f }, _ } },
@@ -86,6 +90,9 @@ inline const GoodInfo &GoodData(int g)
         // Fission fuel: a little enriched uranium as oxide pellets, in ceramic cladding. The everyday reactor fuel.
         { "Reactor Fuel",        { 170, 255, 110, 255 },   90, false, { { ORE_URANIUM, 0.1f }, { REF_CERAMICS, 0.3f }, _ } },
         { "Foodstuffs",          CROP,                     70, false, { { RAW_GRAIN, 0.8f }, { RAW_LIVESTOCK, 0.2f }, { REF_WATER, 0.2f } } },
+        // Power, banked: made by whatever a world has to make it with (sunlight, the heat of its own rock, a reactor
+        // and its fuel: industry.h), and carried to where there is none
+        { "Plasma Cells",        { 120, 220, 255, 255 },   60, false, { _, _, _ } },
         // Finished
         { "Machinery",           METAL,                   420, false, { { REF_STEEL, 1.0f }, { REF_CONDUCTORS, 0.5f }, _ } },
         { "Electronics",         TECH,                    700, false, { { REF_SILICON, 0.5f }, { REF_CONDUCTORS, 0.5f }, _ } },
@@ -95,12 +102,13 @@ inline const GoodInfo &GoodData(int g)
         { "Reactor Cores",       { 170, 255, 110, 255 }, 1800, false, { { REF_STEEL, 1.0f }, { REF_REACTOR_FUEL, 0.5f }, { REF_CERAMICS, 0.5f } } },
         { "Weapons",             ARMS,                   1500, false, { { REF_ALLOYS, 0.6f }, { REF_CONDUCTORS, 0.5f }, { REF_CHEMICALS, 0.3f } } },
         { "Munitions",           ARMS,                    300, false, { { REF_STEEL, 0.5f }, { REF_CHEMICALS, 0.6f }, _ } },
-        { "Medicines",           LIFE,                    650, false, { { REF_CHEMICALS, 0.6f }, { RAW_FLORA, 0.2f }, _ } },
+        { "Medicines",           LIFE,                    650, false, { { REF_CHEMICALS, 0.6f }, { RAW_FLORA, 0.2f }, { RAW_FAUNA, 0.03f } } },
         { "Consumer Goods",      SHOP,                    300, false, { { REF_POLYMERS, 0.6f }, { REF_SILICON, 0.2f }, _ } },
-        { "Luxury Goods",        RICH,                   1600, false, { { ORE_PRECIOUS, 0.3f }, { REF_POLYMERS, 0.4f }, _ } },
+        { "Luxury Goods",        RICH,                   1600, false, { { ORE_PRECIOUS, 0.3f }, { REF_POLYMERS, 0.4f }, { RAW_FAUNA, 0.08f } } },
         { "Liquor",              SHOP,                    260, false, { { RAW_GRAIN, 1.0f }, { REF_WATER, 0.5f }, _ } },
         { "Habitat Modules",     METAL,                   500, false, { { REF_STEEL, 1.0f }, { REF_POLYMERS, 0.5f }, { REF_CERAMICS, 0.5f } } },
         { "Instruments",         { 140, 255, 220, 255 }, 1000, false, { { REF_SILICON, 0.5f }, { REF_CERAMICS, 0.3f }, { REF_CONDUCTORS, 0.4f } } },
+        { "Scientific Data",     { 170, 200, 255, 255 }, 2400, false, { _, _, _ } },
     };
     return table[g];
 }

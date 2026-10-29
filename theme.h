@@ -7,6 +7,7 @@ const Color FLAME_COLOR = { 255, 170, 40, 255 };
 const Color HUD         = SHIP_LINES;
 const Color HUD_DIM     = { 0, 120, 60, 255 };
 const Color HUD_LABEL   = { 120, 200, 150, 255 };
+const Color UNCLAIMED   = { 150, 150, 150, 255 };   // a system in human space that nobody holds (the maps)
 
 // NPC ships: filled in the colour of how they look at you (npc.h: allied, neutral, alerted, hostile), edged in white
 const Color STANCE_FILL[4] = { { 120, 190, 255, 255 }, { 170, 170, 170, 255 }, { 240, 210, 50, 255 }, { 225, 45, 45, 255 } };

@@ -1,5 +1,6 @@
 // server.cpp - the dedicated server
 #include "server.h"
+#include "partsdata.h"
 #include "contracts.h"
 #include "economy.h"
 #include "npcs.h"
@@ -84,6 +85,8 @@ bool Server::Start(const ServerConfig &config, std::string &error)
     } else {
         NewWorld(world, cfg.seed);
         Log("New galaxy, seed %u", world.seed);
+        Log("Building its economy...");
+        EnsureEconomy(world);                       // (it takes a while: better now than with captains waiting on the line)
         SaveWorld();
     }
 
@@ -201,6 +204,12 @@ void Server::Tick()
                 if (sent == kv.second.at) continue;
                 sent = kv.second.at;
                 p->conn.Send(MsgPrices(kv.first, kv.second));
+            }
+            for (const auto &kv : p->cap.know.worlds) {               // ...and the worlds whose economy they've had a fresh look at
+                double &sent = p->worldsSent[kv.first];
+                if (sent == kv.second.at) continue;
+                sent = kv.second.at;
+                p->conn.Send(MsgWorld(kv.first, kv.second));
             }
             for (const EconNews &n : world.news)
                 if (n.seq > p->newsSent) { p->conn.Send(MsgNews(n)); p->newsSent = n.seq; }
@@ -331,12 +340,14 @@ void Server::HandleMessage(Peer &p, const std::vector<uint8_t> &msg, double now)
     case MSG_HELLO: {
         if (p.joined) return;
         std::string name = r.Str(), password = r.Str(), ship = r.Str();
+        uint64_t parts = r.U64();
         if (!ValidPlayerName(ship)) ship.clear();              // (optional; anything odd is just dropped)
         while (!name.empty() && name.back() == ' ') name.pop_back();
         while (!name.empty() && name.front() == ' ') name.erase(0, 1);
         if (!r.ok) return;
         if (!ValidPlayerName(name)) { Reject(p, "Pick a name of 1-20 letters, digits, spaces, - or _"); return; }
         if (!cfg.password.empty() && password != cfg.password) { Reject(p, "Wrong server password"); return; }
+        if (parts != PartsHash()) { Reject(p, "Your ship parts (parts.txt) aren't the same as this server's"); return; }
         if (Peer *other = FindByName(name)) {
             if (other->conn.addr.ip == p.conn.addr.ip) Drop(*other, "reconnected from a new session");   // you, after a crash
             else { Reject(p, "A captain named " + name + " is already flying here"); return; }
@@ -409,7 +420,7 @@ void Server::Join(Peer &p, const std::string &name, const std::string &ship)
         saved.build = p.cap.player.build;           // (LoadPlayer read the ship straight into the captain)
         p.cap.player = saved;
         Refit(p.cap);
-        p.cap.player.power.bank = p.cap.player.spec.bankMJ; p.cap.player.power.driveCap = p.cap.player.spec.driveCapMJ;
+        p.cap.player.power.bank = p.cap.player.spec.bankTJ; p.cap.player.power.driveCap = p.cap.player.spec.driveCapTJ;
         p.cap.loaded = LoadedSystem();
         p.cap.field  = AsteroidField();
         UpdateLoadedSystem(world, p.cap);
@@ -609,13 +620,14 @@ bool Server::SavePlayer(const Captain &c)
     text += TextFormat("ship %lld %.17g %.17g %.17g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %d %.9g\n", (long long)s.anchor,
                        s.pos.x, s.pos.y, s.pos.z, s.vel.x, s.vel.y, s.vel.z, s.rot.x, s.rot.y, s.rot.z, s.rot.w, s.dampeners ? 1 : 0,
                        s.throttle);
-    text += TextFormat("fuel %.17g\ncredits %.17g\n", p.fuel, p.credits);
+    text += TextFormat("fuel %.17g\ncredits %.17g\nmarked %.17g\n", p.fuel, p.credits, p.marked);
     for (int o = 0; o < GOOD_COUNT; o++)
         if (p.cargo[o] > 0.0) text += TextFormat("cargo %d %.17g\n", o, p.cargo[o]);
     for (size_t i = 0; i < c.standing.size(); i++)
         if (c.standing[i] != 0.0f) text += TextFormat("standing %d %.9g\n", (int)i, c.standing[i]);
     WriteBuild(c, text);
     WriteCaptainContracts(c, text);
+    WriteStakes(c, text);
     text += "end\n";
     return WriteFileSafely(PlayerPath(c.name), text);
 }
@@ -635,7 +647,7 @@ bool Server::LoadPlayer(const std::string &name, Player &out, Captain &cap)
             int damp = 1, ore; double t;
             long long anchor = -1;
             char key[32] = "";
-            if (sscanf(line, "%31s", key) == 1 && (ReadCaptainContractLine(cap, key, line + strlen(key)) || ReadBuildLine(cap, key, line + strlen(key)))) continue;
+            if (sscanf(line, "%31s", key) == 1 && (ReadCaptainContractLine(cap, key, line + strlen(key)) || ReadBuildLine(cap, key, line + strlen(key)) || ReadStakeLine(cap, key, line + strlen(key)))) continue;
             if (sscanf(line, "ship %lld %lf %lf %lf %f %f %f %f %f %f %f %d %f", &anchor, &s.pos.x, &s.pos.y, &s.pos.z,
                        &s.vel.x, &s.vel.y, &s.vel.z, &s.rot.x, &s.rot.y, &s.rot.z, &s.rot.w, &damp, &s.throttle) >= 12) {
                 s.anchor = anchor;
@@ -644,6 +656,7 @@ bool Server::LoadPlayer(const std::string &name, Player &out, Captain &cap)
             }
             else if (sscanf(line, "fuel %lf", &p.fuel) == 1) {}
             else if (sscanf(line, "credits %lf", &p.credits) == 1) {}
+            else if (sscanf(line, "marked %lf", &p.marked) == 1) {}
             else if (sscanf(line, "cargo %d %lf", &ore, &t) == 2) { if (version >= 3 && ore >= 0 && ore < GOOD_COUNT) p.cargo[ore] = t; }   // (2: the old goods)
             else if (sscanf(line, "standing %d %lf", &ore, &t) == 2) { if (ore >= 0 && ore < (int)standing.size()) standing[ore] = (float)t; }
             else if (!strncmp(line, "end", 3)) { ended = true; break; }

@@ -15,7 +15,10 @@ enum class ContractKind : uint8_t {
     Supply,         // bring so many tonnes of a good, found however you like
     Smuggling,      // haulage of something the law where it's going forbids
     Survey,         // scan the worlds of an empty system and come back
-    Courier,        // messages and passengers: no hold space, but no dawdling
+    Courier,        // messages: no hold space, but no dawdling
+    Passage,        // fare-paying passengers: they want a berth each (passenger cabins)
+    Refugees,       // people leaving somewhere bad for somewhere better: in berths, or failing those in the hold. If the
+                    // place they're bound for has shut its border ('law'), it's people-smuggling.
     Count
 };
 
@@ -47,11 +50,11 @@ struct Contract {
     std::string fromName, toName;
     SysId    surveySys = NO_SYSTEM;     // surveys: the system to scan...
     std::string surveyName;
-    int      need = 0;                  // ...and how many of its worlds
+    int      need = 0;                  // ...and how many of its worlds (passage, refugees: how many of them are riding in the hold)
     uint64_t scanMask = 0;              // ...and which have been (by body index)
 
     int      good = -1;
-    float    tonnes = 0.0f;
+    float    tonnes = 0.0f;             // (passage, refugees: how many people)
     float    pay = 0.0f;
     float    collateral = 0.0f;         // put down on accepting, returned on delivery
     double   expires = 0.0;             // on offer until then

@@ -60,9 +60,11 @@ void WritePlayer(Writer &w, const Player &p)
 {
     WriteShip(w, p.ship);
     w.F64(p.fuel);
-    w.F64(p.credits);
+    w.F64(p.credits); w.F64(p.marked);
     w.F32((float)p.power.bank); w.F32((float)p.power.driveCap); w.F32(p.power.engines);
-    w.U8((uint8_t)((p.power.mode & 7) | (p.power.radar ? 32 : 0) | (p.power.engaged ? 128 : 0) | (p.power.warping ? 64 : 0)));
+    w.U8((uint8_t)((p.power.mode & 7) | (p.power.cold ? 8 : 0) | (p.power.radar ? 32 : 0) | (p.power.engaged ? 128 : 0) | (p.power.warping ? 64 : 0)));
+    w.F32(p.power.restart);
+    w.F32((float)p.passengers); w.F32((float)p.steerage);
     uint8_t n = 0;                                 // only what's in the hold: index, tonnes
     for (int g = 0; g < GOOD_COUNT; g++) if (p.cargo[g] > 0.0) n++;
     w.U8(n);
@@ -74,11 +76,13 @@ Player ReadPlayer(Reader &r)
     Player p;
     p.ship    = ReadShip(r);
     p.fuel    = r.F64();
-    p.credits = r.F64();
+    p.credits = r.F64(); p.marked = r.F64();
     p.power.bank = r.F32(); p.power.driveCap = r.F32(); p.power.engines = r.F32();
     uint8_t pm = r.U8();
     p.power.mode = (uint8_t)((pm & 7) % POWER_MODES); p.power.engaged = (pm & 128) != 0; p.power.warping = (pm & 64) != 0;
-    p.power.radar = (pm & 32) != 0;
+    p.power.radar = (pm & 32) != 0; p.power.cold = (pm & 8) != 0;
+    p.power.restart = r.F32();
+    p.passengers = r.F32(); p.steerage = r.F32();
     uint8_t n = r.U8();
     for (int i = 0; i < n && r.ok; i++) {
         uint8_t g = r.U8();
@@ -94,7 +98,7 @@ void WriteInput(Writer &w, const InputStep &in)
     w.F32(c.throttle);
     w.F32(c.yaw); w.F32(c.pitch); w.F32(c.roll);
     w.U8((c.hyper ? 1 : 0) | (c.fire ? 2 : 0) | (c.allStop ? 4 : 0) | (c.toggleDampeners ? 8 : 0) | (in.aim.steer ? 16 : 0) |
-         (c.cyclePower ? 32 : 0) | (c.toggleRadar ? 64 : 0));
+         (c.cyclePower ? 32 : 0) | (c.toggleRadar ? 64 : 0) | (c.toggleReactor ? 128 : 0));
     WriteTarget(w, in.aim.hovered);
     WriteTarget(w, in.aim.retarget);
     WriteTarget(w, in.aim.course);
@@ -114,7 +118,7 @@ InputStep ReadInput(Reader &r, uint32_t seq)
     c.roll    = Sane(r.F32(), 90.0f);
     uint8_t f = r.U8();
     c.hyper = (f & 1) != 0; c.fire = (f & 2) != 0; c.allStop = (f & 4) != 0; c.toggleDampeners = (f & 8) != 0; c.cyclePower = (f & 32) != 0;
-    c.toggleRadar = (f & 64) != 0;
+    c.toggleRadar = (f & 64) != 0; c.toggleReactor = (f & 128) != 0;
     in.aim.steer    = (f & 16) != 0;
     in.aim.hovered  = ReadTarget(r);
     in.aim.retarget = ReadTarget(r);
@@ -344,6 +348,43 @@ bool ReadSnapshot(Reader &r, Snapshot &s)
         t.thrusting = (tf & 1) != 0; t.hyper = (tf & 2) != 0; t.mining = (tf & 4) != 0;
         if (t.mining) t.miningRock = r.U64();
         s.others.push_back(t);
+    }
+    return r.ok;
+}
+
+std::vector<uint8_t> MsgWorld(uint64_t body, const WorldRecord &r)
+{
+    Writer w;
+    w.U8(MSG_WORLD);
+    w.U64(body); w.F64(r.at); w.Str(r.name, 80); w.F64(r.pop);
+    w.F32(r.labour); w.F32(r.employed); w.F32(r.housing); w.F32(r.cellsMade); w.F32(r.cellsUsed);
+    w.F32(r.living); w.F32(r.trend); w.F32(r.refugees); w.F32(r.leaving); w.F32(r.stuck); w.U8(r.border); w.Str(r.goingTo, 80); w.Str(r.barredAt, 80);
+    for (int role = 0; role < ROLE_COUNT; role++) { w.F32(r.fleet[role]); w.F32(r.busy[role]); }
+    w.U8((uint8_t)std::min<size_t>(r.rows.size(), 60));
+    for (size_t i = 0; i < r.rows.size() && i < 60; i++) {
+        const IndustryRow &in = r.rows[i];
+        w.U8(in.type); w.I16(in.owner); w.U8(in.shortOf);
+        for (float v : { in.site, in.cap, in.run, in.output, in.profit, in.building, in.buildLeft, in.stake, in.pending, in.cost, in.step }) w.F32(v);
+    }
+    return w.buf;
+}
+
+bool ReadWorld(Reader &r, uint64_t &body, WorldRecord &out)
+{
+    body = r.U64(); out.at = r.F64(); out.name = r.Str(); out.pop = r.F64();
+    out.labour = r.F32(); out.employed = r.F32(); out.housing = r.F32(); out.cellsMade = r.F32(); out.cellsUsed = r.F32();
+    out.living = r.F32(); out.trend = r.F32(); out.refugees = r.F32(); out.leaving = r.F32(); out.stuck = r.F32(); out.border = r.U8();
+    out.goingTo = r.Str(); out.barredAt = r.Str();
+    for (int role = 0; role < ROLE_COUNT; role++) { out.fleet[role] = r.F32(); out.busy[role] = r.F32(); }
+    if (out.border > BORDER_CLOSED) return false;
+    uint8_t n = r.U8();
+    out.rows.clear();
+    for (int i = 0; i < n && r.ok; i++) {
+        IndustryRow in;
+        in.type = r.U8(); in.owner = r.I16(); in.shortOf = r.U8();
+        for (float *v : { &in.site, &in.cap, &in.run, &in.output, &in.profit, &in.building, &in.buildLeft, &in.stake, &in.pending, &in.cost, &in.step }) *v = r.F32();
+        if (in.type >= IND_COUNT) return false;
+        out.rows.push_back(in);
     }
     return r.ok;
 }

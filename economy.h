@@ -4,7 +4,9 @@
 //   uses      what its people and yards consume, if it has it
 //   makes     what it produces, if it has the inputs (goods.h recipes) and isn't overstocked
 //   trades    with its system's hub, and hubs with the hubs of nearby systems: goods flow
-//             from where they're cheap to where they're dear, in proportion to the gap
+//             from where they're cheap to where they're dear, in proportion to what's left
+//             of the gap once the freight is paid - and no more of them than the ships
+//             based there can carry, which burn fuel from the ports' own stock (fleet.h)
 // Price follows stock: at its target stock a good costs its base price, half as much stock
 // is about half again dearer, and so on, up to six times the base price where there's none left.
 //
@@ -50,6 +52,8 @@ const Body *TradePartner(const Captain &c);     // inhabited world or station in
 Market LiveMarket(const World &w, const Captain &c, const Body &b);
 // ...and as this captain last saw it. False if they never have. 'at': when that was.
 bool   KnownMarket(const Captain &c, const Body &b, Market &out, double *at = nullptr);
+// The body a place's market and industry records are kept under: itself, or for a station over an inhabited world, that world
+uint64_t EconomyBody(const Captain &c, const Body &b);
 // Notes a market's prices in the captain's records (docking and market reports do this)
 void   RecordPrices(World &w, Captain &c, const Body &b);
 
@@ -67,6 +71,14 @@ bool BuyGoods(World &w, Captain &c, int good, double qty);
 bool BuyFuel(World &w, Captain &c, double qty);
 bool BuyTradeData(World &w, Captain &c);        // the prices at every market this one's system trades with
 
+// Industry (industry.h). A captain docked at a world can fund the next addition to one of its industries (by its
+// place in the world's list): they pay for the materials and the building, and from then on that much of the
+// industry's capacity is theirs: its share of what the industry earns waits for them there.
+bool   InvestIn(World &w, Captain &c, int industry);
+double CollectStakes(World &w, Captain &c, const Body &b);     // pays out what their stakes here have earned; returns it
+// Notes a world's people and industries in the captain's records (docking, and asking over comms, do this)
+void   RecordWorld(World &w, Captain &c, const Body &b);
+
 inline bool SellGoods(GameState &g, int good, double qty) { return SellGoods(g, g, good, qty); }
 inline bool BuyGoods(GameState &g, int good, double qty)  { return BuyGoods(g, g, good, qty); }
 inline bool BuyFuel(GameState &g, double qty)             { return BuyFuel(g, g, qty); }
@@ -74,6 +86,22 @@ inline bool BuyFuel(GameState &g, double qty)             { return BuyFuel(g, g,
 // The economy itself (UpdateEconomy is declared in game.h: the world's step calls it)
 void   EnsureEconomy(World &w);                 // builds it on first use
 double MarketPrice(const World &w, int market, int good);     // mid price right now; 0 if it isn't traded there
+// (a tuning aid: tonnes of each good made, used by industry, used by people, burned by ships, and wanted by ships that
+// wasn't there, since it was last cleared; and the market days that covers)
+extern double g_flow[5][GOOD_COUNT], g_flowDays;
+extern double g_bunkered;                       // (...and the tonnes of fuel flown ships have taken on at ports)
+// Money carried by ship (npcs.h): it reaches a market; or raiders have it, for what they can get for it
+void LandSpecie(Economy &e, int market, int faction, double credits);
+void FenceLoot(Economy &e, int clan, double credits);
+const double MARKED_FENCE = 0.5;                // what a fence gives a captain for marked credits, on their face
+double Crowding(const MarketDef &d, const MarketState &s);  // 0 .. 1: how full a place is, of what it can ever hold
+double BuiltUp(const MarketDef &d, const MarketState &s);   // how many times dearer adding to its industry is than when the galaxy began
+double TariffNow(const Economy &e, int ruler);  // the share a government takes of what's sold into its space, as things stand
+bool GoesByTanker(int good);                    // fuels and plasma cells
+// A ship fills up at a market: the fuel comes out of its stock, if it has that much over what it keeps for itself
+bool Bunker(Economy &e, int market, int good, double tonnes);
+const ShipDesign &FleetDesign(const EconBase &base, int faction, int role);    // the ship that faction builds for the job (NO_FACTION: independents')
+double LivingStandard(const Economy &e, const FactionSet &fs, int market);   // 0 .. 1: see econ.h for what goes into it
 double RaidLevel(const World &w, DVec3 ly);     // how hard the clans are hitting shipping at a place (light years from home): 0 .. 1
 void   StepEconomy(World &w, double days);      // (tests: run it forward without the clock)
 void   PostNews(World &w, int faction, SysId where, const std::string &text);   // a headline (NO_FACTION: local news)
@@ -81,6 +109,9 @@ void   PostNews(World &w, int faction, SysId where, const std::string &text);   
 // Saving: the economy as lines of text, and reading them back (after EnsureEconomy)
 void   WriteEconomy(const World &w, std::string &out);
 bool   ReadEconomyLine(World &w, const char *key, const char *rest);
-// ...and a captain's price records
+// ...a captain's stakes in industry (the server saves these with each captain)
+void   WriteStakes(const Captain &c, std::string &out);
+bool   ReadStakeLine(Captain &c, const char *key, const char *rest);
+// ...and a captain's price records (with their stakes)
 void   WritePrices(const Captain &c, std::string &out);
 bool   ReadPriceLine(Captain &c, const char *key, const char *rest);

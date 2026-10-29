@@ -1,5 +1,6 @@
 // shipyard.cpp - buying, fitting and selling parts and hulls
 #include "shipyard.h"
+#include "partsdata.h"
 #include "economy.h"
 #include "format.h"
 #include <algorithm>
@@ -34,8 +35,8 @@ void Refit(Captain &c)
     Player &p = c.player;
     p.spec = SpecOf(p.build);
     p.fuel = fmin(p.fuel, p.spec.tank);
-    p.power.bank = fmin(p.power.bank, p.spec.bankMJ);
-    p.power.driveCap = fmin(p.power.driveCap, p.spec.driveCapMJ);
+    p.power.bank = fmin(p.power.bank, p.spec.bankTJ);
+    p.power.driveCap = fmin(p.power.driveCap, p.spec.driveCapTJ);
 }
 
 // What the yard's stock of a part's material does to its price, and whether there's enough of it
@@ -43,7 +44,7 @@ static double Supply(const World &w, const Body &yard, int good, double tonnes, 
 {
     enough = true;
     int m = w.econ.MarketOf(yard.id);
-    if (m < 0 || good < 0 || w.econ.base->defs[m].target[good] <= 0.0f) return 1.0;       // (not something this yard keeps: it's brought in)
+    if (m < 0 || good < 0 || w.econ.state[m].target[good] <= 0.0f) return 1.0;       // (not something this yard keeps: it's brought in)
     enough = w.econ.state[m].stock[good] >= tonnes;
     double ratio = MarketPrice(w, m, good) / GoodData(good).basePrice;
     return 0.5 + 0.5 * fmax(0.6, fmin(3.0, ratio));
@@ -52,7 +53,7 @@ static double Supply(const World &w, const Body &yard, int good, double tonnes, 
 static void TakeStock(World &w, const Body &yard, int good, double tonnes)
 {
     int m = w.econ.MarketOf(yard.id);
-    if (m < 0 || good < 0 || w.econ.base->defs[m].target[good] <= 0.0f) return;
+    if (m < 0 || good < 0 || w.econ.state[m].target[good] <= 0.0f) return;
     w.econ.state[m].stock[good] = fmaxf(0.0f, w.econ.state[m].stock[good] - (float)tonnes);
 }
 
@@ -79,13 +80,13 @@ double HullPrice(const World &w, const Captain &c, const Body &yard, int hull)
 std::string FitProblem(const ShipBuild &b, const Part &p)
 {
     PartInfo i = Describe(p);
-    if (p.size < 1 || p.size > PART_SIZES || p.grade >= PART_GRADES || (int)p.type >= (int)PartType::Count) return "No such part";
+    if (p.size < 1 || p.size > PART_SIZES || p.grade >= PART_GRADES || (int)p.type >= (int)PartType::Count || p.variant >= ModelCount(p.type)) return "No such part";
     if (VolumeUsed(b) + i.volume > BuildVolume(b) + 1e-6)
         return TextFormat("No room: it needs %.0f m3 and there are %.0f free", i.volume, BuildVolume(b) - VolumeUsed(b));
     if (i.external && HardpointsUsed(b) >= BuildHardpoints(b)) return "No free hardpoint";
     if (p.type == PartType::Reactor)
         for (const Part &o : b.parts)
-            if (o.type == PartType::Reactor && o.variant != p.variant) return "Every reactor aboard must burn the same fuel";
+            if (o.type == PartType::Reactor && FuelGoodOf(o.variant) != FuelGoodOf(p.variant)) return "Every reactor aboard must burn the same fuel";
     return "";
 }
 
@@ -94,7 +95,7 @@ bool FitPart(World &w, Captain &c, Part p)
     const Body *yard = Shipyard(c);
     if (!yard) { Tell(w, c, "Dock at a shipyard or a starbase to fit out"); return false; }
     EnsureEconomy(w);
-    if (p.variant >= REACTOR_FUELS || p.type != PartType::Reactor) p.variant = p.type == PartType::Reactor ? p.variant % REACTOR_FUELS : 0;
+    if ((int)p.type < (int)PartType::Count && p.variant >= ModelCount(p.type)) p.variant = 0;
     std::string no = FitProblem(c.player.build, p);
     if (!no.empty()) { Tell(w, c, no); return false; }
     if (p.grade > YardGrade(w, c, *yard, p.type)) { Tell(w, c, std::string(yard->name) + " doesn't sell that grade to you"); return false; }
@@ -128,7 +129,7 @@ bool RemovePart(World &w, Captain &c, int index)
     pl.build = after;
     pl.credits += back;
     int m = w.econ.Built() ? w.econ.MarketOf(yard->id) : -1;                       // (what it's made of goes back into the yard's stock)
-    if (m >= 0 && w.econ.base->defs[m].target[i.material] > 0.0f) w.econ.state[m].stock[i.material] += (float)(0.5 * i.tonnes);
+    if (m >= 0 && w.econ.state[m].target[i.material] > 0.0f) w.econ.state[m].stock[i.material] += (float)(0.5 * i.tonnes);
     Refit(c);
     Tell(w, c, "Removed: " + i.name + TextFormat("  (+%s cr)", Thousands(back).c_str()));
     return true;
@@ -220,7 +221,7 @@ bool ReadBuildLine(Captain &c, const char *key, const char *rest)
     if (!strcmp(key, "part")) {
         int type, size, grade, variant, maker;
         if (sscanf(rest, "%d %d %d %d %d", &type, &size, &grade, &variant, &maker) == 5 && type >= 0 && type < (int)PartType::Count &&
-            size >= 1 && size <= PART_SIZES && grade >= 0 && grade < PART_GRADES && variant >= 0 && variant < REACTOR_FUELS) {
+            size >= 1 && size <= PART_SIZES && grade >= 0 && grade < PART_GRADES && variant >= 0 && variant < ModelCount((PartType)type)) {
             Part p;
             p.type = (PartType)type; p.size = (uint8_t)size; p.grade = (uint8_t)grade; p.variant = (uint8_t)variant; p.maker = (int16_t)maker;
             b.parts.push_back(p);

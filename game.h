@@ -51,6 +51,8 @@ const double START_CREDITS  = 200.0;
 const double SCAN_RADII     = 20.0;         // passing within this many radii of a world's surface scans it...
 const double SCAN_MIN       = 1.0 * LIGHT_SEC_U;   // ...or within this, whichever is farther
 const double SHIP_RADIUS    = 2.5;          // units; for targeting other ships
+const double PERSON_HOLD    = 0.5;          // tonnes of hold a person riding in it takes up, with what they carry...
+const double PERSON_CABIN   = 0.15;         // ...and what one in a cabin adds to the ship's mass
 
 // ---------------------------------------------------------------------------
 // Saved state
@@ -64,8 +66,13 @@ struct Player {
     ShipSpec   spec = SpecOf(build);         // ...and what that adds up to (shipyard.h's Refit keeps it so)
     PowerState power;                        // its capacitors and power mode
 
-    double CargoTotal() const { double t = 0; for (double c : cargo) t += c; return t; }
-    double Mass() const { return spec.dryMass + fuel + CargoTotal(); }   // tonnes, all up
+    // People aboard, carried under contract (contracts.h keeps these in step with the captain's jobs): in the cabins,
+    // and (refugees, when there aren't the berths) in the hold, where each takes PERSON_HOLD tonnes of room
+    double marked = 0.0;                     // stolen credits aboard, by their face: no lawful port will take them (a fence will, for half)
+    double passengers = 0.0, steerage = 0.0;
+
+    double CargoTotal() const { double t = steerage * PERSON_HOLD; for (double c : cargo) t += c; return t; }
+    double Mass() const { return spec.dryMass + fuel + CargoTotal() + passengers * PERSON_CABIN; }   // tonnes, all up
 };
 
 // Changes players made to the generated world
@@ -117,6 +124,7 @@ struct Knowledge {
     std::unordered_set<int64_t>  charted;    // whole systems (SysId): everything in them is known
     std::unordered_set<uint64_t> scanned;    // single bodies (Body::id), scanned in passing
     std::unordered_map<uint64_t, PriceRecord> prices;   // markets (by Body::id) as last seen: docked at, reported, or bought data on
+    std::unordered_map<uint64_t, WorldRecord> worlds;   // ...and their people and industries (not saved: seen again on docking)
 };
 
 struct FlightState {
@@ -128,12 +136,14 @@ struct FlightState {
 
     DriveInfo drive;
     double    burn = 0.0;                // fuel burn this step (t/s)
-    double    load = 0.0;                // megawatts the reactor is putting out
+    double    load = 0.0;                // terawatts the reactor is putting out
+    double    efficiency = 0.0;          // ...and the share of the heat it's making that that is
+    bool      driveCold = false;         // the drive was asked for with the reactor shut down
     bool      driveCharging = false;     // the drive was asked for, but its capacitor hasn't the charge to engage
     bool      driveTooHeavy = false;     // ...or the ship is too heavy for it
     bool      driveStarved = false;      // the reactor can't hold the field at the speed set
     bool      driveNone = false;         // no hyper drive fitted
-    double    drivePower = 0.0;          // megawatts the FTL field is taking
+    double    drivePower = 0.0;          // terawatts the FTL field is taking
     bool      scooping = false;
     bool      skimming = false;          // in a gas giant's upper atmosphere, collecting helium-3
     bool      skimFull = false;          // ...but the hold is full
@@ -298,9 +308,12 @@ struct Captain {
     double        pirateSafeUntil = 0.0; // pirates have had their share for now
     double        scanSafeUntil = 0.0;   // a patrol has just been through the hold
     bool          tankerCalled = false;  // (a tanker has been asked for: sent out on the next traffic step)
+    int           boardTarget = -1;      // a paymaster's ship (an NPC id) this captain means to board...
+    double        boardTime = 0.0;       // ...and how long they've held alongside it
     int           demandFrom = -1;       // the pirate (an NPC id) that has named its price...
     double        demandTonnes = 0.0;    // ...this many tonnes
     std::vector<std::pair<double, std::string>> shipReplies;   // what other ships have said, by when it gets here
+    std::vector<Stake>      stakes;      // saved: the shares this captain has bought in worlds' industries (economy.h)
     std::vector<Contact>    contacts;    // the ships on this captain's scope (sensors.h)
     std::vector<SensorMark> marks;       // ...and the bearings: tachyon bursts, radars sweeping the ship
     bool          sensing = false;       // (the contacts are kept here: on a client they aren't, the server sends what they show)

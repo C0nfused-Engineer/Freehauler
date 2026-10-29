@@ -14,9 +14,9 @@ set "PATH=%MSYS2_UCRT64%\bin;%PATH%"
 
 where g++ >nul 2>nul || (echo g++ not found in %MSYS2_UCRT64%\bin & exit /b 1)
 
-set SRC=game.cpp galaxy.cpp factions.cpp contracts.cpp npcs.cpp sensors.cpp shipparts.cpp shipyard.cpp ship.cpp asteroids.cpp economy.cpp comms.cpp commands.cpp format.cpp ^
+set SRC=game.cpp galaxy.cpp factions.cpp contracts.cpp npcs.cpp sensors.cpp industry.cpp fleet.cpp partsdata.cpp shipparts.cpp shipyard.cpp ship.cpp asteroids.cpp economy.cpp comms.cpp commands.cpp format.cpp ^
  net.cpp protocol.cpp main.cpp client.cpp server.cpp server_console.cpp process.cpp targetinfo.cpp save.cpp ^
- settings.cpp input.cpp render.cpp hud.cpp ui.cpp map.cpp factionui.cpp tradeui.cpp contractsui.cpp shipyardui.cpp menus.cpp tests.cpp
+ settings.cpp input.cpp render.cpp hud.cpp ui.cpp map.cpp factionui.cpp tradeui.cpp contractsui.cpp shipyardui.cpp worldui.cpp menus.cpp tests.cpp
 
 if exist dist\Freehauler rmdir /s /q dist\Freehauler
 if exist dist\Freehauler.zip del dist\Freehauler.zip
@@ -26,6 +26,8 @@ echo Building the game (a couple of minutes)...
 g++ -std=c++17 -O2 -Wall -static -s %SRC% -o dist\Freehauler\freehauler.exe ^
     -lraylib "%MSYS2_UCRT64%\lib\libglfw3.dll.a" -lopengl32 -lgdi32 -lwinmm -lws2_32 || exit /b 1
 copy /y "%MSYS2_UCRT64%\bin\glfw3.dll" dist\Freehauler\ >nul || exit /b 1
+rem (the hulls and parts, if they've been changed from the built-in ones: everyone online must fly by the same)
+if exist parts.txt copy /y parts.txt dist\Freehauler\ >nul
 
 (
 echo Freehauler - test build

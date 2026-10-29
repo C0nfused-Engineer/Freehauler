@@ -1,6 +1,7 @@
 // factionui.cpp - the factions window (R): who's who in human space, what they
 // want, how they get on with each other, and where you stand with them
 #include "ui.h"
+#include "economy.h"
 #include "contracts.h"
 #include "format.h"
 #include "theme.h"
@@ -146,6 +147,25 @@ public:
             for (int good : f.contraband) banned += (banned.empty() ? "" : ", ") + std::string(GoodData(good).name);
             DrawText(("Contraband: " + (banned.empty() ? std::string("nothing") : banned)).c_str(), dx, cy, 14, banned.empty() ? LIGHTGRAY : ORANGE);
             cy += 20;
+        }
+        // Its money (where the economy is run: a captain on someone else's server sees none of this yet)
+        if (g.econ.Built() && f.id < (int)g.econ.money.size()) {
+            const FactionMoney &m = g.econ.money[f.id];
+            double waiting = 0.0, income = 0.0;
+            for (int i = 0; i < g.econ.Count(); i++) waiting += g.econ.Coffer(i, f.id) + g.econ.Moving(i, f.id);
+            int most = 0;
+            for (int k = 0; k < INC_COUNT; k++) { income += m.income[k]; if (m.income[k] > m.income[most]) most = k; }
+            cy += 10;
+            DrawText("MONEY", dx, cy, 16, HUD); cy += 22;
+            DrawText(TextFormat("Treasury %s cr    on its way home %s", Thousands(m.treasury).c_str(), Thousands(waiting).c_str()), dx, cy, 14, LIGHTGRAY); cy += 20;
+            DrawText(TextFormat("Earns %s a day, mostly %s", Thousands(income).c_str(), IncomeName(most)), dx, cy, 14, LIGHTGRAY); cy += 20;
+            DrawText(TextFormat("Spends %s a day on itself, %s on new works and ships", Thousands(m.upkeep).c_str(), Thousands(m.spent).c_str()), dx, cy, 14, LIGHTGRAY); cy += 20;
+            if (m.denied > 0.02f * (float)income) { DrawText(TextFormat("Going without: %s a day it can't pay for", Thousands(m.denied).c_str()), dx, cy, 14, ORANGE); cy += 20; }
+            if (f.kind == FactionKind::Government) {
+                DrawText(TextFormat("Takes %.0f%% of others' profits, %.0f%% at the border%s", 100.0 * fmin(0.5, (double)m.profitTax * m.squeeze), 100.0 * TariffNow(g.econ, f.id),
+                                    m.squeeze > 1.05f ? "  (taxing hard)" : m.squeeze < 0.95f ? "  (taxing lightly)" : ""), dx, cy, 14, m.squeeze > 1.05f ? YELLOW : LIGHTGRAY);
+                cy += 20;
+            }
         }
 
         y = top0;

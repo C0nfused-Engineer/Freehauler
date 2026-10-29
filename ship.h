@@ -82,55 +82,65 @@ const double LIMP_THRUST = 0.15;            // ...and what's left of the main en
 // Running silent: the reactor is held to a fraction of its output, the housekeeping is cut back, nothing charges,
 // and what heat is left is bled off slowly through shuttered radiators
 const double SILENT_REACTOR = 0.20, SILENT_IDLE = 0.5, SILENT_HEAT = 0.25;
-const double PLUME_HEAT   = 3.0;            // megawatts of heat seen in the engines' exhaust for each megawatt they draw
+const double COLD_HEAT    = 0.25;           // running on the bank, a ship gives off this share of what its housekeeping draws
+const double PLUME_HEAT   = 3.0;            // terawatts of heat seen in the engines' exhaust for each terawatt they draw
+const int    REACTOR_STEPS = 16;            // a reactor's efficiency curve is kept at this many steps of load
 const double FIELD_RELAX  = 15.0;           // seconds: a warp field run slower sheds the energy it was carrying this slowly
 const double FIELD_FLOOR  = 0.2;            // the share of a full bubble's energy that the slowest field still holds
 
 // ---------------------------------------------------------------------------
 // What a ship is made of, added up (SpecOf in shipparts.h does the adding).
-// The defaults are the starter ship's. Mass in tonnes, power in megawatts,
-// energy in megajoules, speeds in units a second.
+// The defaults are the starter ship's. Mass in tonnes, power in terawatts,
+// energy in terajoules, speeds in units a second.
 // ---------------------------------------------------------------------------
 struct ShipSpec {
     double dryMass    = 77.1;        // hull and everything fitted (fuel and cargo come on top)
     double thrust     = 2625.0;      // main engines: acceleration at full throttle is THRUST_K times this over the ship's mass
     double turn       = 27500.0;     // manoeuvring thrusters: degrees a second is this over the ship's mass
 
-    double reactorMW  = 200.0;       // the most the reactor puts out
-    double reactorEff = 0.40;        // how much of its fuel's energy comes out as power
-    double fuelMJ     = 2500.0;      // the fuel's specific energy, megajoules a tonne...
+    // The reactor: it makes heat at its burn rate times the fuel's energy, and turns a share of that into power which
+    // depends on how hard it's being run (ReactorEfficiency). It can't be throttled below its floor while it's lit.
+    double reactorBurn = 0.32;       // tonnes of fuel a second, flat out
+    double reactorFloor = 0.03;      // the share of that it burns at the least
+    double reactorRestart = 15.0;    // seconds to light it from cold
+    double reactorCurve[REACTOR_STEPS + 1] = { 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25 };
+                                     // efficiency at each sixteenth of flat out, from nothing
+    double reactorTW  = 6400.0;      // the most the reactor puts out (flat out)...
+    double reactorEff = 0.25;        // ...and its efficiency then
+    double fuelTJ     = 80000.0;      // the fuel's specific energy, terajoules a tonne...
     int    fuelGood   = REF_REACTOR_FUEL;   // ...and which good it is (the starter's reactor is a fission one)
-    double idleMW     = 3.0;         // life support, computers, sensors: always on
-    double engineMW   = 10.0;        // main engines at full thrust
-    double bankMJ     = 600.0;       // capacitor bank
+    double idleTW     = 96.0;         // life support, computers, sensors: always on
+    double engineTW   = 320.0;        // main engines at full thrust
+    double bankTJ     = 19200.0;       // capacitor bank
 
     double hyperSpeed = HYPER_SPEED; // the hyper drive's top speed (0: none fitted)
-    double hyperP0    = 5.0, hyperK = 6.6e-9, hyperN = 3.0;      // its power: P0 + K m (v/c)^N
+    double hyperP0    = 160.0, hyperK = 2.112e-7, hyperN = 3.0;      // its power: P0 + K m (v/c)^N
     double hyperAccel = 120.0;       // how fast it speeds up, c per second
     double hyperMaxMass = 450.0;     // heavier than this and it won't engage
     double warpSpeed  = WARP_SPEED;  // likewise for the warp drive
-    double warpP0     = 15.0, warpK = 6.9e-15, warpN = 2.0;
+    double warpP0     = 480.0, warpK = 2.208e-13, warpN = 2.0;
     double warpAccel  = 3.0e6;
     double warpMaxMass = 450.0;
-    double jumpMJ     = 25.0;        // energy to form the warp bubble, per tonne of ship
-    double driveCapMJ = 8000.0;      // drive capacitor...
+    double jumpTJ     = 800.0;        // energy to form the warp bubble, per tonne of ship
+    double driveCapTJ = 256000.0;      // drive capacitor...
     double capIn      = 0.90, capOut = 0.90;   // ...and how much survives going in, and coming out
 
     double tank       = 50.0;        // tonnes of fuel
     double hold       = 100.0;       // tonnes of cargo
     double laserRate  = 2.0;         // mining laser: tonnes a second (0: none fitted)...
     double laserRange = 300.0;       // ...units from the rock's surface...
-    double laserMW    = 8.0;         // ...and what it draws
+    double laserTW    = 256.0;         // ...and what it draws
     double scoopRate  = 0.0;         // fuel scoop: tonnes of deuterium a second off a star, for a ship that burns it (0: none)
     double skimRate   = 0.25;        // gas skimmer: tonnes of helium-3 a second (0: none)
     // Sensors (sensors.h). Each is how far it reaches as a multiple of the basic set's (0.3: what a bare hull has).
     double scan       = 1.0;         // telescope: identifies ships, and charts the worlds it passes
     double radar      = 1.0;         // radar: finds anything, and gives the ship away while it's on...
-    double radarMW    = 2.0;         // ...and what it draws then
+    double radarTW    = 64.0;         // ...and what it draws then
     double ir         = 1.0;         // infrared array: sees heat, and says nothing
     double tachArea   = 4.0, tachDepth = 2.0;   // tachyon detector: the face it shows a burst (m^2) and its depth (m)...
     double tachEff    = 0.5, tachRes = 12.0;    // ...the share of decays in it that it catches, and how well one count gives a direction (degrees)
     double hullSize   = 1.0;         // how big a target the hull is: its volume against a hauler's
+    double berths     = 0.0;         // passenger cabins: how many people they sleep
 };
 
 // Where the reactor's spare output goes (and, when weapons and shields exist, who goes short first)
@@ -138,14 +148,16 @@ enum PowerMode : uint8_t { POWER_TRAVEL, POWER_COMBAT, POWER_DEFENCE, POWER_SILE
 const char *PowerModeName(uint8_t mode);
 
 struct PowerState {
-    double  bank = 600.0, driveCap = 8000.0;   // megajoules in each capacitor
+    double  bank = 19200.0, driveCap = 256000.0;   // terajoules in each capacitor
     uint8_t mode = POWER_TRAVEL;
     bool    engaged = false;         // the drive was running last step
     bool    warping = false;         // ...and is at warp (the capacitor's charge for the jump is spent)
     float   engines = 1.0f;          // the share of the power they asked for that the engines got last step
     bool    radar = true;            // the radar is switched on (running silent overrides it: see RadarOn)
     float   field = 0.0f;            // at warp: the energy in the bubble, as a share of a full-speed one's (it comes out as tachyons when it goes)
-    float   heat = 4.5f;             // megawatts of heat the ship is giving off (what infrared sees)
+    float   heat = 144.0f;             // terawatts of heat the ship is giving off (what infrared sees)
+    bool    cold = false;            // the reactor has been shut down: the ship is running on its capacitor bank
+    float   restart = 0.0f;          // seconds until a reactor being lit gives power
 };
 
 // ---------------------------------------------------------------------------
@@ -180,6 +192,7 @@ struct Controls {
     bool  toggleDampeners = false;  // pressed (one step only)
     bool  cyclePower = false;       // pressed (one step only): the next power mode
     bool  toggleRadar = false;      // pressed (one step only): radar on / off
+    bool  toggleReactor = false;    // pressed (one step only): shut the reactor down, or light it again
 };
 
 // What the drive is allowed to do this step
@@ -210,14 +223,16 @@ struct LockInfo { DVec3 rel; double radius = 0.0; double speed = 0.0; std::strin
 struct FlightReport {
     DriveInfo drive;
     double burn = 0.0;               // fuel, t/s
-    double load = 0.0;               // megawatts drawn from the reactor (out of spec.reactorMW)
+    double load = 0.0;               // terawatts drawn from the reactor (out of spec.reactorTW)
+    double efficiency = 0.0;         // the share of the heat it made that it turned into power used (less than its curve says, when it's held at its floor)
+    bool   cold = false;             // the drive was asked for with the reactor down
     bool   charging = false;         // clear to warp, but the capacitor hasn't the charge for the jump yet: held at hyper speed
     bool   tooHeavy = false;         // ...or the ship is more than it can move
     bool   starved = false;          // the reactor can't hold the field at the speed asked for: slower than that
     bool   noDrive = false;          // no hyper drive fitted
-    double drivePower = 0.0;         // megawatts the FTL field is taking
-    double collapse = 0.0;           // a warp bubble collapsed this step: the energy that was in it (megajoules)
-    double heat = 0.0;               // megawatts of heat given off
+    double drivePower = 0.0;         // terawatts the FTL field is taking
+    double collapse = 0.0;           // a warp bubble collapsed this step: the energy that was in it (terajoules)
+    double heat = 0.0;               // terawatts of heat given off
 };
 
 inline Vector3 ShipForward(const Ship &s) { return Vector3RotateByQuaternion({ 0, 0, -1 }, s.rot); }
@@ -236,13 +251,19 @@ DriveInfo ComputeDrive(const Ship &ship, const Galaxy &sys, const LoadedSystem &
 void      UpdateShip(Ship &s, const Controls &in, float dt, const DriveInfo &drive, const FlightStats &stats = {});
 // The power an FTL field takes at a speed: P0 + K m (v/c)^N, by the hyper drive's numbers or ('warp') the warp drive's
 double    DrivePower(const ShipSpec &spec, double speed, double mass, bool warp);
-double    DriveSpeedFor(const ShipSpec &spec, double megawatts, double mass, bool warp);   // ...and the speed that much power holds
+double    DriveSpeedFor(const ShipSpec &spec, double terawatts, double mass, bool warp);   // ...and the speed that much power holds
+// The reactor: its efficiency at a load (burn rate as a share of flat out); the power it gives there; the load that gives
+// so much power (1 if it can't); and the fuel it burns, tonnes a second, to give it (never less than its floor)
+double    ReactorEfficiency(const ShipSpec &spec, double load);
+double    ReactorOutput(const ShipSpec &spec, double load);
+double    ReactorLoadFor(const ShipSpec &spec, double terawatts);
+double    ReactorBurnFor(const ShipSpec &spec, double terawatts);
 // Is the radar transmitting? (Switched on, and not running silent.)
 inline bool RadarOn(const ShipSpec &spec, const PowerState &power) { return power.radar && power.mode != POWER_SILENT && spec.radar > 0.0; }
-// The energy in a warp bubble (megajoules): what its collapse lets go. 'field': how hard it was being run (PowerState::field).
-inline double BubbleEnergy(const ShipSpec &spec, double mass, double field) { return spec.jumpMJ * mass * (FIELD_FLOOR + (1.0 - FIELD_FLOOR) * field); }
+// The energy in a warp bubble (terajoules): what its collapse lets go. 'field': how hard it was being run (PowerState::field).
+inline double BubbleEnergy(const ShipSpec &spec, double mass, double field) { return spec.jumpTJ * mass * (FIELD_FLOOR + (1.0 - FIELD_FLOOR) * field); }
 // What the drive capacitor must hold for a jump to warp (what the bubble takes, plus what's lost getting it out)
-inline double JumpCharge(const ShipSpec &spec, double mass) { return spec.jumpMJ * mass / spec.capOut; }
+inline double JumpCharge(const ShipSpec &spec, double mass) { return spec.jumpTJ * mass / spec.capOut; }
 // The speed a throttle setting asks for (u/s). Each notch multiplies it, so most of the throttle's travel is speeds
 // for manoeuvring and the top of it is 0.99 c.
 double    ThrottleSpeed(float throttle);

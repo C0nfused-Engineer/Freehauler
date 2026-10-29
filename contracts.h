@@ -37,6 +37,8 @@ const double BONDED_OVER     = 20000.0;           // haulage with a deposit abov
 void UpdateContracts(World &w);
 // A captain's side, each authoritative step: surveys in progress, deadlines, customs
 void StepContracts(World &w, Captain &c);
+// The people aboard (Player::passengers, steerage) are whoever the captain's contracts say are: this keeps them so
+void SyncPeople(Captain &c);
 
 // Asking for boards. A station's comes back over the comms; a faction's list is public.
 //   (RequestContracts is in comms.h)

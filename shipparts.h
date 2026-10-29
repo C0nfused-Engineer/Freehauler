@@ -26,6 +26,7 @@ enum class PartType : uint8_t {
     Radar,              // active: finds anything in reach, and anyone can hear it
     IrArray,            // passive: sees heat, so a ship working hard shows from far off and a cold one hardly at all
     TachyonDetector,    // catches the burst a warp bubble gives off when it collapses, and the direction it came from
+    Cabins,             // berths for passengers (who pay) and for refugees (who'd otherwise ride in the hold)
     Count
 };
 const int PART_SIZES  = 6;          // 1 .. 6
@@ -40,14 +41,14 @@ enum ReactorFuel : uint8_t { BURNS_REACTOR_FUEL, BURNS_DEUTERIUM, BURNS_HELIUM3,
 struct Part {
     PartType type = PartType::Hold;
     uint8_t  size = 1, grade = 0;
-    uint8_t  variant = 0;           // reactors: a ReactorFuel
+    uint8_t  variant = 0;           // which model of the part it is (partsdata.h): for reactors, the first three are a ReactorFuel
     int16_t  maker = NO_FACTION;    // the conglomerate whose line it is, if it's one of their specialities
     bool operator==(const Part &o) const { return type == o.type && size == o.size && grade == o.grade && variant == o.variant && maker == o.maker; }
 };
 
 enum { HULL_COURIER, HULL_HAULER, HULL_PROSPECTOR, HULL_CUTTER, HULL_FREIGHTER, HULL_BULK, HULL_COUNT };
 struct HullDef {
-    const char *name, *blurb;
+    const char *name = "", *blurb = "";
     double volume;                  // cubic metres inside
     int    hardpoints;
     double mass;                    // tonnes, bare
@@ -64,7 +65,7 @@ struct ShipBuild {
 // What one part is, in numbers
 struct PartInfo {
     std::string name;               // "Improved fusion reactor, size 2"
-    std::string does;               // "230 MW at 44% from Fuel"
+    std::string does;               // "230 TW at 44% from Fuel"
     double mass = 0, volume = 0, cost = 0;
     bool   external = false;        // takes a hardpoint
     int    material = -1;           // the good a yard builds it from...
@@ -77,6 +78,8 @@ const char    *GradeName(int grade);
 bool           IsExternal(PartType t);
 PartInfo       Describe(const Part &p, const FactionSet *fs = nullptr);
 int            FuelGoodOf(int reactorFuel);
+// What a part of a type does at size 1: the thing it's sized by (a reactor's terawatts, a drive's heaviest ship, a bay's tonnes...)
+double         PartRating(PartType type, int grade = 0, int variant = 0);
 
 // The hull as built: its room and hardpoints with the stretches, and what's used of them
 double BuildVolume(const ShipBuild &b);

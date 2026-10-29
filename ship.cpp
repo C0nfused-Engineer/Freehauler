@@ -14,11 +14,42 @@ double DrivePower(const ShipSpec &spec, double speed, double mass, bool warp)
                 : spec.hyperP0 + spec.hyperK * mass * pow(beta, spec.hyperN);
 }
 
-double DriveSpeedFor(const ShipSpec &spec, double megawatts, double mass, bool warp)
+double DriveSpeedFor(const ShipSpec &spec, double terawatts, double mass, bool warp)
 {
     double p0 = warp ? spec.warpP0 : spec.hyperP0, k = warp ? spec.warpK : spec.hyperK, n = warp ? spec.warpN : spec.hyperN;
-    if (megawatts <= p0 || k <= 0.0 || mass <= 0.0) return 0.0;
-    return LIGHT_SEC_U * pow((megawatts - p0) / (k * mass), 1.0 / n);
+    if (terawatts <= p0 || k <= 0.0 || mass <= 0.0) return 0.0;
+    return LIGHT_SEC_U * pow((terawatts - p0) / (k * mass), 1.0 / n);
+}
+
+double ReactorEfficiency(const ShipSpec &spec, double load)
+{
+    double x = fmin(1.0, fmax(0.0, load)) * REACTOR_STEPS;
+    int i = (int)x;
+    if (i >= REACTOR_STEPS) return spec.reactorCurve[REACTOR_STEPS];
+    return spec.reactorCurve[i] + (spec.reactorCurve[i + 1] - spec.reactorCurve[i]) * (x - i);
+}
+
+double ReactorOutput(const ShipSpec &spec, double load)
+{
+    load = fmin(1.0, fmax(0.0, load));
+    return load * spec.reactorBurn * spec.fuelTJ * ReactorEfficiency(spec, load);
+}
+
+double ReactorLoadFor(const ShipSpec &spec, double terawatts)
+{
+    if (terawatts <= 0.0) return 0.0;
+    if (terawatts >= ReactorOutput(spec, 1.0)) return 1.0;
+    double lo = 0.0, hi = 1.0;                                     // (more fuel is always more power: partsdata.cpp sees to that)
+    for (int i = 0; i < 30; i++) {
+        double mid = 0.5 * (lo + hi);
+        if (ReactorOutput(spec, mid) < terawatts) lo = mid; else hi = mid;
+    }
+    return hi;
+}
+
+double ReactorBurnFor(const ShipSpec &spec, double terawatts)
+{
+    return spec.reactorBurn * fmax(spec.reactorFloor, ReactorLoadFor(spec, terawatts));
 }
 
 double ThrottleSpeed(float throttle)
@@ -45,10 +76,17 @@ FlightReport FlyShip(Ship &ship, const ShipSpec &spec, PowerState &power, double
     const bool reactor = fuel > 0.0, wasWarping = power.warping;
     if (in.cyclePower) power.mode = (uint8_t)((power.mode + 1) % POWER_MODES);
     if (in.toggleRadar) power.radar = !power.radar;
+    // The reactor can be shut down, and the ship run on its bank: nothing to see, and nothing for the drive. Lighting
+    // it again takes a while; and it's lit again whether the pilot likes it or not when the bank runs dry.
+    if (in.toggleReactor) { power.cold = !power.cold; power.restart = power.cold ? 0.0f : (float)spec.reactorRestart; }
+    if (power.cold && power.bank <= 0.0) { power.cold = false; power.restart = (float)spec.reactorRestart; }
+    const bool   lighting = !power.cold && power.restart > 0.0f;
+    if (lighting) power.restart = fmaxf(0.0f, power.restart - dt);
+    const bool   lit = reactor && !power.cold && !lighting;
     // Running silent, the reactor is held right down; and the radar, when it's on, is one more thing to keep fed
     const bool   silent = power.mode == POWER_SILENT;
-    const double reactorMW = spec.reactorMW * (silent ? SILENT_REACTOR : 1.0);
-    const double idleMW = spec.idleMW * (silent ? SILENT_IDLE : 1.0) + (RadarOn(spec, power) ? spec.radarMW : 0.0);
+    const double reactorTW = lit ? spec.reactorTW * (silent ? SILENT_REACTOR : 1.0) : 0.0;
+    const double idleTW = spec.idleTW * (silent ? SILENT_IDLE : 1.0) + (RadarOn(spec, power) ? spec.radarTW : 0.0);
 
     r.drive = ComputeDrive(ship, sys, loaded, lock, reactor, spec.hyperSpeed, spec.warpSpeed);
 
@@ -57,9 +95,10 @@ FlightReport FlyShip(Ship &ship, const ShipSpec &spec, PowerState &power, double
     // system's field, forming a warp bubble takes the capacitor's charge, all at once; without it (or
     // without a warp drive) the drive holds at hyper speed. Then: no faster than the pilot has set it,
     // and no faster than the reactor can hold the field.
-    const double spare = reactorMW - idleMW;
+    const double spare = reactorTW - idleTW;
     double set = 0.0;                                              // the speed the pilot has the drive set to
     if (in.hyper && spec.hyperSpeed <= 0.0) { in.hyper = false; r.noDrive = true; }
+    if (in.hyper && reactor && !lit) { in.hyper = false; r.cold = true; }          // (a field is held on reactor power: there isn't any)
     if (in.hyper && reactor) {
         if (mass > spec.hyperMaxMass) { in.hyper = false; r.tooHeavy = true; }
         else {
@@ -89,14 +128,27 @@ FlightReport FlyShip(Ship &ship, const ShipSpec &spec, PowerState &power, double
     power.engaged = in.hyper;
 
     UpdateShip(ship, in, dt, r.drive, ShipStats(spec, power, mass, reactor));
-    if (!reactor) { power.engines = 1.0f; power.heat = 0.5f; r.heat = 0.5; return r; }      // (the emergency cell isn't the reactor's business)
+    if (!reactor) { power.engines = 1.0f; power.heat = 16.0f; r.heat = 16.0; return r; }      // (the emergency cell isn't the reactor's business)
+    if (!lit) {
+        // On the bank: the housekeeping, the engines and the laser all come out of it. (Being lit, the reactor burns at
+        // its floor and gives nothing yet.)
+        double engine = spec.engineTW * ship.thrustUse, loads = engine + (laser ? spec.laserTW : 0.0), want = (idleTW + loads) * dt;
+        double got = fmin(power.bank, want);
+        power.bank -= got;
+        power.engines = want > 0.0 ? (float)(got / want) : 1.0f;
+        r.burn = lighting ? spec.reactorBurn * spec.reactorFloor : 0.0;
+        r.heat = (COLD_HEAT * idleTW + r.burn * spec.fuelTJ) * (silent ? SILENT_HEAT : 1.0) + PLUME_HEAT * engine * power.engines;
+        power.heat = (float)r.heat;
+        fuel = fmax(0.0, fuel - r.burn * dt);
+        return r;
+    }
 
     // What everything drew this step, and where it came from
     double speed  = Vector3Length(ship.vel);
     double drive  = in.hyper ? DrivePower(spec, speed, mass, power.warping) : 0.0;
-    double engine = in.hyper ? 0.0 : spec.engineMW * ship.thrustUse;
-    double bankLoads = engine + (laser ? spec.laserMW : 0.0);
-    double out = reactorMW, used = fmin(out, idleMW);
+    double engine = in.hyper ? 0.0 : spec.engineTW * ship.thrustUse;
+    double bankLoads = engine + (laser ? spec.laserTW : 0.0);
+    double out = reactorTW, used = fmin(out, idleTW);
     out -= used;
     double toDrive = fmin(drive, out);                             // the drive's field is held on reactor power
     out -= toDrive; used += toDrive;
@@ -110,7 +162,7 @@ FlightReport FlyShip(Ship &ship, const ShipSpec &spec, PowerState &power, double
     // Anything left over recharges the capacitors, split by the power mode (a full one's share goes to the
     // other). Some of what goes into the drive capacitor is lost on the way in.
     double share = power.mode == POWER_TRAVEL ? 0.75 : 0.25;
-    double roomD = fmax(0.0, spec.driveCapMJ - power.driveCap) / spec.capIn, roomB = fmax(0.0, spec.bankMJ - power.bank), e = silent ? 0.0 : out * dt;
+    double roomD = fmax(0.0, spec.driveCapTJ - power.driveCap) / spec.capIn, roomB = fmax(0.0, spec.bankTJ - power.bank), e = silent ? 0.0 : out * dt;
     double d = fmin(roomD, e * share), b = fmin(roomB, e * (1.0 - share));
     double left = e - d - b;
     double d2 = fmin(roomD - d, left); d += d2; left -= d2;
@@ -119,9 +171,13 @@ FlightReport FlyShip(Ship &ship, const ShipSpec &spec, PowerState &power, double
     used += (d + b) / dt;
 
     r.load = used;
-    r.burn = used / (spec.reactorEff * spec.fuelMJ);
-    // Heat: what the reactor made and couldn't turn into power, and the engines' exhaust
-    r.heat = used * (1.0 - spec.reactorEff) / spec.reactorEff * (silent ? SILENT_HEAT : 1.0) + PLUME_HEAT * engine * power.engines;
+    // The fuel that takes: the burn rate that gives so much power, or the reactor's floor if that's more (what it
+    // makes then and nothing wants is dumped). Heat: all the reactor made and didn't turn into power that was
+    // used; and the engines' exhaust.
+    r.burn = ReactorBurnFor(spec, used);
+    double thermal = r.burn * spec.fuelTJ;
+    r.efficiency = thermal > 0.0 ? used / thermal : 0.0;
+    r.heat = fmax(0.0, thermal - used) * (silent ? SILENT_HEAT : 1.0) + PLUME_HEAT * engine * power.engines;
     power.heat = (float)r.heat;
     fuel = fmax(0.0, fuel - r.burn * dt);
     return r;

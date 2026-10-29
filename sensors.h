@@ -49,13 +49,13 @@
 // drops out hundreds of AU beyond the edge.
 // ---------------------------------------------------------------------------
 const double TACH_ETA      = 0.10;          // the share of a collapsing bubble's energy that comes out as tachyons
-const double TACH_EPS_J    = 7.0e-30;       // joules to each short-wave tachyon (so a burst is its energy over this many)
-const double TACH_E0_MJ    = 2500.0;        // a small ship's bubble (100 t at full speed)...
+const double TACH_EPS_J    = 2.24e-22;       // joules to each short-wave tachyon (so a burst is its energy over this many)
+const double TACH_E0_TJ    = 80000.0;        // a small ship's bubble (100 t at full speed)...
 const double TACH_L0_AU    = 40.0;          // ...whose tachyons decay over this distance...
 const double TACH_L_EXP    = 0.5;           // ...and a burst of other energy's over this power of the ratio
 const int    TACH_MIN_SHIP = 3;             // counts a ship's detector wants before it will call it a burst
 const double TACH_NOISE_SHIP = 0.3;         // stray counts in the same instant, on average (they blur the range)
-const double TACH_GUESS_LO = 1000.0, TACH_GUESS_HI = 50000.0;   // the bursts a range estimate allows for, megajoules (a courier .. a bulk carrier)
+const double TACH_GUESS_LO = 32000.0, TACH_GUESS_HI = 1600000.0;   // the bursts a range estimate allows for, terajoules (a courier .. a bulk carrier)
 const double MARK_TIME     = 120.0;         // seconds a bearing stays on the scope
 // What a state's outposts carry (and the single all-round detector a port has, which gives no direction)
 const double OUTPOST_AREA = 1000.0, OUTPOST_DEPTH = 30.0, OUTPOST_EFF = 0.8, OUTPOST_RES = 3.0, OUTPOST_NOISE = 2.0;
@@ -69,8 +69,8 @@ const double NET_RELAY     = 4.0;           // seconds for each outpost's report
 // hauler going about its business.
 // ---------------------------------------------------------------------------
 const double RADAR_AU      = 1.5;           // radar: echoes fall with the fourth power of distance
-const double IR_AU         = 1.0;           // infrared: against HEAT_REF megawatts of heat (it falls with the square)
-const double HEAT_REF      = 10.0;
+const double IR_AU         = 1.0;           // infrared: against HEAT_REF terawatts of heat (it falls with the square)
+const double HEAT_REF      = 1700.0;
 const double SCOPE_AU      = 0.25;          // telescope: against a hauler-sized hull (further, in proportion, for a longer one)
 const double RWR_REACH     = 3.0;           // a radar is heard this many times further off than it can see
 const double CLASSIFY      = 3.0;           // radar or infrared makes out what kind of ship it is at this many times the signal that finds it
@@ -120,7 +120,7 @@ bool Triangulate(const std::vector<TachyonDetection> &d, DVec3 &fix, double &err
 // ---------------------------------------------------------------------------
 struct Signature {
     double size = 1.0;                      // hull volume against a hauler's
-    double heat = 4.5;                      // megawatts
+    double heat = 144.0;                      // terawatts
     bool   radar = false;                   // its own radar is transmitting...
     double radarPower = 1.0;                // ...this strongly (its radar's reach, as a multiple of the basic set's)
 };
